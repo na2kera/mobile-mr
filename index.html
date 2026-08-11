@@ -1,13 +1,72 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>mobile-mr</title>
+    <title>Mobile MR Demos</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        background: #14161a;
+        color: #e8eaed;
+        font-family: system-ui, -apple-system, sans-serif;
+        padding: 24px 16px;
+        box-sizing: border-box;
+      }
+      h1 {
+        font-size: 1.3rem;
+        margin: 0 0 4px;
+      }
+      p.sub {
+        margin: 0 0 24px;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 12px;
+        max-width: 480px;
+      }
+      a.demo {
+        display: block;
+        padding: 16px;
+        border: 1px solid #3c4043;
+        border-radius: 12px;
+        text-decoration: none;
+        color: inherit;
+        background: #1d2024;
+      }
+      a.demo:active {
+        background: #2a2e33;
+      }
+      .name {
+        font-weight: 600;
+      }
+      .desc {
+        font-size: 0.8rem;
+        color: #9aa0a6;
+        margin-top: 4px;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <h1>Mobile MR Demos</h1>
+    <p class="sub">スマホでデモを選んで VR ゴーグルへ</p>
+    <ul>
+      <li>
+        <a class="demo" href="/demos/01-stereo-box/">
+          <div class="name">01. Stereo Box</div>
+          <div class="desc">Phase 1: 左右2眼レンダリング + ジャイロ頭追従</div>
+        </a>
+      </li>
+    </ul>
   </body>
 </html>
