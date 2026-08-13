@@ -93,6 +93,25 @@
           display: flex;
         }
       }
+      /* 全画面への（再）入場ボタン: 初回の許可ダイアログでタップの効力が切れて
+         全画面化が拒否されたとき・上端スワイプで全画面が解除されたときに表示する */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
       /* デバッグ用 HUD（パラメータと全画面化の成否・状態を表示。実機では console が見えないため）
          rotate-hint より上に重ね、縦持ちのままでも読めるようにする。
          全画面時は画面が物理端まで広がるため safe-area を加味する */
@@ -121,6 +140,7 @@
       <a href="/">← デモ一覧へ戻る</a>
     </div>
     <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
     <div id="hud"></div>
     <script type="module" src="./main.ts"></script>
   </body>

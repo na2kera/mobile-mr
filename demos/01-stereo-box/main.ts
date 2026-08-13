@@ -79,9 +79,9 @@ const isTouchDevice = matchMedia('(pointer: coarse)').matches
 
 function startControls() {
   if (isTouchDevice) {
-    // 注意: DeviceOrientationControls はコンストラクタ内で requestPermission() を
-    // 呼ぶため、iOS ではユーザージェスチャー（このタップ）内で生成する必要がある。
-    // 許可結果の Promise はライブラリ内で握りつぶされるため成否は取得できない。
+    // DeviceOrientationControls はコンストラクタ内でも requestPermission() を呼ぶが、
+    // 開始フロー側で先に許可を取ってから生成するため、ここではダイアログなしで即解決する
+    // （許可結果の Promise はライブラリ内で握りつぶされるため、成否は開始フロー側で自前管理する）
     controls = new DeviceOrientationControls(camera)
   } else {
     const orbit = new OrbitControls(camera, renderer.domElement)
@@ -113,10 +113,11 @@ function enterFullscreen(onStatus: (status: string) => void) {
 // ---- デバッグ用 HUD（実機では console が見えないため状態をここに出す） ----
 // 追記ではなく毎回描き直すことで、イベントの繰り返しで行が増え続けないようにする
 const hud = document.querySelector<HTMLDivElement>('#hud')!
-const hudState = { base: '', fsResult: '', fsChange: '' }
+const hudState = { base: '', sensor: '', fsResult: '', fsChange: '' }
 function renderHud() {
   hud.textContent = [
     hudState.base,
+    hudState.sensor && `sensor=${hudState.sensor}`,
     hudState.fsResult && `fs=${hudState.fsResult}`,
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
   ]
@@ -124,25 +125,73 @@ function renderHud() {
     .join('\n')
 }
 
-// ---- 開始フロー（センサー許可・全画面化はタップ起点必須） ----
+// ---- 開始フロー ----
+// iOS の制約（実機で確認済み）: センサー許可と全画面化はどちらもタップ起点が
+// 必須だが、全画面遷移中は許可ダイアログが表示されず、全画面解除まで繰り延べ
+// られる。同一タップで両方を撃つと初回訪問では頭追従が死んだままになるため、
+// 「先に許可を要求 → 結果を待ってから全画面化」の順に直列化する。
+// 許可ダイアログの操作でタップの効力（transient activation）が切れて全画面化
+// が拒否された場合は、#fs-button を出して再タップしてもらう。
+const fsButton = document.querySelector<HTMLButtonElement>('#fs-button')!
+
+function tryEnterFullscreen() {
+  fsButton.hidden = true
+  enterFullscreen((status) => {
+    hudState.fsResult = status
+    renderHud()
+    if (status !== 'ok' && status !== 'unsupported') fsButton.hidden = false
+  })
+}
+
+fsButton.addEventListener('click', tryEnterFullscreen)
+
 document.querySelector<HTMLButtonElement>('#start-button')!.addEventListener('click', () => {
-  startControls()
   document.body.classList.add('started')
   hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? 'gyro' : 'orbit'}`
   renderHud()
-  // PC はデバッグ用途なので全画面にしない（スマホのみ）
-  if (isTouchDevice) {
-    enterFullscreen((status) => {
-      hudState.fsResult = status
+
+  // PC はデバッグ用途なので全画面にせず OrbitControls のみ
+  if (!isTouchDevice) {
+    startControls()
+    return
+  }
+
+  const doe = DeviceOrientationEvent as unknown as {
+    requestPermission?: () => Promise<'granted' | 'denied'>
+  }
+  if (!doe.requestPermission) {
+    // Android 等、許可ダイアログが無い環境は同一タップで両方いける
+    startControls()
+    tryEnterFullscreen()
+    return
+  }
+
+  // iOS: このタップ起点で許可を要求し、結果を待ってから全画面化する
+  doe
+    .requestPermission()
+    .then((state) => {
+      hudState.sensor = state
+      renderHud()
+      if (state !== 'granted') return // 拒否: 頭追従が無いので全画面にもしない
+      startControls()
+      // 既に許可済みならタップの効力が残っていて 1 タップで全画面まで行ける。
+      // いまダイアログが出た場合は効力切れで拒否され、fs-button 経由の再タップに落ちる
+      tryEnterFullscreen()
+    })
+    .catch((e: unknown) => {
+      hudState.sensor = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
       renderHud()
     })
-  }
 })
 
-// 全画面の開始・解除（上端スワイプ等）を HUD で観測できるようにする
+// 全画面の開始・解除（上端スワイプ等）を HUD で観測し、解除時は再入ボタンを出す
 document.addEventListener('fullscreenchange', () => {
-  hudState.fsChange = document.fullscreenElement ? 'enter' : 'exit'
+  const inFullscreen = Boolean(document.fullscreenElement)
+  hudState.fsChange = inFullscreen ? 'enter' : 'exit'
   renderHud()
+  if (isTouchDevice && document.body.classList.contains('started')) {
+    fsButton.hidden = inFullscreen
+  }
 })
 
 // ---- ループ ----
