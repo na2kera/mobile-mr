@@ -93,12 +93,14 @@
           display: flex;
         }
       }
-      /* デバッグ用 HUD（パラメータと全画面化の成否・状態を表示。実機では console が見えないため） */
+      /* デバッグ用 HUD（パラメータと全画面化の成否・状態を表示。実機では console が見えないため）
+         rotate-hint より上に重ね、縦持ちのままでも読めるようにする。
+         全画面時は画面が物理端まで広がるため safe-area を加味する */
       #hud {
         position: fixed;
-        left: 8px;
-        bottom: 8px;
-        z-index: 4;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
         font-size: 10px;
         color: rgba(232, 234, 237, 0.5);
         pointer-events: none;
@@ -111,8 +113,8 @@
     <div id="start-overlay">
       <h1>01. Stereo Box</h1>
       <p>
-        開始するとセンサーの許可を求めます。許可後、スマホを横向きにして
-        VR ゴーグルにセットしてください。
+        開始するとセンサーの許可を求め、全画面表示に切り替わります。
+        許可後、スマホを横向きにして VR ゴーグルにセットしてください。
       </p>
       <button id="start-button" type="button">開始</button>
       <p>調整: URL に ?fov=70&amp;eyeSep=0.064 を付けると変更できます</p>
