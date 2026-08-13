@@ -94,47 +94,55 @@ function startControls() {
 }
 
 // ---- 全画面化 ----
-// iPhone Safari も iOS 17.2+ なら任意要素の requestFullscreen() が使える
-// （それ未満は旧プレフィックス含め未定義）。センサー許可と同様に
-// ユーザージェスチャー内で呼ぶ必要がある。非対応・拒否時は従来どおり
-// 100dvh の全画面風表示のまま続行する。
-// 成否は HUD に表示する（iPhone 実機では console が見えないため）。
+// iPhone Safari は iOS 17.2+ で任意要素の requestFullscreen() に対応
+// （それ未満は旧プレフィックス版も含め未定義なので、フォールバック分岐は持たない）。
+// センサー許可と同様にユーザージェスチャー内で呼ぶ必要がある。
+// 非対応・拒否時は従来どおり 100dvh の全画面風表示のまま続行する。
 function enterFullscreen(onStatus: (status: string) => void) {
-  const el = document.documentElement as HTMLElement & {
-    webkitRequestFullscreen?: () => Promise<void>
-  }
-  const request = el.requestFullscreen ?? el.webkitRequestFullscreen
-  if (!request) {
+  const el = document.documentElement
+  if (!el.requestFullscreen) {
     onStatus('unsupported')
     return
   }
-  try {
-    request
-      .call(el)
-      ?.then(() => onStatus('ok'))
-      .catch((e: Error) => onStatus(`${e.name}: ${e.message}`))
-  } catch (e) {
-    onStatus(String(e))
-  }
+  el.requestFullscreen().then(
+    () => onStatus('ok'),
+    (e) => onStatus(e instanceof Error ? `${e.name}: ${e.message}` : String(e)),
+  )
+}
+
+// ---- デバッグ用 HUD（実機では console が見えないため状態をここに出す） ----
+// 追記ではなく毎回描き直すことで、イベントの繰り返しで行が増え続けないようにする
+const hud = document.querySelector<HTMLDivElement>('#hud')!
+const hudState = { base: '', fsResult: '', fsChange: '' }
+function renderHud() {
+  hud.textContent = [
+    hudState.base,
+    hudState.fsResult && `fs=${hudState.fsResult}`,
+    hudState.fsChange && `fs-change: ${hudState.fsChange}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 // ---- 開始フロー（センサー許可・全画面化はタップ起点必須） ----
-const hud = document.querySelector<HTMLDivElement>('#hud')!
 document.querySelector<HTMLButtonElement>('#start-button')!.addEventListener('click', () => {
   startControls()
   document.body.classList.add('started')
-  hud.textContent = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? 'gyro' : 'orbit'}`
+  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? 'gyro' : 'orbit'}`
+  renderHud()
   // PC はデバッグ用途なので全画面にしない（スマホのみ）
   if (isTouchDevice) {
     enterFullscreen((status) => {
-      hud.textContent += `\nfs=${status}`
+      hudState.fsResult = status
+      renderHud()
     })
   }
 })
 
 // 全画面の開始・解除（上端スワイプ等）を HUD で観測できるようにする
 document.addEventListener('fullscreenchange', () => {
-  hud.textContent += `\nfs-change: ${document.fullscreenElement ? 'enter' : 'exit'}`
+  hudState.fsChange = document.fullscreenElement ? 'enter' : 'exit'
+  renderHud()
 })
 
 // ---- ループ ----
