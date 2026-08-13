@@ -35,3 +35,10 @@
 - **関連**: 詳細 → [pain-points/01-device-orientation-controls.md](pain-points/01-device-orientation-controls.md) / `demos/01-stereo-box/main.ts` の `startControls()`
 
 <!-- 新しい痛点はここより下に追記 -->
+
+## [2026-08-13] Phase 1 / 01-stereo-box: ブラウザ UI（アドレスバー/タブバー）が VR 表示に被り、消す手段が限定的
+
+- **何が苦しかったか**: iOS Safari では `100dvh` + `touch-action: none` で「全画面風」にしてもアドレスバー・タブバーは消えず、VR ゴーグル装着時に視界へ食い込む。任意要素の Fullscreen API（`requestFullscreen()`）が iPhone で使えるのは **iOS 17.2 以降**で、それ未満は PWA（ホーム画面追加）しか完全な解がない。さらにセンサー許可と同じく「ユーザージェスチャー内で呼ぶ」制約があるため、開始ボタンの 1 タップにセンサー許可 + 全画面化（将来はカメラ許可・Wake Lock も）が集中する。`screen.orientation.lock()` は iOS Safari で使えないため横向き固定もできず、案内 UI 頼みのまま
+- **どう対処したか**: 開始タップ内で `document.documentElement.requestFullscreen()` を呼び、非対応・拒否時は従来の `100dvh` 表示のまま続行するフォールバックを実装。実機では console が見えず「何も起きない」の原因切り分けができないため、全画面化の成否・解除イベントを HUD に表示するデバッグ導線も追加した。上端スワイプで全画面解除された後の再全画面化の導線は未対応（未解決）
+- **SDK ならどう解決するか（案）**: 「開始ジェスチャーは 1 回しか使えない希少資源」を SDK の中心概念にする。`mr.start()` が 1 タップの中でセンサー許可 → 全画面化 →（必要なら）カメラ許可 → Wake Lock を正しい順序で束ね、それぞれの成否を構造化して返す。`fullscreenchange` による解除検知と再入導線も SDK 側で提供する
+- **関連**: `demos/01-stereo-box/main.ts` の `enterFullscreen()` / iPhone の Fullscreen API 対応は iOS 17.2 から: https://bugs.webkit.org/show_bug.cgi?id=267743

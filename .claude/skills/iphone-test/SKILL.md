@@ -22,7 +22,7 @@ description: iPhone 実機（iOS Safari）でデモを確認するための手�
 - **センサー許可**: `DeviceOrientationEvent.requestPermission()` / `DeviceMotionEvent.requestPermission()` は**タップ等のユーザージェスチャー内**でしか呼べない。ページロード時に呼ぶと失敗する
 - **HTTPS**: `getUserMedia()`・センサー系は HTTP だと undefined / 拒否になる。`http://` で開いていないか確認
 - **自己署名証明書**: basic-ssl 利用時は iPhone 側で「詳細を表示 → この Web サイトを閲覧」で警告を突破する必要がある
-- **フルスクリーン**: iOS Safari は `requestFullscreen()` 非対応（iPad 除く）。アドレスバー最小化・スクロール抑止（`touch-action: none` 等）で代替する
+- **フルスクリーン**: 任意要素の `requestFullscreen()` は iPhone では **iOS 17.2 以降**で対応（それ未満は非対応）。ユーザージェスチャー内で呼ぶこと。上端からのスワイプで解除される。非対応環境向けには `100dvh` + スクロール抑止（`touch-action: none` 等）でフォールバックする
 - **画面回転ロック**: `screen.orientation.lock()` は iOS Safari 非対応。「横向きにしてください」の案内 UI で代替する
 - **スリープ**: 長時間のデモでは Wake Lock API（`navigator.wakeLock`）を検討（iOS 16.4+ で対応）
 - **console が見えない**: 実機のエラーは Mac の Safari → 開発メニューから iPhone を接続して Web インスペクタで確認する（USB 接続 + iPhone 側で「Web インスペクタ」を有効化）

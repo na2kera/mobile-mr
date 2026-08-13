@@ -93,12 +93,48 @@ function startControls() {
   }
 }
 
-// ---- 開始フロー（センサー許可はタップ起点必須） ----
+// ---- 全画面化 ----
+// iPhone Safari も iOS 17.2+ なら任意要素の requestFullscreen() が使える
+// （それ未満は旧プレフィックス含め未定義）。センサー許可と同様に
+// ユーザージェスチャー内で呼ぶ必要がある。非対応・拒否時は従来どおり
+// 100dvh の全画面風表示のまま続行する。
+// 成否は HUD に表示する（iPhone 実機では console が見えないため）。
+function enterFullscreen(onStatus: (status: string) => void) {
+  const el = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void>
+  }
+  const request = el.requestFullscreen ?? el.webkitRequestFullscreen
+  if (!request) {
+    onStatus('unsupported')
+    return
+  }
+  try {
+    request
+      .call(el)
+      ?.then(() => onStatus('ok'))
+      .catch((e: Error) => onStatus(`${e.name}: ${e.message}`))
+  } catch (e) {
+    onStatus(String(e))
+  }
+}
+
+// ---- 開始フロー（センサー許可・全画面化はタップ起点必須） ----
 const hud = document.querySelector<HTMLDivElement>('#hud')!
 document.querySelector<HTMLButtonElement>('#start-button')!.addEventListener('click', () => {
   startControls()
   document.body.classList.add('started')
   hud.textContent = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? 'gyro' : 'orbit'}`
+  // PC はデバッグ用途なので全画面にしない（スマホのみ）
+  if (isTouchDevice) {
+    enterFullscreen((status) => {
+      hud.textContent += `\nfs=${status}`
+    })
+  }
+})
+
+// 全画面の開始・解除（上端スワイプ等）を HUD で観測できるようにする
+document.addEventListener('fullscreenchange', () => {
+  hud.textContent += `\nfs-change: ${document.fullscreenElement ? 'enter' : 'exit'}`
 })
 
 // ---- ループ ----
