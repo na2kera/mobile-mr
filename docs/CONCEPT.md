@@ -325,6 +325,16 @@ Mobile MR SDK
 | `@mobile-mr/network` | Room / Player / Transform Sync / State Sync |
 | `@mobile-mr/three` | Three.js Adapter |
 
+`@mobile-mr/core` の Session が機種差を吸収する。使う側は iPhone / Android を分岐しなくてよい。センサー許可・全画面化の順序や、1タップでは特権操作を完結できないこと（許可ダイアログでジェスチャーの効力が切れる等）は SDK 側の責務とする。
+
+使う側が知る必要があるのは次の体験だけにする。
+
+- 開始はユーザージェスチャー（ボタンのタップ）の中で呼ぶ
+- 初回は 2 タップ目が必要なことがある
+- 許可は拒否されうる
+
+詳細・根拠は [PAIN_POINTS.md](PAIN_POINTS.md) の開始フロー関連。
+
 ## 7. 最終的なAPIイメージ
 
 ```ts
