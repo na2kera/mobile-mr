@@ -351,23 +351,27 @@ startButton.addEventListener("click", () => {
     return;
   }
 
-  // iOS: このタップ起点でセンサー許可 → カメラ許可 → 全画面化を直列に進める
+  // iOS: このタップ起点でセンサー許可 → カメラ許可 → 全画面化を直列に進める。
+  // センサー拒否（過去の拒否を Safari が記憶している場合はダイアログなしで即 denied）
+  // でもカメラは独立した許可なので、パススルーは諦めずに続行する。
+  // 頭追従と全画面化だけを諦める
   doe
     .requestPermission()
     .then(async (state) => {
       hudState.sensor = state;
       renderHud();
-      if (state !== "granted") return; // 拒否: 頭追従が無いので先へ進まない
-      startControls();
+      if (state === "granted") startControls();
       await startCameraWithHud();
       // 両方許可済みのリピーターならタップの効力が残っていて 1 タップで全画面まで
       // 行ける。ダイアログが出た場合は効力切れで拒否され、fs-button の再タップに落ちる
-      tryEnterFullscreen();
+      if (state === "granted") tryEnterFullscreen();
     })
-    .catch((e: unknown) => {
+    .catch(async (e: unknown) => {
       hudState.sensor =
         e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       renderHud();
+      // requestPermission 自体の失敗でもカメラは試す（方針は上と同じ）
+      await startCameraWithHud();
     });
 });
 
