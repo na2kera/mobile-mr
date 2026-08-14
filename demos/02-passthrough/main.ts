@@ -156,11 +156,22 @@ async function openBackCameraStream(
   if (!ultra) return stream;
   // iOS はカメラの同時オープンを嫌うので、開き直す前に既存トラックを止める
   stream.getTracks().forEach((t) => t.stop());
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { deviceId: { exact: ultra.deviceId }, ...camSize },
-    audio: false,
-  });
-  onProgress("ultra-ok");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: ultra.deviceId }, ...camSize },
+      audio: false,
+    });
+    onProgress("ultra-ok");
+  } catch {
+    // 超広角の開き直しが失敗することがある（stop 直後でハードの解放が間に合わず
+    // NotReadableError 等）。直前まで映っていた標準カメラを開き直して続行する
+    // （stop 済みトラックは再開できないため getUserMedia からやり直す）
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, ...camSize },
+      audio: false,
+    });
+    onProgress("ultra-fail-fallback");
+  }
   return stream;
 }
 
