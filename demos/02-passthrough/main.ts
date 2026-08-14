@@ -4,9 +4,16 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { DeviceOrientationControls } from "three-stdlib";
 
 // ---- ゴーグル調整パラメータ（URL クエリで実機合わせ込み） ----
+// 実機で手打ちするパラメータなので、打ち間違い（NaN）や空文字（Number("") === 0）を
+// 既定値に落とす。0 は camZoom の除算で Infinity になる等、全パラメータで不正値のため
+// 「正の有限数」だけを受け付ける
 const params = new URLSearchParams(location.search);
-const FOV = Number(params.get("fov") ?? 70);
-const EYE_SEP = Number(params.get("eyeSep") ?? 0.064); // 人間の平均瞳孔間距離 ≈ 64mm
+function numParam(name: string, fallback: number): number {
+  const v = Number(params.get(name) ?? NaN);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+const FOV = numParam("fov", 70);
+const EYE_SEP = numParam("eyeSep", 0.064); // 人間の平均瞳孔間距離 ≈ 64mm
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -135,9 +142,15 @@ function createFakeCameraStream(): MediaStream {
 // ラベルから探して開き直す。?lens=wide で標準カメラに戻して比較できる
 // 解像度は指定しないと 640x480 が返ってきて粗い（実機で確認）。
 // ideal 指定なので、非対応ならブラウザが一番近いモードに丸めてくれる
-const [CAM_W, CAM_H] = (params.get("camRes") ?? "1280x720")
-  .split("x")
-  .map(Number);
+// camRes も手打ち前提なので、"1920"（x 忘れ）や "1920X1080"（大文字）等の
+// 不正値は既定の 1280x720 に落とす（不正な ideal は WebIDL で 0 に丸められ、
+// 最低解像度のカメラモードが無言で選ばれてしまう）
+const camResParsed = (params.get("camRes") ?? "").split(/x/i).map(Number);
+const [CAM_W, CAM_H] =
+  camResParsed.length === 2 &&
+  camResParsed.every((v) => Number.isFinite(v) && v > 0)
+    ? camResParsed
+    : [1280, 720];
 const camSize = { width: { ideal: CAM_W }, height: { ideal: CAM_H } };
 
 async function openBackCameraStream(
@@ -203,7 +216,7 @@ async function startCamera(
 // offset/repeat による UV 変換を反映するのでそれを使う。
 // CAM_ZOOM はゴーグル越しの見え方を実機で合わせ込むための倍率（1 = cover ぴったり）。
 // 1 未満で縮小（より広い範囲が見える。映像の外はフチの色が伸びる）、1 より大きくで拡大
-const CAM_ZOOM = Number(params.get("camZoom") ?? 1);
+const CAM_ZOOM = numParam("camZoom", 1);
 function updateBackgroundCover() {
   const texture = scene.background;
   if (!(texture instanceof THREE.VideoTexture)) return;
