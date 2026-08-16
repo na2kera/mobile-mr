@@ -8,29 +8,47 @@ import markerSvgUrl from "./marker-0.svg";
 
 // ---- ゴーグル調整パラメータ（URL クエリで実機合わせ込み） ----
 // 実機で手打ちするパラメータなので、打ち間違い（NaN）や空文字（Number("") === 0）を
-// 既定値に落とす。0 は camZoom の除算で Infinity になる等、全パラメータで不正値のため
-// 「正の有限数」だけを受け付ける
+// 既定値に落とす。さらに「数値としては正当だが用途的に壊れる値」（例: detW=0.1 は
+// 検出キャンバスが 0px に丸まって getImageData が例外を投げる、camFov=180 は
+// tan(90°) で焦点距離が発散する）も範囲外として既定値に落とす
+// （コードレビュー指摘: パラメータごとの範囲検証が無かった）
 const params = new URLSearchParams(location.search);
-function numParam(name: string, fallback: number): number {
+function numParam(
+  name: string,
+  fallback: number,
+  { min = Number.EPSILON, max = Infinity } = {},
+): number {
   const v = Number(params.get(name) ?? NaN);
-  return Number.isFinite(v) && v > 0 ? v : fallback;
+  return Number.isFinite(v) && v >= min && v <= max ? v : fallback;
 }
-const FOV = numParam("fov", 70);
-const EYE_SEP = numParam("eyeSep", 0.064); // 人間の平均瞳孔間距離 ≈ 64mm
+const FOV = numParam("fov", 70, { min: 20, max: 170 });
+// eyeSep=0 はステレオ視差を無効化する校正モード（下の markerFrame 定義のコメント参照）
+const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 }); // 人間の平均瞳孔間距離 ≈ 64mm
 
 // ---- マーカー関連パラメータ ----
 // markerMm: マーカー（黒い正方形）の一辺の実寸 [mm]。余白は含まない。
 // marker.html を原寸（倍率 100%）で印刷したときの既定は 100mm。
 // 画面表示した場合や拡縮印刷した場合は、定規で黒枠を測ってここに渡す
-const MARKER_MM = numParam("markerMm", 100);
+const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
+// markerId: World Origin として採用するマーカー ID。marker.html が印刷するのは ID 0。
+// 0 は有効な ID なので他の URL パラメータと違い 0 を許容する
+const MARKER_ID = numParam("markerId", 0, { min: 0, max: 999 });
+// maxPoseError: 姿勢推定の再投影誤差 [px]（POSIT の bestError の単位。解像度に依らない
+// 目安として使える）の許容上限。これを超える検出はノイズとして棄却する
+const MAX_POSE_ERROR = numParam("maxPoseError", 8, { min: 0, max: 1000 });
 // anchorDist: マーカーの法線方向（面から視点側）に浮かべるボールまでの距離 [m]
-const ANCHOR_DIST = numParam("anchorDist", 0.5);
-// detW: 検出にかける画像の幅 [px]。大きいほど遠くの小さいマーカーを拾えるが検出が重くなる
-const DET_W = numParam("detW", 640);
+const ANCHOR_DIST = numParam("anchorDist", 0.5, { max: 50 });
+// detW: 検出にかける画像の長辺 [px]。大きいほど遠くの小さいマーカーを拾えるが検出が重くなる
+const DET_W = numParam("detW", 640, { min: 64, max: 4096 });
 // smooth: 検出姿勢の指数移動平均係数。検出値は毎フレーム揺れる（ジッタ）ため平滑化する。
-// 1 で平滑化なし、小さいほど滑らかだが追従が遅れる。1 超は lerp が外挿になるためクランプ
-const SMOOTH = Math.min(numParam("smooth", 0.25), 1);
+// 1 で平滑化なし、小さいほど滑らかだが追従が遅れる
+const SMOOTH = numParam("smooth", 0.25, { min: 0, max: 1 });
+// lostHideFrames: マーカーをロストしてから最後の姿勢を消すまでの猶予フレーム数。
+// カメラは 3DoF（回転のみ）なのでロスト中の平行移動は追えず、猶予を過ぎたアンカーは
+// 「現実に固定」の保証が無い古い座標になる。すぐ消すと1フレームの検出漏れでも
+// 点滅するため、数フレームだけ待ってから隠す（コードレビュー指摘対応）
+const LOST_HIDE_FRAMES = numParam("lostHideFrames", 10, { min: 1, max: 300 });
 // camFov: 実カメラの水平視野角 [deg]。姿勢推定の焦点距離換算に使う。
 // ブラウザにはカメラの内部パラメータ（焦点距離）を取得する API が無いため、
 // 開いたレンズの種別から推定した既定値（超広角 0.5x ≈ 106° / 標準 ≈ 68°）を使い、
@@ -64,7 +82,12 @@ anchor.visible = false; // 初検出まで非表示
 scene.add(anchor);
 
 // マーカー実寸の枠: 位置合わせの正解確認用。現実のマーカーにぴったり重なって
-// 見えるべきもので、ズレていたら camFov / markerMm / fov の何かが合っていない
+// 見えるべきもので、ズレていたら camFov / markerMm / fov の何かが合っていない。
+// 注意: 背景の現実映像は単眼カメラ1枚を両眼に複製しているため視差が無いが、
+// この枠は有限距離にある3Dオブジェクトとして StereoEffect で両眼別々に描画されるため
+// 視差が付く。したがって「両眼で同時にぴったり重なる」は幾何的に成立しない
+// （docs/CONCEPT.md の Phase 2 注記と同根。コードレビュー指摘で判明）。
+// 厳密に位置合わせを確認したいときは ?eyeSep=0 を付けて視差を無効化する
 const markerFrame = new THREE.Mesh(
   new THREE.PlaneGeometry(MARKER_SIZE_M, MARKER_SIZE_M),
   new THREE.MeshBasicMaterial({
@@ -223,7 +246,7 @@ async function startCamera(
   const label = stream.getVideoTracks()[0]?.label ?? "";
   // 開いたレンズから水平 FOV の既定値を確定する（姿勢推定の焦点距離換算に使う）
   camHFovDeg = params.has("camFov")
-    ? numParam("camFov", 68)
+    ? numParam("camFov", 68, { min: 10, max: 170 })
     : /ultra wide|超広角/i.test(label)
       ? 106
       : 68;
@@ -269,6 +292,7 @@ let detMs = 0;
 let lostFrames = 0;
 let markerInfo = "searching";
 let loggedFirstDetection = false;
+let lastRejectLogMs = -Infinity;
 
 const targetPos = new THREE.Vector3();
 const targetQuat = new THREE.Quaternion();
@@ -304,14 +328,41 @@ function detectAndUpdateAnchor() {
 }
 
 function applyObservations(observations: MarkerObservation[]) {
-  if (observations.length === 0) {
+  // World Origin は markerId（既定 ID 0）に固定し、姿勢誤差が大きい検出も棄却する
+  // （コードレビュー指摘: 先頭の観測を無条件採用すると、複数端末が別マーカーや
+  // 偽検出を原点にしてしまい Phase 4 の共通座標系が一致しなくなる）
+  const obs = observations.find(
+    (o) =>
+      o.id === MARKER_ID &&
+      Number.isFinite(o.error) &&
+      o.error <= MAX_POSE_ERROR,
+  );
+  if (!obs) {
+    // 別 ID や誤差過大の検出を確認用にログ（2秒に1回まで。連続ログでの埋没を防ぐ。
+    // lostFrames による間引きは「マーカー自体が見えていない」フレームでも
+    // 進んでしまい、別IDが映り続けている間ログが出なくなるため時間で間引く）
+    if (observations.length > 0 && performance.now() - lastRejectLogMs > 2000) {
+      console.log(
+        `[marker] observed but rejected: ${observations.map((o) => `id=${o.id} err=${o.error.toFixed(1)}`).join(", ")}`,
+      );
+      lastRejectLogMs = performance.now();
+    }
     lostFrames++;
-    // ロスト中はアンカーを最後のワールド姿勢に置いたままにする（上のコメント参照）
-    if (anchor.visible) markerInfo = `lost (${lostFrames}f)`;
+    if (anchor.visible) {
+      if (lostFrames >= LOST_HIDE_FRAMES) {
+        // カメラは 3DoF（回転のみ）なのでロスト中の平行移動は追えず、猶予を過ぎたら
+        // 「現実に固定」の保証が無い古い座標になる。表示をやめて誤情報を出さない
+        // （コードレビュー指摘対応。再検出時は下の「初検出」分岐でスナップし直す）
+        anchor.visible = false;
+        markerInfo = "searching";
+        console.log(`[marker] hidden after ${lostFrames} lost frames`);
+      } else {
+        markerInfo = `lost (${lostFrames}f)`;
+      }
+    }
     return;
   }
   lostFrames = 0;
-  const obs = observations[0]; // 複数見えても先頭のみ。Phase 3 の原点は1つ
   camera.updateMatrixWorld();
   markerWorld.multiplyMatrices(camera.matrixWorld, obs.matrix);
   markerWorld.decompose(targetPos, targetQuat, targetScale);

@@ -17,7 +17,10 @@ export type MarkerObservation = {
    * 並進の単位はメートル
    */
   matrix: THREE.Matrix4;
-  /** 姿勢推定の再投影誤差。大きいほど信頼できない */
+  /**
+   * 姿勢推定の再投影誤差 [px]（POSIT の bestError.pixels）。解像度に依らず
+   * 比較できる目安。呼び出し側でこれを閾値に検出結果を足切りする想定
+   */
   error: number;
 };
 
