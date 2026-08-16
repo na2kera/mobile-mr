@@ -204,8 +204,12 @@ User A                     User B
 **APIイメージ**:
 
 ```ts
-mr.hands.on("update", hands => { /* hand position */ });
-mr.body.on("update", pose => { /* body pose */ });
+mr.hands.on("update", (hands) => {
+  /* hand position */
+});
+mr.body.on("update", (pose) => {
+  /* body pose */
+});
 ```
 
 **作るもの**: 「MR Hand Interaction Demo」— 手で仮想ボールを触る / ボタンを押す / 指を向けて操作する等。
@@ -315,15 +319,15 @@ Mobile MR SDK
 
 将来的には以下のように分割する。
 
-| パッケージ | 内容 |
-| --- | --- |
-| `@mobile-mr/core` | MR Session管理 |
-| `@mobile-mr/stereo` | Stereo Rendering / Lens Configuration / FOV / IPD相当の設定 |
-| `@mobile-mr/tracking` | Head / Hand / Body Tracking |
-| `@mobile-mr/camera` | getUserMedia / Passthrough / Camera configuration |
-| `@mobile-mr/spatial` | Anchor / Marker / Shared Origin / Surface |
-| `@mobile-mr/network` | Room / Player / Transform Sync / State Sync |
-| `@mobile-mr/three` | Three.js Adapter |
+| パッケージ            | 内容                                                        |
+| --------------------- | ----------------------------------------------------------- |
+| `@mobile-mr/core`     | MR Session管理                                              |
+| `@mobile-mr/stereo`   | Stereo Rendering / Lens Configuration / FOV / IPD相当の設定 |
+| `@mobile-mr/tracking` | Head / Hand / Body Tracking                                 |
+| `@mobile-mr/camera`   | getUserMedia / Passthrough / Camera configuration           |
+| `@mobile-mr/spatial`  | Anchor / Marker / Shared Origin / Surface                   |
+| `@mobile-mr/network`  | Room / Player / Transform Sync / State Sync                 |
+| `@mobile-mr/three`    | Three.js Adapter                                            |
 
 `@mobile-mr/core` の Session が機種差を吸収する。使う側は iPhone / Android を分岐しなくてよい。センサー許可・全画面化の順序や、1タップでは特権操作を完結できないこと（許可ダイアログでジェスチャーの効力が切れる等）は SDK 側の責務とする。
 
@@ -406,15 +410,15 @@ Multi-user MR
 
 ## 9. 現在地
 
-現在はPhase 1開始直前。技術スタックは Vite / TypeScript / Three.js。
+Phase 2（Passthrough MR）まで完了。技術スタックは Vite / TypeScript / Three.js。
 
-最初に実装するもの：**Three.jsで単純な3Dシーンを作り、スマートフォン横画面で左右2眼表示する。**
+- Phase 1 完了（2026-08-13, `demos/01-stereo-box/`）: 左右2眼レンダリング + ジャイロ頭追従 + 全画面化。iPhone 実機 + ゴーグルで確認済み
+- Phase 2 完了（2026-08-14, `demos/02-passthrough/`）: 背面超広角カメラの映像を `VideoTexture` → `scene.background` で両眼の背景に表示。縦横比補正・回転追従・解像度指定込み。iPhone 実機で確認済み
 
-その後、
+次は Phase 3（共通座標系）。残りは
 
 ```text
-左右2眼 → ジャイロ → スマホVR完成 → 背面カメラ → MR
-→ Shared Coordinates → Multiplayer → Hand Tracking → MR Volleyball
+Shared Coordinates → Multiplayer → Hand Tracking → MR Volleyball
 ```
 
 の順番で進める。
