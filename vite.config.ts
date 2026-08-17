@@ -76,6 +76,9 @@ export default defineConfig({
         "demo-03-marker-print": fileURLToPath(
           new URL("./demos/03-marker-anchor/marker.html", import.meta.url),
         ),
+        "demo-ex2-1-joycon-rc": fileURLToPath(
+          new URL("./demos/ex2-1-joycon-rc/index.html", import.meta.url),
+        ),
       },
     },
   },
