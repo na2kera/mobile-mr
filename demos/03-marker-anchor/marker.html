@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>03. マーカー印刷 — Mobile MR</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        /* 黒い正方形の一辺 [mm]。?mm= で変更できる（インラインスクリプト参照） */
+        --marker-mm: 100;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 24px 16px;
+        box-sizing: border-box;
+      }
+      /* マーカー SVG は黒枠8セル + 白余白各1セル = 10セル。
+         黒い正方形を --marker-mm にするため全体は 10/8 倍で描く。
+         余白（クワイエットゾーン）は検出に必須なので削らないこと */
+      img.marker {
+        width: calc(var(--marker-mm) * 1mm * 10 / 8);
+        height: auto;
+        /* 画面が暗色テーマでも余白が白であることを保証する */
+        background: #fff;
+        display: block;
+      }
+      p.note {
+        max-width: 36em;
+        font-size: 0.85rem;
+        color: #666;
+        margin: 0;
+      }
+      @media (prefers-color-scheme: dark) {
+        p.note {
+          color: #9aa0a6;
+        }
+      }
+      a {
+        font-size: 0.85rem;
+      }
+      /* 印刷時はマーカーだけを原寸で出す */
+      @media print {
+        .no-print {
+          display: none;
+        }
+        body {
+          padding: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="no-print" style="font-size: 1.1rem; margin: 0">
+      ArUco マーカー（ARUCO_MIP_36h12 / ID 0）
+    </h1>
+    <img class="marker" src="./marker-0.svg" alt="ArUco marker ID 0" />
+    <p class="note no-print" id="size-note">
+      このページを倍率 100%（「実際のサイズ」）で印刷すると、黒い正方形の一辺が
+      100mm になります。デモ側の既定値（?markerMm=100）と一致します。
+    </p>
+    <p class="note no-print">
+      画面に表示したまま使う場合、画面上の 1mm は物理的な 1mm
+      と一致しません。定規で黒い正方形の一辺を測り、デモの URL に
+      ?markerMm=実測値 を付けてください。
+      印刷でも拡縮がかかった場合は同様に実測値を渡してください。
+    </p>
+    <p class="no-print">
+      <a href="./">← デモへ戻る</a>　<a href="/">デモ一覧へ</a>
+    </p>
+    <script type="module">
+      // ?mm= で表示サイズを変更できる（例: 大きい部屋用に ?mm=150 で印刷）
+      const mm = Number(new URLSearchParams(location.search).get("mm"));
+      if (Number.isFinite(mm) && mm > 0) {
+        document.documentElement.style.setProperty("--marker-mm", String(mm));
+        document.getElementById("size-note").textContent =
+          `このページを倍率 100%（「実際のサイズ」）で印刷すると、黒い正方形の一辺が ${mm}mm になります。デモ側 URL に ?markerMm=${mm} を付けてください。`;
+      }
+    </script>
+  </body>
+</html>
