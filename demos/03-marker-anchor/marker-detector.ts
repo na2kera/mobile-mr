@@ -36,7 +36,9 @@ export interface MarkerDetector {
   detect(image: ImageData, focalLengthPx: number): MarkerObservation[];
 }
 
-// POSIT は姿勢計算不能時（平面 POSIT の2解のうちモデル点がカメラ背後に回る枝）に
+// POSIT が返した姿勢（誤差 + 回転 + 並進）を検証し、信用できるものだけを返す。
+// 無効なら null（呼び出し側は best → alternative の順に試す）。
+// 背景: POSIT は姿勢計算不能時（平面 POSIT の2解のうちモデル点がカメラ背後に回る枝）に
 // error=-1・空の回転・空の並進を返し、しかも誤差比較で -1 が必ず勝つため
 // 「無効な best + 有効な alternative」という並びになる（Node で再現確認済み。
 // 空配列を信じると行列が NaN になり、lerp では二度と回復しない）。
@@ -56,6 +58,8 @@ function pickValidPose(
 }
 
 /**
+ * マーカー検出器を作る。返り値の detect() に画像を渡すと、検出した各マーカーの
+ * ID・角座標・カメラ座標系での姿勢（検証済みのもののみ）を返す
  * @param markerSizeM マーカー（黒い正方形）の一辺の実寸 [m]。姿勢の並進のスケールを決める
  */
 export function createMarkerDetector(markerSizeM: number): MarkerDetector {

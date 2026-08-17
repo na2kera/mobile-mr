@@ -13,6 +13,7 @@ import markerSvgUrl from "./marker-0.svg";
 // tan(90°) で焦点距離が発散する）も範囲外として既定値に落とす
 // （コードレビュー指摘: パラメータごとの範囲検証が無かった）
 const params = new URLSearchParams(location.search);
+// URL クエリから数値パラメータを1つ読む。範囲外・不正値は fallback に落とす
 function numParam(
   name: string,
   fallback: number,
@@ -306,6 +307,8 @@ const targetQuat = new THREE.Quaternion();
 const targetScale = new THREE.Vector3();
 const markerWorld = new THREE.Matrix4();
 
+// 毎フレーム呼ばれる検出の入口。カメラ映像の新フレームを縮小キャンバスに取り込み、
+// 境界モジュールでマーカー検出 → applyObservations() でアンカーに反映する
 function detectAndUpdateAnchor() {
   if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
   if (video.currentTime === lastDetVideoTime) return; // 新フレームが来ていない
@@ -334,6 +337,8 @@ function detectAndUpdateAnchor() {
   applyObservations(observations);
 }
 
+// 検出結果からこのフレームで採用する観測を1つ選び、アンカーのワールド姿勢を更新する
+// （初検出はスナップ、以降は指数移動平均で平滑化。HUD 表示の更新もここ）
 function applyObservations(observations: MarkerObservation[]) {
   // World Origin は markerId（既定 ID 0）に固定し、姿勢誤差が大きい検出も棄却する
   // （コードレビュー指摘: 先頭の観測を無条件採用すると、複数端末が別マーカーや
