@@ -32,23 +32,28 @@ const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 }); // 人間の平
 const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
 // markerId: World Origin として採用するマーカー ID。marker.html が印刷するのは ID 0。
-// 0 は有効な ID なので他の URL パラメータと違い 0 を許容する
-const MARKER_ID = numParam("markerId", 0, { min: 0, max: 999 });
-// maxPoseError: 姿勢推定の再投影誤差 [px]（POSIT の bestError の単位。解像度に依らない
-// 目安として使える）の許容上限。これを超える検出はノイズとして棄却する
-const MAX_POSE_ERROR = numParam("maxPoseError", 8, { min: 0, max: 1000 });
+// 0 は有効な ID なので他の URL パラメータと違い 0 を許容する。ID は整数なので丸める
+// （小数のままだと === 比較が永遠に一致せず、黙って全拒否になる）
+const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
+// maxPoseError: 姿勢推定の正規化再投影誤差（ピクセル和 ÷ マーカーの画面上の平均辺長。
+// 無次元なので detW を変えても意味が変わらない）の許容上限。
+// きれいな検出で 0.0x、崩れた四角形で 1 前後（marker-detector.ts 参照）
+const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
 // anchorDist: マーカーの法線方向（面から視点側）に浮かべるボールまでの距離 [m]
 const ANCHOR_DIST = numParam("anchorDist", 0.5, { max: 50 });
 // detW: 検出にかける画像の長辺 [px]。大きいほど遠くの小さいマーカーを拾えるが検出が重くなる
 const DET_W = numParam("detW", 640, { min: 64, max: 4096 });
 // smooth: 検出姿勢の指数移動平均係数。検出値は毎フレーム揺れる（ジッタ）ため平滑化する。
-// 1 で平滑化なし、小さいほど滑らかだが追従が遅れる
-const SMOOTH = numParam("smooth", 0.25, { min: 0, max: 1 });
-// lostHideFrames: マーカーをロストしてから最後の姿勢を消すまでの猶予フレーム数。
+// 1 で平滑化なし、小さいほど滑らかだが追従が遅れる。
+// 0 は lerp/slerp が恒等になりアンカーが初回位置で凍結するため除外する
+const SMOOTH = numParam("smooth", 0.25, { min: 0.01, max: 1 });
+// lostHideMs: マーカーの最終検出からこの時間 [ms] 過ぎたらアンカーを消す。
 // カメラは 3DoF（回転のみ）なのでロスト中の平行移動は追えず、猶予を過ぎたアンカーは
 // 「現実に固定」の保証が無い古い座標になる。すぐ消すと1フレームの検出漏れでも
-// 点滅するため、数フレームだけ待ってから隠す（コードレビュー指摘対応）
-const LOST_HIDE_FRAMES = numParam("lostHideFrames", 10, { min: 1, max: 300 });
+// 点滅するため、少しだけ待ってから隠す。フレーム数ではなく時刻基準なのは、
+// カメラ映像が停止（トラック終了・中断等）して検出ループ自体が回らなくなっても
+// 描画ループ側で消せるようにするため（コードレビュー指摘対応）
+const LOST_HIDE_MS = numParam("lostHideMs", 500, { min: 50, max: 10000 });
 // camFov: 実カメラの水平視野角 [deg]。姿勢推定の焦点距離換算に使う。
 // ブラウザにはカメラの内部パラメータ（焦点距離）を取得する API が無いため、
 // 開いたレンズの種別から推定した既定値（超広角 0.5x ≈ 106° / 標準 ≈ 68°）を使い、
@@ -289,10 +294,12 @@ const detCtx = detCanvas.getContext("2d", { willReadFrequently: true })!;
 
 let lastDetVideoTime = -1;
 let detMs = 0;
-let lostFrames = 0;
 let markerInfo = "searching";
 let loggedFirstDetection = false;
 let lastRejectLogMs = -Infinity;
+// 最後に有効な観測を採用した時刻。ロスト後の非表示はフレーム数ではなくこれを基準に
+// 判定する（カメラ映像の停止で検出ループが回らなくなっても描画ループ側で消すため）
+let lastAcceptedMs = -Infinity;
 
 const targetPos = new THREE.Vector3();
 const targetQuat = new THREE.Quaternion();
@@ -338,31 +345,20 @@ function applyObservations(observations: MarkerObservation[]) {
       o.error <= MAX_POSE_ERROR,
   );
   if (!obs) {
-    // 別 ID や誤差過大の検出を確認用にログ（2秒に1回まで。連続ログでの埋没を防ぐ。
-    // lostFrames による間引きは「マーカー自体が見えていない」フレームでも
-    // 進んでしまい、別IDが映り続けている間ログが出なくなるため時間で間引く）
+    // 別 ID や誤差過大の検出を確認用にログ（2秒に1回まで。連続ログでの埋没を防ぐ）
     if (observations.length > 0 && performance.now() - lastRejectLogMs > 2000) {
       console.log(
-        `[marker] observed but rejected: ${observations.map((o) => `id=${o.id} err=${o.error.toFixed(1)}`).join(", ")}`,
+        `[marker] observed but rejected: ${observations.map((o) => `id=${o.id} err=${o.error.toFixed(2)}`).join(", ")}`,
       );
       lastRejectLogMs = performance.now();
     }
-    lostFrames++;
     if (anchor.visible) {
-      if (lostFrames >= LOST_HIDE_FRAMES) {
-        // カメラは 3DoF（回転のみ）なのでロスト中の平行移動は追えず、猶予を過ぎたら
-        // 「現実に固定」の保証が無い古い座標になる。表示をやめて誤情報を出さない
-        // （コードレビュー指摘対応。再検出時は下の「初検出」分岐でスナップし直す）
-        anchor.visible = false;
-        markerInfo = "searching";
-        console.log(`[marker] hidden after ${lostFrames} lost frames`);
-      } else {
-        markerInfo = `lost (${lostFrames}f)`;
-      }
+      markerInfo = `lost (${((performance.now() - lastAcceptedMs) / 1000).toFixed(1)}s)`;
     }
+    // 非表示化はここではなく描画ループの hideAnchorIfStale() が時刻基準で行う
     return;
   }
-  lostFrames = 0;
+  lastAcceptedMs = performance.now();
   camera.updateMatrixWorld();
   markerWorld.multiplyMatrices(camera.matrixWorld, obs.matrix);
   markerWorld.decompose(targetPos, targetQuat, targetScale);
@@ -376,13 +372,31 @@ function applyObservations(observations: MarkerObservation[]) {
     anchor.quaternion.slerp(targetQuat, SMOOTH);
   }
   const dist = targetPos.distanceTo(camera.position);
-  markerInfo = `id=${obs.id} d=${dist.toFixed(2)}m err=${obs.error.toFixed(1)} ${detMs.toFixed(0)}ms`;
+  markerInfo = `id=${obs.id} d=${dist.toFixed(2)}m err=${obs.error.toFixed(2)} ${detMs.toFixed(0)}ms`;
   if (!loggedFirstDetection) {
     loggedFirstDetection = true;
     // ヘッドレス自動確認用: fakecam の正対マーカーなら位置は画面中央方向・
     // 回転はほぼ単位クォータニオンになるはず
     console.log(
       `[marker] first detection id=${obs.id} pos=(${targetPos.x.toFixed(3)}, ${targetPos.y.toFixed(3)}, ${targetPos.z.toFixed(3)}) quat=(${targetQuat.x.toFixed(3)}, ${targetQuat.y.toFixed(3)}, ${targetQuat.z.toFixed(3)}, ${targetQuat.w.toFixed(3)})`,
+    );
+  }
+}
+
+// マーカーの最終検出から LOST_HIDE_MS 過ぎたらアンカーを消す。
+// カメラは 3DoF（回転のみ）なのでロスト中の平行移動は追えず、猶予を過ぎたアンカーは
+// 「現実に固定」の保証が無い古い座標になる。表示をやめて誤情報を出さない。
+// applyObservations 内（= 新フレームが来たときだけ実行）ではなく描画ループから
+// 毎フレーム呼ぶことで、カメラ映像が停止して検出ループ自体が回らなくなっても消せる。
+// 再検出時は applyObservations の「初検出」分岐でスナップし直す
+function hideAnchorIfStale() {
+  if (!anchor.visible) return;
+  const elapsed = performance.now() - lastAcceptedMs;
+  if (elapsed > LOST_HIDE_MS) {
+    anchor.visible = false;
+    markerInfo = "searching";
+    console.log(
+      `[marker] hidden after ${(elapsed / 1000).toFixed(1)}s without detection`,
     );
   }
 }
@@ -518,6 +532,7 @@ if (params.has("autostart")) startButton.click();
 renderer.setAnimationLoop(() => {
   controls?.update();
   detectAndUpdateAnchor();
+  hideAnchorIfStale();
   if (document.body.classList.contains("started")) renderHud();
   effect.render(scene, camera);
 });

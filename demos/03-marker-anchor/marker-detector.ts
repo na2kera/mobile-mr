@@ -18,8 +18,11 @@ export type MarkerObservation = {
    */
   matrix: THREE.Matrix4;
   /**
-   * 姿勢推定の再投影誤差 [px]（POSIT の bestError.pixels）。解像度に依らず
-   * 比較できる目安。呼び出し側でこれを閾値に検出結果を足切りする想定
+   * 姿勢推定の正規化再投影誤差（無次元）。POSIT の誤差はピクセル和で検出解像度に
+   * ほぼ比例するため（1x/2x/4x で 25/46/94 になることをスモークテストで確認）、
+   * マーカーの画面上の平均辺長 [px] で割って解像度非依存にしてある。
+   * 目安: きれいな検出で 0.0x、崩れた四角形で 1 前後。
+   * 呼び出し側でこれを閾値に検出結果を足切りする想定
    */
   error: number;
 };
@@ -31,6 +34,25 @@ export interface MarkerDetector {
    *   取得できないため、レンズの水平 FOV から (幅/2)/tan(FOV/2) で換算した推定値を渡す
    */
   detect(image: ImageData, focalLengthPx: number): MarkerObservation[];
+}
+
+// POSIT は姿勢計算不能時（平面 POSIT の2解のうちモデル点がカメラ背後に回る枝）に
+// error=-1・空の回転・空の並進を返し、しかも誤差比較で -1 が必ず勝つため
+// 「無効な best + 有効な alternative」という並びになる（Node で再現確認済み。
+// 空配列を信じると行列が NaN になり、lerp では二度と回復しない）。
+// error>=0 かつ回転・並進の全要素が有限のものだけを姿勢として信用する
+function pickValidPose(
+  error: number,
+  rotation: number[][],
+  translation: number[],
+): { error: number; r: number[][]; t: number[] } | null {
+  const rOk =
+    rotation.length === 3 &&
+    rotation.every((row) => row.length === 3 && row.every(Number.isFinite));
+  const tOk = translation.length === 3 && translation.every(Number.isFinite);
+  return error >= 0 && rOk && tOk
+    ? { error, r: rotation, t: translation }
+    : null;
 }
 
 /**
@@ -54,15 +76,29 @@ export function createMarkerDetector(markerSizeM: number): MarkerDetector {
         posit = new POS.Posit(markerSizeM, focalLengthPx);
         positFocal = focalLengthPx;
       }
-      return markers.map((marker) => {
+      const observations: MarkerObservation[] = [];
+      for (const marker of markers) {
         // POSIT は「画像中心原点・Y 上」の座標系で角を受け取る（画像は左上原点・Y 下）
         const centered = marker.corners.map((c) => ({
           x: c.x - image.width / 2,
           y: image.height / 2 - c.y,
         }));
-        const pose = posit!.pose(centered);
-        const r = pose.bestRotation;
-        const t = pose.bestTranslation;
+        const pose = posit.pose(centered);
+        // best が無効なら alternative を試し、両方無効ならこの観測は返さない
+        // （pickValidPose のコメント参照）
+        const valid =
+          pickValidPose(
+            pose.bestError,
+            pose.bestRotation,
+            pose.bestTranslation,
+          ) ??
+          pickValidPose(
+            pose.alternativeError,
+            pose.alternativeRotation,
+            pose.alternativeTranslation,
+          );
+        if (!valid) continue;
+        const { r, t } = valid;
         // POSIT のカメラ座標系は +Z が前方（奥）、three.js は -Z が前方。
         // F=diag(1,1,-1) で M = F・[R|t]・F と挟んで変換する（行3・列3の符号反転。
         // 右手系のまま保たれ、マーカー面の +Z が視点側を向くローカル系になる）
@@ -84,13 +120,22 @@ export function createMarkerDetector(markerSizeM: number): MarkerDetector {
           0,
           1,
         );
-        return {
+        // 正規化誤差: ピクセル和 ÷ マーカーの画面上の平均辺長（型コメント参照）
+        let perimeter = 0;
+        for (let i = 0; i < 4; i++) {
+          const a = marker.corners[i];
+          const b = marker.corners[(i + 1) % 4];
+          perimeter += Math.hypot(b.x - a.x, b.y - a.y);
+        }
+        const sidePx = perimeter / 4;
+        observations.push({
           id: marker.id,
           corners: marker.corners,
           matrix,
-          error: pose.bestError,
-        };
-      });
+          error: sidePx > 0 ? valid.error / sidePx : Infinity,
+        });
+      }
+      return observations;
     },
   };
 }
