@@ -2,9 +2,10 @@ import * as THREE from "three";
 import { StereoEffect } from "three/examples/jsm/effects/StereoEffect.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { DeviceOrientationControls } from "three-stdlib";
-import { createMarkerDetector } from "./marker-detector";
-import type { MarkerObservation } from "./marker-detector";
-import markerSvgUrl from "./marker-0.svg";
+// マーカー検出まわりは 04-shared-room と共用になったため src/shared/ に移動した
+import { createMarkerDetector } from "../../src/shared/marker-detector";
+import type { MarkerObservation } from "../../src/shared/marker-detector";
+import markerSvgUrl from "../../src/shared/marker-0.svg";
 
 // ---- ゴーグル調整パラメータ（URL クエリで実機合わせ込み） ----
 // 実機で手打ちするパラメータなので、打ち間違い（NaN）や空文字（Number("") === 0）を
