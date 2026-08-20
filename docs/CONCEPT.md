@@ -493,19 +493,19 @@ Multi-user MR
 
 ## 9. 現在地
 
-Phase 3（共通座標系）まで完了。Phase 4（Multiplayer）を実装中。技術スタックは Vite / TypeScript / Three.js。
+Phase 4（Multiplayer）まで完了。次は Phase 5（Hand / Body Tracking）。技術スタックは Vite / TypeScript / Three.js。
 
 - Phase 1 完了（2026-08-13, `demos/01-stereo-box/`）: 左右2眼レンダリング + ジャイロ頭追従 + 全画面化。iPhone 実機 + ゴーグルで確認済み
 - Phase 2 完了（2026-08-14, `demos/02-passthrough/`）: 背面超広角カメラの映像を `VideoTexture` → `scene.background` で両眼の背景に表示。縦横比補正・回転追従・解像度指定込み。iPhone 実機で確認済み
 - Phase 3 完了（2026-08-16, `demos/03-marker-anchor/`）: ArUco マーカー（js-aruco2）を World Origin にして 3D オブジェクトを現実位置に固定。姿勢推定の検証・平滑化・ロスト処理込み。iPhone 実機で確認済み
-- Phase 4 実装中（2026-08-17, `demos/04-shared-room/`）: WebSocket（Vite dev サーバー同居）でマーカー座標系の pose を交換し、相手の位置にアバターを表示。**iPhone 2台 + マーカーで実機確認済み（2026-08-20）**: 相互の位置一致・移動追従とも良好。単一マーカーの実用距離は detW=960 で約 2.5m（PAIN_POINTS 参照）
+- Phase 4 完了（2026-08-20, `demos/04-shared-room/`）: WebSocket（Vite dev サーバー同居）でマーカー座標系の pose を交換し、相手の位置にアバターを表示。**iPhone 2台 + マーカーで実機確認済み（2026-08-20）**: 相互の位置一致・移動追従とも良好。単一マーカーの実用距離は detW=960 で約 2.5m（PAIN_POINTS 参照）
   - 実用距離を伸ばすアイデア（後々やる。実測 100mm ≈ 2.5m からの換算）: **(1) マーカー拡大印刷** — A4 短辺いっぱいの正方形（黒枠 190〜200mm、余白考慮）なら 4.5〜5m が期待でき、部屋規模に近づく。両端末で `?markerMm=` を実測値に合わせること（Room の空間設定検証で不一致は入室拒否される）。marker.html に印刷サイズ指定を足すとなお良い **(2) マルチマーカー** — Phase 3 の「将来の拡張案」参照。(1) で足りなければ着手
   - スコープ外と明示した項目: **bfcache 復帰時のカメラ再開**（WebSocket は再接続するがカメラは HUD 警告のみ。02/03 共通の未対応領域で、段階2 SDK の lifecycle 層でまとめて設計する。PAIN_POINTS 参照）、**認証・レート制限・本番サーバーへの組み込み**（LAN デモの範囲では不要。公開運用時の課題）
 
 残りは
 
 ```text
-Multiplayer → Hand Tracking → MR Volleyball
+Hand Tracking → MR Volleyball
 ```
 
 の順番で進める。
