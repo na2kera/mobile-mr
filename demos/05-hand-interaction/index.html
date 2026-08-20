@@ -140,14 +140,16 @@
         手前のボタンを指で押す・指差しで遠くの的を選ぶ、の3つが試せます。
       </p>
       <p>
-        手の検出は MediaPipe（約 18MB の wasm とモデル）を読み込むため、
+        手の検出は MediaPipe（約 20MB の wasm とモデル）を読み込むため、
         開始後しばらく「tracker=」の表示が loading のままになります。
+        ボールが灰色のワイヤーフレームの間は読み込み中、実体化したら準備完了、赤なら失敗です。
       </p>
       <button id="start-button" type="button">開始</button>
       <p>
         調整: ?fov=70&amp;eyeSep=0.064&amp;camZoom=1 は 02 と同じ。手の検出は
         ?hands=2&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0 で調整できます。
-        PC では ?fakecam=1&amp;autostart=1 で読み込み経路だけ確認できます（手は映りません）
+        PC では ?fakecam=1&amp;autostart=1 で読み込み経路を、さらに &amp;fakehands=1
+        を足すと台本どおりに動く合成の手で3操作の経路を確認できます
       </p>
       <a href="/">← デモ一覧へ戻る</a>
     </div>

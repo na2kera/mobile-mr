@@ -24,5 +24,8 @@
     "js-aruco2": "^2.0.0",
     "three": "^0.185.1",
     "three-stdlib": "^2.36.1"
+  },
+  "engines": {
+    "node": ">=23.6"
   }
 }

@@ -3,7 +3,8 @@
 // そもそもカメラが無い）ため、「MediaPipe が手を返したあと」の経路 —— 3D 化・骨格描画・
 // ボール/ボタン/指差しの判定 —— をブラウザ上で決定的に確認するための入力源。
 // hand-math.ts の回帰テスト（scripts/test-hand-math.mjs）も同じ形状生成を使う。
-// three.js に依存させない（Node から import するため）
+// three.js に依存させない（Node から import するため）。import に .ts を付けているのも
+// Node の ESM 解決のため（Vite/TS は拡張子なしでも解決するが、Node は付けないと見つけられない）
 import { LANDMARK_COUNT } from "./hand-math.ts";
 import type { Vec3, ViewMapping } from "./hand-math.ts";
 

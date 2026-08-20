@@ -87,6 +87,9 @@ export function imageToRay(
   return { x: sx * m.tanHalfFov * m.eyeAspect, y: sy * m.tanHalfFov };
 }
 
+/** 置ける最小深度 [m]。これより手前は描画側の near で切れる（main.ts の camera.near と合わせる） */
+export const MIN_DEPTH_M = 0.05;
+
 export type HandPlacement = {
   /** 手の中心（worldLandmarks の原点）のカメラ座標系での位置 [m]（x 右・y 上） */
   x: number;
@@ -194,7 +197,10 @@ function solve3(a: number[][], b: number[]): number[] | null {
  * 21 点をカメラ座標系（three: x 右・y 上・z 手前、原点 = カメラ）へ置く。
  * 各点は「画像上の位置の視線方向」に沿って、深度 = 手の深度 + その点の相対深度
  * （worldLandmarks の z）の所に置く。x/y を視線方向から取るので、背景に映っている
- * 実際の手の上に骨格がぴったり重なる（解いた X/Y ではなく画像位置を優先する）
+ * 実際の手の上に骨格が重なる（解いた X/Y ではなく画像位置を優先する）。
+ * 厳密に重なるのは中心カメラで見たときで、左右の目（StereoEffect の eyeSep 分の
+ * 平行移動）では骨格だけが実深度の視差を持ち、視差ゼロの背景から少しずれる。
+ * これは単眼パススルーの構造的な限界（CONCEPT.md Phase 5 の既知の制約を参照）
  */
 export function placeLandmarks(
   landmarks: readonly Vec3[],
@@ -206,8 +212,8 @@ export function placeLandmarks(
   const n = Math.min(landmarks.length, world.length);
   for (let i = 0; i < n; i++) {
     const r = imageToRay(landmarks[i].x, landmarks[i].y, m);
-    // 相対深度で手前側に出過ぎても、カメラの裏側には回さない
-    const d = Math.max(0.02, placement.depth + world[i].z);
+    // 相対深度で手前側に出過ぎても、カメラの裏側には回さない（main.ts の camera.near と同じ値）
+    const d = Math.max(MIN_DEPTH_M, placement.depth + world[i].z);
     out.push({ x: r.x * d, y: r.y * d, z: -d });
   }
   return out;

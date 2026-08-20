@@ -20,8 +20,16 @@ for (const { file, url } of MODELS) {
   const dest = dir + file;
   const existing = await stat(dest).catch(() => null);
   if (existing && existing.size > 100_000) {
-    console.log(`skip: ${file} は取得済み (${(existing.size / 1e6).toFixed(1)}MB)`);
-    continue;
+    // 途中で切れたファイルを取得済みと誤認しないよう、配布元のサイズと照合する
+    // （HEAD が失敗したらサイズ不明として取得済み扱い）
+    const expected = await fetch(url, { method: "HEAD" })
+      .then((r) => Number(r.headers.get("content-length")))
+      .catch(() => NaN);
+    if (!Number.isFinite(expected) || expected === existing.size) {
+      console.log(`skip: ${file} は取得済み (${(existing.size / 1e6).toFixed(1)}MB)`);
+      continue;
+    }
+    console.log(`再取得: ${file} のサイズが配布元と違う (${existing.size} != ${expected})`);
   }
   console.log(`fetch: ${url}`);
   const res = await fetch(url);

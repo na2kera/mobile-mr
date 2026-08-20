@@ -10,6 +10,7 @@ import {
   FINGER_TIPS,
   INDEX_TIP,
   LANDMARK_COUNT,
+  WRIST,
   isPointingPose,
   placeLandmarks,
   solveHandPlacement,
@@ -41,8 +42,9 @@ const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 1, { min: 0.2, max: 5 });
 
 // ---- 手トラッキングのパラメータ ----
-// hands: 同時に追跡する手の数。2 で両手。1 にすると推論が軽くなる
-const NUM_HANDS = Math.round(numParam("hands", 2, { min: 1, max: 2 }));
+// hands: 同時に追跡する手の数。既定 1（MediaPipe は追跡中の手が numHands 未満だと
+// 毎フレーム全画面の palm detection も回すので、片手しか出さないのに 2 にすると常に重い）
+const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));
 // delegate: auto（GPU → 失敗したら CPU）/ gpu / cpu。実機で比較するため
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
 const DELEGATE =
@@ -51,10 +53,26 @@ const DELEGATE =
 const SMOOTH = numParam("smooth", 0.5, { min: 0.05, max: 1 });
 // detIntervalMs: 推論の最小間隔。0 = カメラの新フレームごと。重い端末で間引くため
 const DET_INTERVAL_MS = numParam("detIntervalMs", 0, { min: 0, max: 1000 });
+// detAdapt: 直近の推論時間 × この係数も最小間隔にする（0 = 無効）。推論が描画フレームを
+// 毎回塞ぐ端末で、一定間隔の間引きに自動で落とすため。実機で比較して決める
+const DET_ADAPT = numParam("detAdapt", 0, { min: 0, max: 10 });
+// detW: 推論に渡す画像の長辺 [px]。0 = video そのまま（GPU）/ CPU デリゲートのときだけ 640 に縮小
+const DET_W = numParam("detW", 0, { min: 0, max: 4096 });
+// mpCanvas=dom: MediaPipe に DOM の canvas を渡す（OffscreenCanvas 絡みの不具合の切り分け用）
+const MP_CANVAS_DOM = params.get("mpCanvas") === "dom";
 // lostHideMs: 手が検出されなくなってから骨格を消すまでの時間
 const LOST_HIDE_MS = numParam("lostHideMs", 300, { min: 50, max: 5000 });
+// alignHoldMs: 横向きで頭が水平な状態がこれだけ続いたら、その向きを正面にする
+const ALIGN_HOLD_MS = numParam("alignHoldMs", 1000, { min: 0, max: 10000 });
+// recenterMs: 正面からの向きのズレが 90° を超えた状態がこれだけ続いたら正面を取り直す（0 = 無効）
+const RECENTER_MS = numParam("recenterMs", 3000, { min: 0, max: 60000 });
 // maxDepth: これより遠いと推定された手は無視する（誤検出や他人の手は遠くに出やすい）
 const MAX_DEPTH_M = numParam("maxDepth", 1.5, { min: 0.2, max: 10 });
+// maxResidual: 3D 化の当てはめ残差（深度 1 の平面上の長さ）がこれを超える検出は捨てる。
+// 実機での典型値が分かっていないので既定は無効（HUD の res= を見て決める）
+const MAX_RESIDUAL = numParam("maxResidual", Infinity, { min: 0 });
+// matchDist: 前フレームの手と「同じ手」とみなす手首位置の距離 [m]（スロット割当に使う）
+const MATCH_DIST_M = numParam("matchDist", 0.2, { min: 0.02, max: 2 });
 // MediaPipe の信頼度閾値（既定はライブラリと同じ 0.5）
 const MIN_DET = numParam("minDet", 0.5, { min: 0, max: 1 });
 const MIN_PRESENCE = numParam("minPresence", 0.5, { min: 0, max: 1 });
@@ -127,6 +145,8 @@ ballHomeGhost.position.copy(BALL_HOME);
 stage.add(ballHomeGhost);
 const ballPos = BALL_HOME.clone();
 const ballVel = new THREE.Vector3();
+/** 現在のボールの色（ボタンで変わる。tracker 状態表示から戻すときに使う） */
+let ballColor = 0xfdd663;
 let touches = 0;
 let lastTouchMs = -Infinity;
 
@@ -190,13 +210,15 @@ type HandLabel = keyof typeof HAND_COLORS;
 type HandSlot = {
   view: HandView;
   /** 指差しの視線（人差し指の先 → 的）の表示 */
-  rayLine: THREE.Line;
+  rayLine: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   rayPositions: Float32Array;
   label: HandLabel;
   /** 平滑化済みの 21 点（カメラ座標系）。未検出なら null */
   ema: Vec3[] | null;
   lastSeenMs: number;
   depth: number;
+  /** 3D 化の当てはめ残差（HUD 用。実機で maxResidual を決める材料） */
+  residual: number;
   /** 5 指先のワールド座標（今フレーム）と前フレーム（速度計算用） */
   tipsWorld: THREE.Vector3[];
   tipsWorldMs: number;
@@ -232,6 +254,7 @@ for (let i = 0; i < 2; i++) {
     ema: null,
     lastSeenMs: -Infinity,
     depth: 0,
+    residual: 0,
     tipsWorld: FINGER_TIPS.map(() => new THREE.Vector3()),
     tipsWorldMs: 0,
     prevTipsWorld: null,
@@ -403,17 +426,22 @@ let lastDetectAt = -Infinity;
 let detIntervalEma = 0;
 let lastResultHands = 0;
 
-async function initTracker() {
+let retriedWithCpu = false;
+
+async function initTracker(delegate: typeof DELEGATE = DELEGATE) {
   trackerStatus = "loading";
   try {
     tracker = await createHandTracker(
       {
         numHands: NUM_HANDS,
-        delegate: DELEGATE,
+        delegate,
         modelUrls: MODEL_URLS,
         minHandDetectionConfidence: MIN_DET,
         minHandPresenceConfidence: MIN_PRESENCE,
         minTrackingConfidence: MIN_TRACK,
+        inputMaxSide: DET_W,
+        inputMaxSideCpu: 640,
+        canvas: MP_CANVAS_DOM ? document.createElement("canvas") : undefined,
       },
       (step) => {
         trackerStatus = `loading: ${step}`;
@@ -422,8 +450,52 @@ async function initTracker() {
     );
     const modelSource = tracker.modelUrl.startsWith("http") ? "remote" : "local";
     trackerStatus = `ready ${tracker.delegate} model=${modelSource}`;
+    showTrackerState("ready");
   } catch (e: unknown) {
     trackerStatus = `error: ${e instanceof Error ? e.message : String(e)}`;
+    showTrackerState("error");
+  }
+  renderHud();
+}
+
+// ゴーグル装着後は HUD（左下の小さな文字）が読めないので、ボールの見た目で状態を伝える:
+// 読み込み中は灰色のワイヤーフレーム、ready で実体化、error で赤いワイヤーフレーム
+function showTrackerState(state: "loading" | "ready" | "error") {
+  ballMaterial.wireframe = state !== "ready";
+  ballMaterial.transparent = state !== "ready";
+  ballMaterial.opacity = state === "ready" ? 1 : 0.6;
+  if (state === "error") {
+    ballMaterial.color.setHex(0xf28b82);
+  } else if (state === "loading") {
+    ballMaterial.color.setHex(0x9aa0a6);
+  } else {
+    ballMaterial.color.setHex(ballColor);
+  }
+  ballMaterial.needsUpdate = true;
+}
+
+/**
+ * 推論中の例外（GPU デリゲートは初期化は通るのに初回推論で落ちる端末がある、等）。
+ * setAnimationLoop の中で投げると次フレームが予約されず画面ごと止まるので、ここで受けて
+ * HUD に出す。auto で GPU だったなら一度だけ CPU で作り直す
+ */
+function onTrackerFailure(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e);
+  const failed = tracker;
+  tracker = null;
+  try {
+    failed?.close();
+  } catch {
+    // close 自体の失敗は無視（既に壊れている）
+  }
+  if (failed?.delegate === "GPU" && DELEGATE === "auto" && !retriedWithCpu) {
+    retriedWithCpu = true;
+    trackerStatus = `GPU で推論失敗 (${msg}) → CPU で再初期化`;
+    showTrackerState("loading");
+    void initTracker("CPU");
+  } else {
+    trackerStatus = `error: 推論失敗 ${msg}`;
+    showTrackerState("error");
   }
   renderHud();
 }
@@ -442,7 +514,13 @@ function updateFakeHands(now: number) {
   lastDetectAt = now;
   // 台本の目標（ボール・中央ボタン・2番目の的）をカメラ座標系で渡す
   camera.worldToLocal(stage.localToWorld(fakeScene.ballCam.copy(BALL_HOME)));
-  camera.worldToLocal(stage.localToWorld(fakeScene.buttonCam.copy(buttons[1].mesh.position)));
+  // ボタンは押されるとメッシュが沈むので、動かない押し込み前の位置（homeZ）を目標にする
+  // （メッシュ位置を追うと「押す → 沈む → 手も下がって離す → 戻る → また押す」のループになる）
+  camera.worldToLocal(
+    stage.localToWorld(
+      fakeScene.buttonCam.set(buttons[1].mesh.position.x, buttons[1].mesh.position.y, buttons[1].homeZ),
+    ),
+  );
   camera.worldToLocal(stage.localToWorld(fakeScene.targetCam.copy(targets[1].mesh.position)));
   const result = scriptedHand((now - fakeStartMs) / 1000, fakeScene, mapping);
   if (result) applyHandResult(result, now);
@@ -451,8 +529,17 @@ function updateFakeHands(now: number) {
 
 function updateHands(now: number) {
   if (FAKE_HANDS) updateFakeHands(now);
-  if (tracker && now - lastDetectAt >= DET_INTERVAL_MS) {
-    const result = tracker.detect(video);
+  const minInterval = tracker
+    ? Math.max(DET_INTERVAL_MS, tracker.lastMs * DET_ADAPT)
+    : 0;
+  if (tracker && now - lastDetectAt >= minInterval) {
+    let result: ReturnType<HandTracker["detect"]> = null;
+    try {
+      result = tracker.detect(video);
+    } catch (e: unknown) {
+      onTrackerFailure(e);
+      return;
+    }
     if (result) {
       if (lastDetectAt > 0) {
         detIntervalEma = detIntervalEma
@@ -484,72 +571,136 @@ type HandResultLike = {
   handedness: readonly (readonly { categoryName: string }[])[];
 };
 
+type DetectedHand = {
+  label: HandLabel;
+  /** カメラ座標系の 21 点 */
+  points: Vec3[];
+  world: readonly Vec3[];
+  depth: number;
+  residual: number;
+};
+
 function applyHandResult(result: HandResultLike, now: number) {
   const mapping = currentViewMapping();
   if (!mapping) return;
   lastResultHands = result.landmarks.length;
-  const used = new Set<HandSlot>();
+
+  // 1. 各検出を 3D 化する。形が崩れているもの・遠すぎるものはここで捨てる
+  const detected: DetectedHand[] = [];
   for (const [i, landmarks] of result.landmarks.entries()) {
     const world = result.worldLandmarks[i];
-    if (!world || landmarks.length < LANDMARK_COUNT) continue;
+    if (!world || landmarks.length < LANDMARK_COUNT || world.length < LANDMARK_COUNT) continue;
+    const placement = solveHandPlacement(landmarks, world, mapping);
+    if (!placement || placement.depth > MAX_DEPTH_M || placement.residual > MAX_RESIDUAL) continue;
     // 背面カメラなので MediaPipe の Left/Right を入れ替える（HAND_COLORS のコメント参照）
     const reported = result.handedness[i]?.[0]?.categoryName;
     const label: HandLabel =
       reported === "Left" ? "R" : reported === "Right" ? "L" : "-";
-    // 右手は slot 0、左手は slot 1 に固定して、フレーム間で平滑化の対象がすり替わらないようにする。
-    // 同じ手が2つ検出された（両方 Right 等）ときだけ空いている方を使う
-    let slot = slots[label === "L" ? 1 : 0];
-    if (used.has(slot)) slot = slots.find((s) => !used.has(s))!;
-    used.add(slot);
-
-    const placement = solveHandPlacement(landmarks, world, mapping);
-    if (!placement || placement.depth > MAX_DEPTH_M) continue;
-    const points = placeLandmarks(landmarks, world, placement, mapping);
-    if (slot.ema && now - slot.lastSeenMs <= LOST_HIDE_MS) {
-      for (let k = 0; k < LANDMARK_COUNT; k++) {
-        const e = slot.ema[k];
-        e.x += (points[k].x - e.x) * SMOOTH;
-        e.y += (points[k].y - e.y) * SMOOTH;
-        e.z += (points[k].z - e.z) * SMOOTH;
-      }
-    } else {
-      slot.ema = points;
-    }
-    if (slot.label !== label) {
-      slot.label = label;
-      slot.view.setColor(HAND_COLORS[label]);
-      (slot.rayLine.material as THREE.LineBasicMaterial).color.setHex(HAND_COLORS[label]);
-    }
-    slot.view.update(slot.ema);
-    slot.depth = placement.depth;
-    slot.lastSeenMs = now;
-
-    // 指先のワールド座標（カメラの子なので camera.matrixWorld で変換）。前フレームは速度計算用に残す
-    const hadPrev = slot.prevTipsWorld !== null;
-    if (slot.prevTipsWorld) {
-      for (const [k, v] of slot.prevTipsWorld.entries()) v.copy(slot.tipsWorld[k]);
-      slot.prevTipsMs = slot.tipsWorldMs;
-    }
-    for (const [k, tipIndex] of FINGER_TIPS.entries()) {
-      const p = slot.ema[tipIndex];
-      slot.tipsWorld[k].set(p.x, p.y, p.z);
-      camera.localToWorld(slot.tipsWorld[k]);
-    }
-    slot.tipsWorldMs = now;
-    if (!hadPrev) {
-      // 見つけた最初のフレームは「前 = 今」にして速度 0 から始める（原点からの大速度を作らない）
-      slot.prevTipsWorld = slot.tipsWorld.map((v) => v.clone());
-      slot.prevTipsMs = now;
-    }
-
-    // 指差しポーズ（実寸の worldLandmarks で判定）。数フレーム続いたら切り替える
-    const pointingNow = isPointingPose(world);
-    slot.pointingStreak = pointingNow
-      ? Math.max(1, slot.pointingStreak + 1)
-      : Math.min(-1, slot.pointingStreak - 1);
-    if (slot.pointingStreak >= 3) slot.pointing = true;
-    if (slot.pointingStreak <= -3) slot.pointing = false;
+    detected.push({
+      label,
+      points: placeLandmarks(landmarks, world, placement, mapping),
+      world,
+      depth: placement.depth,
+      residual: placement.residual,
+    });
+    if (detected.length >= slots.length) break;
   }
+
+  // 2. スロット割当: 表示中のスロットと手首の位置が近いもの同士を「同じ手の続き」として組む。
+  //    左右ラベルは背面カメラでは1フレームだけ反転することがあるので、割当には使わず色にだけ使う
+  //    （コードレビュー指摘: ラベルで固定すると反転のたびに骨格が2つ出て当たり判定がダブる）
+  const assignment = new Map<HandSlot, DetectedHand>();
+  const continuing = new Set<HandSlot>();
+  const taken = new Set<DetectedHand>();
+  const pairs: { slot: HandSlot; hand: DetectedHand; dist: number }[] = [];
+  for (const slot of slots) {
+    if (!slot.ema || now - slot.lastSeenMs > LOST_HIDE_MS) continue;
+    for (const hand of detected) {
+      const a = slot.ema[WRIST];
+      const b = hand.points[WRIST];
+      pairs.push({ slot, hand, dist: Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) });
+    }
+  }
+  pairs.sort((p, q) => p.dist - q.dist);
+  for (const { slot, hand, dist } of pairs) {
+    if (dist > MATCH_DIST_M) break;
+    if (assignment.has(slot) || taken.has(hand)) continue;
+    assignment.set(slot, hand);
+    continuing.add(slot);
+    taken.add(hand);
+  }
+  // 続きではない手は空いているスロットへ（非表示のスロットを優先。無ければ、今フレーム
+  // 対応する手が見つからなかった表示中のスロットを乗っ取る = その手は消えたとみなす）
+  for (const hand of detected) {
+    if (taken.has(hand)) continue;
+    const free =
+      slots.find((s) => !assignment.has(s) && !(s.ema && now - s.lastSeenMs <= LOST_HIDE_MS)) ??
+      slots.find((s) => !assignment.has(s));
+    if (!free) break;
+    assignment.set(free, hand);
+    taken.add(hand);
+  }
+
+  // 3. スロットを更新
+  for (const [slot, hand] of assignment) {
+    updateSlot(slot, hand, now, continuing.has(slot));
+  }
+}
+
+/** @param continuing 前フレームの同じ手の続きなら true（平滑化・速度を引き継ぐ） */
+function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing: boolean) {
+  if (continuing && slot.ema) {
+    for (let k = 0; k < LANDMARK_COUNT; k++) {
+      const e = slot.ema[k];
+      e.x += (hand.points[k].x - e.x) * SMOOTH;
+      e.y += (hand.points[k].y - e.y) * SMOOTH;
+      e.z += (hand.points[k].z - e.z) * SMOOTH;
+    }
+  } else {
+    // 新しく見つけた手（または別の手に入れ替わった）: 前の手の速度・指差し状態を引き継がない
+    slot.ema = hand.points;
+    slot.prevTipsWorld = null;
+    slot.pointingStreak = 0;
+    slot.pointing = false;
+    slot.hoverTarget = -1;
+    slot.dwellMs = 0;
+    slot.dwellLatched = false;
+  }
+  if (slot.label !== hand.label) {
+    slot.label = hand.label;
+    slot.view.setColor(HAND_COLORS[hand.label]);
+    slot.rayLine.material.color.setHex(HAND_COLORS[hand.label]);
+  }
+  slot.view.update(slot.ema);
+  slot.depth = hand.depth;
+  slot.residual = hand.residual;
+  slot.lastSeenMs = now;
+
+  // 指先のワールド座標（カメラの子なので camera.matrixWorld で変換）。前フレームは速度計算用に残す
+  const hadPrev = slot.prevTipsWorld !== null;
+  if (slot.prevTipsWorld) {
+    for (const [k, v] of slot.prevTipsWorld.entries()) v.copy(slot.tipsWorld[k]);
+    slot.prevTipsMs = slot.tipsWorldMs;
+  }
+  for (const [k, tipIndex] of FINGER_TIPS.entries()) {
+    const p = slot.ema[tipIndex];
+    slot.tipsWorld[k].set(p.x, p.y, p.z);
+    camera.localToWorld(slot.tipsWorld[k]);
+  }
+  slot.tipsWorldMs = now;
+  if (!hadPrev) {
+    // 見つけた最初のフレームは「前 = 今」にして速度 0 から始める（原点からの大速度を作らない）
+    slot.prevTipsWorld = slot.tipsWorld.map((v) => v.clone());
+    slot.prevTipsMs = now;
+  }
+
+  // 指差しポーズ（実寸の worldLandmarks で判定）。数フレーム続いたら切り替える
+  const pointingNow = isPointingPose(hand.world);
+  slot.pointingStreak = pointingNow
+    ? Math.max(1, slot.pointingStreak + 1)
+    : Math.min(-1, slot.pointingStreak - 1);
+  if (slot.pointingStreak >= 3) slot.pointing = true;
+  if (slot.pointingStreak <= -3) slot.pointing = false;
 }
 
 // ---- 操作 1: ボールを押す ----
@@ -558,6 +709,7 @@ const SPRING_C = 4; // 減衰（臨界減衰 2√K ≈ 6.3 より弱めにして
 const tmpLocal = new THREE.Vector3();
 const tmpPrevLocal = new THREE.Vector3();
 const tmpNormal = new THREE.Vector3();
+const tmpVel = new THREE.Vector3();
 
 function updateBall(dt: number, now: number) {
   for (const slot of slots) {
@@ -577,7 +729,7 @@ function updateBall(dt: number, now: number) {
       let speedAlong = 0;
       if (slot.prevTipsWorld && tipDt > 0) {
         stage.worldToLocal(tmpPrevLocal.copy(slot.prevTipsWorld[k]));
-        speedAlong = tmpLocal.clone().sub(tmpPrevLocal).divideScalar(tipDt).dot(tmpNormal);
+        speedAlong = tmpVel.subVectors(tmpLocal, tmpPrevLocal).divideScalar(tipDt).dot(tmpNormal);
       }
       const push = THREE.MathUtils.clamp(Math.max(0.5, speedAlong * 1.2), 0.5, 2.5);
       const current = ballVel.dot(tmpNormal);
@@ -600,11 +752,15 @@ function updateBall(dt: number, now: number) {
 
 // ---- 操作 2: ボタンを押す ----
 const tmpBox = new THREE.Box3();
+const tmpBoxSize = new THREE.Vector3();
+// 当たり箱は表面から奥（プレート側）へ深く取る。指が奥へ突き抜けても押したまま扱い、
+// 引き戻す途中で二重に押下したことにならないように（深度推定は数 cm ぶれる前提）
+const BUTTON_THROUGH_DEPTH = 0.06;
 function updateButtons() {
   for (const button of buttons) {
     tmpBox.setFromCenterAndSize(
-      tmpVec.set(button.mesh.position.x, button.mesh.position.y, button.homeZ),
-      BUTTON_SIZE,
+      tmpVec.set(button.mesh.position.x, button.mesh.position.y, button.homeZ - BUTTON_THROUGH_DEPTH / 2),
+      tmpBoxSize.set(BUTTON_SIZE.x, BUTTON_SIZE.y, BUTTON_SIZE.z + BUTTON_THROUGH_DEPTH),
     );
     tmpBox.expandByScalar(TIP_R);
     let inside = false;
@@ -621,9 +777,10 @@ function updateButtons() {
     if (inside && !button.pressed) {
       button.pressed = true;
       presses++;
+      ballColor = button.color;
       ballMaterial.color.setHex(button.color);
       ballMaterial.emissive.setHex(button.color);
-      (ballHomeGhost.material as THREE.MeshBasicMaterial).color.setHex(button.color);
+      ballHomeGhost.material.color.setHex(button.color);
     } else if (!inside && button.pressed) {
       button.pressed = false;
     }
@@ -643,9 +800,12 @@ raycaster.far = 10;
 const camWorldPos = new THREE.Vector3();
 const rayDir = new THREE.Vector3();
 const rayEnd = new THREE.Vector3();
+const targetMeshes = targets.map((t) => t.mesh);
+/** 的ごとの滞留進捗（0..1、表示用）。毎フレーム使い回す */
+const hovered = targets.map(() => 0);
 
 function updatePointing(dt: number) {
-  const hovered = targets.map(() => 0); // 的ごとの滞留進捗（0..1、表示用）
+  hovered.fill(0);
   camera.getWorldPosition(camWorldPos);
   for (const slot of slots) {
     if (!slot.view.visible || !slot.pointing) {
@@ -658,10 +818,7 @@ function updatePointing(dt: number) {
     const tip = slot.tipsWorld[FINGER_TIPS.indexOf(INDEX_TIP)];
     rayDir.subVectors(tip, camWorldPos).normalize();
     raycaster.set(camWorldPos, rayDir);
-    const hit = raycaster.intersectObjects(
-      targets.map((t) => t.mesh),
-      false,
-    )[0];
+    const hit = raycaster.intersectObjects(targetMeshes, false)[0];
     const hitIndex = hit ? targets.findIndex((t) => t.mesh === hit.object) : -1;
     if (hitIndex !== slot.hoverTarget) {
       slot.hoverTarget = hitIndex;
@@ -690,17 +847,68 @@ function updatePointing(dt: number) {
   }
 }
 
-// ---- ステージの向き合わせ（開始後、最初に頭が水平になったフレームで正面を決める） ----
+// ---- ステージの向き合わせ（正面を決める） ----
+// DeviceOrientationControls の yaw はコンパス基準なので、開始時にユーザーがどちらを向いて
+// いるかは分からない。three-stdlib は最初のセンサーイベントまで deviceOrientation を全ゼロ
+// （= 真下を向いたクォータニオン）で持つので、camera.quaternion をそのまま信じると誤る。
+// そこで (1) 実際に deviceorientation イベントを受けてから、(2) 横向きで、(3) 頭が水平
+// （上下 30° 以内）な状態が ALIGN_HOLD_MS 続いた所で「装着して前を向いた」とみなして揃える。
+// 開始タップや fs-button の 2 タップ目はスマホを顔の前に持った姿勢で行われ、そのときの
+// 向きで確定すると装着後に目の前に出ないことがあるため、瞬間ではなく継続で判定する。
+// 揃えた後も、正面から 90° 超ずれた状態が RECENTER_MS 続いたら取り直す（装着中はタップ
+// できないので、体ごと向きを変えたときの自動再センター）
+let orientationReceived = false;
 const forward = new THREE.Vector3();
-function alignStageIfNeeded() {
-  if (stageAligned || !controls) return;
+let levelSinceMs = -1;
+let offAxisSinceMs = -1;
+
+function isLevelForward(): boolean {
   forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  // 開始タップ時はスマホを手に持って下を向いていることが多く、そのときの yaw は
-  // 当てにならない。ゴーグルを付けて前を向いた（上下 30° 以内）最初の瞬間に揃える
-  if (Math.abs(forward.y) > 0.5) return;
+  return Math.abs(forward.y) <= 0.5;
+}
+
+function alignStage() {
   stage.rotation.y = Math.atan2(-forward.x, -forward.z);
   stage.updateMatrixWorld(true);
   stageAligned = true;
+}
+
+function alignStageIfNeeded(now: number) {
+  if (!document.body.classList.contains("started")) return;
+  if (!(controls instanceof DeviceOrientationControls)) {
+    // PC（OrbitControls）や、センサー許可が拒否されて頭追従が無い場合: 初期の向きが正面
+    if (!stageAligned) {
+      forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      alignStage();
+    }
+    return;
+  }
+  if (!orientationReceived) return;
+  if (!stageAligned) {
+    const landscape = innerWidth > innerHeight;
+    if (landscape && isLevelForward()) {
+      if (levelSinceMs < 0) levelSinceMs = now;
+      if (now - levelSinceMs >= ALIGN_HOLD_MS) alignStage();
+    } else {
+      levelSinceMs = -1;
+    }
+    return;
+  }
+  if (RECENTER_MS <= 0) return;
+  // 視線の yaw とステージの正面の差（水平成分だけ見る）
+  forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  const yaw = Math.atan2(-forward.x, -forward.z);
+  let diff = Math.abs(yaw - stage.rotation.y) % (Math.PI * 2);
+  if (diff > Math.PI) diff = Math.PI * 2 - diff;
+  if (diff > Math.PI / 2 && isLevelForward()) {
+    if (offAxisSinceMs < 0) offAxisSinceMs = now;
+    if (now - offAxisSinceMs >= RECENTER_MS) {
+      alignStage();
+      offAxisSinceMs = -1;
+    }
+  } else {
+    offAxisSinceMs = -1;
+  }
 }
 
 // ---- 頭追従（02 と同じ。PC は OrbitControls） ----
@@ -711,6 +919,14 @@ const isTouchDevice = matchMedia("(pointer: coarse)").matches;
 function startControls() {
   if (isTouchDevice) {
     controls = new DeviceOrientationControls(camera);
+    // 向き合わせ用: 実際にセンサー値が届いたことを知る（controls は初期値を全ゼロで持つため区別できない）
+    addEventListener(
+      "deviceorientation",
+      () => {
+        orientationReceived = true;
+      },
+      { once: true },
+    );
   } else {
     const orbit = new OrbitControls(camera, renderer.domElement);
     orbit.target.set(0, 1.6, -0.01);
@@ -740,13 +956,13 @@ const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "" };
 function renderHud() {
   const handLines = slots
     .filter((s) => s.view.visible)
-    .map((s) => `${s.label}:${s.depth.toFixed(2)}m${s.pointing ? " point" : ""}`)
+    .map((s) => `${s.label}:${s.depth.toFixed(2)}m res=${s.residual.toFixed(3)}${s.pointing ? " point" : ""}`)
     .join(" ");
   const pointing = slots
     .filter((s) => s.pointing && s.hoverTarget >= 0)
     .map((s) => `${s.label}→target${s.hoverTarget + 1} ${s.dwellLatched ? "done" : `${Math.round((s.dwellMs / DWELL_MS) * 100)}%`}`)
     .join(" ");
-  hud.textContent = [
+  const text = [
     hudState.base,
     hudState.sensor && `sensor=${hudState.sensor}`,
     hudState.cam && `cam=${hudState.cam}`,
@@ -754,13 +970,19 @@ function renderHud() {
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
     `tracker=${trackerStatus}`,
     (tracker || FAKE_HANDS) &&
-      `hands=${lastResultHands} ${handLines || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
+      `hands=${lastResultHands} ${handLines || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms in=${tracker?.lastInput || "-"}`,
     pointing && `point: ${pointing}`,
     `touches=${touches} presses=${presses} selects=${selections} stage=${stageAligned ? "aligned" : "waiting"}`,
   ]
     .filter(Boolean)
     .join("\n");
+  // 毎フレーム呼ばれるので、変化が無ければ DOM を触らない（レイアウトを走らせない）
+  if (text !== lastHudText) {
+    lastHudText = text;
+    hud.textContent = text;
+  }
 }
+let lastHudText = "";
 
 // ---- 開始フロー（02 と同じ直列化。iOS の制約はそちらのコメント参照） ----
 const fsButton = document.querySelector<HTMLButtonElement>("#fs-button")!;
@@ -782,8 +1004,13 @@ startButton.addEventListener("click", () => {
   hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE}`;
   renderHud();
   // wasm + モデルの読み込み（数秒）は許可ダイアログと並行して進める。カメラの成否とは独立
-  if (FAKE_HANDS) trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
-  else void initTracker();
+  if (FAKE_HANDS) {
+    trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
+    showTrackerState("ready");
+  } else {
+    showTrackerState("loading");
+    void initTracker();
+  }
 
   async function startCameraWithHud() {
     hudState.cam = "requesting";
@@ -865,7 +1092,7 @@ renderer.setAnimationLoop(() => {
   // 手のワールド座標（camera.localToWorld）に今フレームの頭の向きを反映させる。
   // 通常は render 時に更新されるので、その前に使うここで明示的に更新する
   camera.updateMatrixWorld();
-  alignStageIfNeeded();
+  alignStageIfNeeded(now);
   updateHands(now);
   updateBall(dt, now);
   updateButtons();

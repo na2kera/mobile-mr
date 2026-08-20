@@ -7,6 +7,9 @@ import {
   HAND_CONNECTIONS,
   INDEX_TIP,
   LANDMARK_COUNT,
+  MIN_DEPTH_M,
+  fingerCurled,
+  fingerExtended,
   imageToRay,
   isPointingPose,
   placeLandmarks,
@@ -88,7 +91,7 @@ const mapping = {
     ),
   );
   check("placeLandmarks が元の 3D 位置を再現", maxErr < 1e-6, `maxErr=${maxErr}`);
-  check("HAND_CONNECTIONS は 21 本で index が範囲内", HAND_CONNECTIONS.length === 21 && HAND_CONNECTIONS.every(([a, b]) => a >= 0 && b < LANDMARK_COUNT));
+  check("HAND_CONNECTIONS は 21 本で index が範囲内", HAND_CONNECTIONS.length === 21 && HAND_CONNECTIONS.every(([a, b]) => a >= 0 && a < LANDMARK_COUNT && b >= 0 && b < LANDMARK_COUNT));
 }
 
 // ---- 遠い手・近い手・画面端でも復元できる ----
@@ -137,6 +140,16 @@ for (const truth of [
   // 全点が同じ画像位置 = 手の大きさが 0 に見える → 深度が無限大か負になるので弾く
   check("全点同一位置は null（または非物理的な深度にならない）", p === null || !(p.depth > 0 && p.depth < 100), p && `depth=${p.depth}`);
   check("点が足りなければ null", solveHandPlacement([], [], mapping) === null);
+  for (const [u, v] of [[0.3, 0.7], [0.9, 0.1], [0.51, 0.49]]) {
+    const off = world.map(() => ({ x: u, y: v, z: 0 }));
+    check(`全点同一位置 (${u}, ${v}) も null`, solveHandPlacement(off, world, mapping) === null);
+  }
+  // 手の一部がカメラより手前（深度 0 以下）になる入力: 残差計算で弾かれて null
+  {
+    const near = world.map((w) => project(0.02 + w.x, -0.01 - w.y, 0.03 + w.z, mapping));
+    const pn = solveHandPlacement(near, world, mapping);
+    check("深度がほぼ 0 の手は null（手前に出過ぎ）", pn === null || pn.depth <= 0.05, pn && `depth=${pn.depth}`);
+  }
   // 手のサイズを 0 にする（worldLandmarks が全部原点）: 形が無いので解けない
   const zero = world.map(() => ({ x: 0, y: 0, z: 0 }));
   const landmarks = world.map((w) => project(0.05 + w.x, -0.12 - w.y, 0.45 + w.z, mapping));
@@ -189,31 +202,82 @@ for (const truth of [
     const r = scriptedHand(t, sceneCam, mapping);
     if (!r) return null;
     const p = solveHandPlacement(r.landmarks[0], r.worldLandmarks[0], mapping);
-    const pts = placeLandmarks(r.landmarks[0], r.worldLandmarks[0], p, mapping);
-    return pts;
+    if (!p) return null;
+    return placeLandmarks(r.landmarks[0], r.worldLandmarks[0], p, mapping);
   };
+  const tipOrNaN = (t, i) => tipAt(t)?.[i] ?? { x: NaN, y: NaN, z: NaN };
   // 場面1（1.5 秒 = 掃引の中央）: 手の中心がボールの位置
   {
     const r = scriptedHand(1.5, sceneCam, mapping);
     const p = solveHandPlacement(r.landmarks[0], r.worldLandmarks[0], mapping);
-    check("場面1: 手の中心がボール位置を通る", near(p.x, 0, 1e-6) && near(p.y, -0.15, 1e-6) && near(p.depth, 0.45, 1e-6));
+    check("場面1: 手の中心がボール位置を通る", p && near(p.x, 0, 1e-6) && near(p.y, -0.15, 1e-6) && near(p.depth, 0.45, 1e-6));
   }
   // 場面2（4.5 秒 = 奥行き掃引の中央）: 人差し指の先がボタン位置
   {
-    const pts = tipAt(4.5);
-    const tip = pts[INDEX_TIP];
+    const tip = tipOrNaN(4.5, INDEX_TIP);
     check("場面2: 人差し指の先がボタン位置を通る", near(tip.x, 0, 1e-6) && near(tip.y, -0.3, 1e-6) && near(tip.z, -0.4, 1e-6), `tip=(${tip.x.toFixed(3)}, ${tip.y.toFixed(3)}, ${tip.z.toFixed(3)})`);
   }
   // 場面3（8 秒）: 指差しポーズで、指先が「原点 → 的」の線上
   {
     const r = scriptedHand(8, sceneCam, mapping);
     check("場面3: 指差しポーズ", isPointingPose(r.worldLandmarks[0]));
-    const tip = tipAt(8)[INDEX_TIP];
+    const tip = tipOrNaN(8, INDEX_TIP);
     const s = tip.z / sceneCam.targetCam.z;
     check("場面3: 指先が視点と的を結ぶ線上", near(tip.x, sceneCam.targetCam.x * s, 1e-6) && near(tip.y, sceneCam.targetCam.y * s, 1e-6));
   }
   check("場面4: 手なし（null）", scriptedHand(11, sceneCam, mapping) === null);
   check("12 秒で周期が戻る", scriptedHand(12.5, sceneCam, mapping) !== null);
+}
+
+
+// ---- repeatY < 1（映像が片目より縦長 / camZoom < 1）のマッピングでも往復できる ----
+{
+  const m2 = { tanHalfFov: Math.tan((60 / 2) * (Math.PI / 180)), eyeAspect: 1.2, repeatX: 0.8, repeatY: 0.7 };
+  const r = imageToRay(0.2, 0.35, m2);
+  const back = projectToImage({ x: r.x * 0.8, y: r.y * 0.8, z: -0.8 }, m2);
+  check("repeatY<1 でも projectToImage∘imageToRay = id", near(back.x, 0.2, 1e-12) && near(back.y, 0.35, 1e-12));
+  const edgeTop = imageToRay(0.5, 0.5 - m2.repeatY / 2, m2);
+  check("repeatY<1: 見えている上端 = tan(半FOV)", near(edgeTop.y, m2.tanHalfFov, 1e-12) && near(edgeTop.x, 0, 1e-12));
+  const world = toWorld(openHand());
+  const truth = { x: -0.08, y: 0.06, depth: 0.55 };
+  const landmarks = world.map((w) => project(truth.x + w.x, truth.y - w.y, truth.depth + w.z, m2));
+  const p = solveHandPlacement(landmarks, world, m2);
+  check("repeatY<1 でも並進を復元", p && near(p.x, truth.x, 1e-6) && near(p.y, truth.y, 1e-6) && near(p.depth, truth.depth, 1e-6));
+}
+
+// ---- worldLandmarks 側のノイズ（実機で支配的: 形の実寸が ±3mm ぶれる） ----
+{
+  const world = toWorld(openHand());
+  const truth = { x: 0.05, y: -0.12, depth: 0.45 };
+  const landmarks = world.map((w) => project(truth.x + w.x, truth.y - w.y, truth.depth + w.z, mapping));
+  let seed = 777;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+  const noisy = world.map((w) => ({ x: w.x + rand() * 0.003, y: w.y + rand() * 0.003, z: w.z + rand() * 0.003 }));
+  const p = solveHandPlacement(landmarks, noisy, mapping);
+  check("world ±3mm のノイズでも深度誤差 15% 以内", p && Math.abs(p.depth - truth.depth) / truth.depth < 0.15, p && `depth=${p.depth.toFixed(4)}`);
+}
+
+// ---- 指の伸び/曲げの中間帯は「伸びている」でも「曲がっている」でもない ----
+{
+  const world = toWorld(openHand());
+  // 人差し指の先を PIP より 1cm だけ遠い位置に（閾値 0.5cm〜1.5cm の間）
+  const wrist = world[0];
+  const pip = world[INDEX_TIP - 2];
+  const dir = { x: pip.x - wrist.x, y: pip.y - wrist.y, z: pip.z - wrist.z };
+  const len = Math.hypot(dir.x, dir.y, dir.z);
+  const mid = world.map((w) => ({ ...w }));
+  mid[INDEX_TIP] = { x: wrist.x + (dir.x / len) * (len + 0.01), y: wrist.y + (dir.y / len) * (len + 0.01), z: wrist.z + (dir.z / len) * (len + 0.01) };
+  check("中間帯: extended でも curled でもない", !fingerExtended(mid, INDEX_TIP - 2, INDEX_TIP) && !fingerCurled(mid, INDEX_TIP - 2, INDEX_TIP));
+  check("中間帯の人差し指では指差しにならない", !isPointingPose(mid));
+}
+
+// ---- placeLandmarks の最小深度クランプ ----
+{
+  const world = toWorld(openHand());
+  const deep = world.map((w) => ({ ...w, z: w.z - 0.2 })); // 全点を 20cm 手前に
+  const landmarks = world.map((w) => project(0 + w.x, 0 - w.y, 0.3 + w.z, mapping));
+  const pts = placeLandmarks(landmarks, deep, { x: 0, y: 0, depth: 0.1, residual: 0 }, mapping);
+  check("手前に出過ぎた点は MIN_DEPTH_M でクランプ", pts.every((q) => -q.z >= MIN_DEPTH_M - 1e-12));
 }
 
 const failed = results.filter(([, ok]) => !ok);

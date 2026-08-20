@@ -27,6 +27,18 @@ export type HandTrackerOptions = {
   minHandDetectionConfidence: number;
   minHandPresenceConfidence: number;
   minTrackingConfidence: number;
+  /**
+   * 推論に渡す画像の長辺の上限 [px]。0 なら video をそのまま渡す。
+   * モデルの入力は 192〜224px 程度なので、30〜60cm 先の手なら 640 で十分
+   */
+  inputMaxSide: number;
+  /**
+   * inputMaxSide が 0 のとき、CPU デリゲートにだけ適用する上限。CPU 経路は video を
+   * フル解像度で 2D canvas に描いて getImageData で読むため、720p のままだと読み戻しが重い
+   */
+  inputMaxSideCpu: number;
+  /** MediaPipe に使わせる canvas。未指定なら MediaPipe が OffscreenCanvas を作る */
+  canvas?: HTMLCanvasElement;
 };
 
 export type HandTracker = {
@@ -36,6 +48,8 @@ export type HandTracker = {
   readonly modelUrl: string;
   /** 直近の推論の所要時間 [ms]（推論を走らせなかった呼び出しでは更新しない） */
   readonly lastMs: number;
+  /** 直近の推論に渡した画像サイズ（"1280x720" 形式。HUD 用） */
+  readonly lastInput: string;
   /**
    * video の新しいフレームに対して推論する。前回と同じフレーム（currentTime が同じ）や
    * まだフレームが来ていないときは null を返すので、呼び出し側は前回の結果を使い続ける
@@ -74,6 +88,7 @@ export async function createHandTracker(
     try {
       landmarker = await HandLandmarker.createFromOptions(fileset, {
         baseOptions: { modelAssetBuffer: new Uint8Array(buffer), delegate: d },
+        canvas: opts.canvas,
         runningMode: "VIDEO",
         numHands: opts.numHands,
         minHandDetectionConfidence: opts.minHandDetectionConfidence,
@@ -91,14 +106,27 @@ export async function createHandTracker(
   }
 
   const lm = landmarker;
+  const maxSide =
+    opts.inputMaxSide > 0
+      ? opts.inputMaxSide
+      : delegate === "CPU"
+        ? opts.inputMaxSideCpu
+        : 0;
+  // 縮小用 canvas（必要になったときだけ作る）
+  let scaled: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
   let lastVideoTime = -1;
   let lastTimestampMs = -1;
   const tracker = {
     delegate,
     modelUrl,
     lastMs: 0,
+    lastInput: "",
     detect(video: HTMLVideoElement): HandLandmarkerResult | null {
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+      // iOS の回転中などサイズが 0 の瞬間は渡さない（MediaPipe 側で例外になる）
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return null;
       if (video.currentTime === lastVideoTime) return null;
       lastVideoTime = video.currentTime;
       // VIDEO モードのタイムスタンプは単調増加が必須（同値・逆行はエラー）。
@@ -106,7 +134,30 @@ export async function createHandTracker(
       const ts = Math.max(performance.now(), lastTimestampMs + 1);
       lastTimestampMs = ts;
       const t0 = performance.now();
-      const result = lm.detectForVideo(video, ts);
+      let source: HTMLVideoElement | HTMLCanvasElement = video;
+      const scale = maxSide > 0 ? Math.min(1, maxSide / Math.max(vw, vh)) : 1;
+      if (scale < 1) {
+        // 縦横比はそのままなので、正規化座標（0..1）はフル解像度のときと同じ意味になる
+        const w = Math.round(vw * scale);
+        const h = Math.round(vh * scale);
+        if (!scaled) {
+          const canvas = document.createElement("canvas");
+          scaled = {
+            canvas,
+            ctx: canvas.getContext("2d", { willReadFrequently: true })!,
+          };
+        }
+        if (scaled.canvas.width !== w || scaled.canvas.height !== h) {
+          scaled.canvas.width = w;
+          scaled.canvas.height = h;
+        }
+        scaled.ctx.drawImage(video, 0, 0, w, h);
+        source = scaled.canvas;
+      }
+      // video の width 属性は 0 なので、映像の実サイズは videoWidth から取る
+      tracker.lastInput =
+        source === video ? `${vw}x${vh}` : `${source.width}x${source.height}`;
+      const result = lm.detectForVideo(source, ts);
       tracker.lastMs = performance.now() - t0;
       return result;
     },

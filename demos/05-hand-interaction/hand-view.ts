@@ -27,6 +27,9 @@ export class HandView {
       LANDMARK_COUNT,
     );
     this.joints.renderOrder = 10;
+    // InstancedMesh の境界球は初回描画時に一度だけ計算され、その後 setMatrixAt で動かしても
+    // 更新されない。最初に見えた位置でカリングされ続けないよう切る（bones も同様）
+    this.joints.frustumCulled = false;
     this.group.add(this.joints);
 
     this.bonePositions = new Float32Array(HAND_CONNECTIONS.length * 2 * 3);
