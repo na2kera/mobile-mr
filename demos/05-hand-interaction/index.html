@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>05. Hand Interaction — Mobile MR</title>
+    <style>
+      /* 見た目は 02 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #start-button {
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02/03/04 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（手の検出状態・推論時間・操作カウントを表示。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>05. Hand Interaction</h1>
+      <p>
+        開始するとセンサーとカメラの許可を求め、全画面表示に切り替わります。
+        許可後、スマホを横向きにして VR ゴーグルにセットし、
+        <strong>手を顔の前 30〜60cm</strong> に出してください。
+        カメラに映った手の骨格が重なって表示され、目の前に浮かぶボールを手で押す・
+        手前のボタンを指で押す・指差しで遠くの的を選ぶ、の3つが試せます。
+      </p>
+      <p>
+        手の検出は MediaPipe（約 20MB の wasm とモデル）を読み込むため、
+        開始後しばらく「tracker=」の表示が loading のままになります。
+        ボールが灰色のワイヤーフレームの間は読み込み中、実体化したら準備完了、赤なら失敗です。
+      </p>
+      <button id="start-button" type="button">開始</button>
+      <p>
+        確認の見方: ボールが実体化したら手の検出の準備完了。装着して前を向き約1秒で
+        HUD が stage=aligned になり、ボール・ボタンが目の前に来ます（出なければ体ごと
+        90° 以上向きを変えて 3 秒待つと取り直します）。右手は青・左手は橙の骨格が
+        背景の手に重なります。HUD の R:0.45m は推定した手までの距離なので、実際の距離
+        （30〜60cm）と比べてください。両眼で見ると骨格が背景の手から少しずれるのは
+        単眼パススルーの既知の制約です。
+      </p>
+      <p>
+        調整: ?fov=70&amp;eyeSep=0.064&amp;camZoom=1 は 02 と同じ。手の検出の既定は
+        ?hands=1&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0&amp;detAdapt=0&amp;detW=0
+        で、重いときは ?delegate=cpu / ?detW=640 / ?detAdapt=1.5 / ?detIntervalMs=100、
+        誤検出が多いときは HUD の res= を見て ?maxResidual=、手が映らないときは
+        ?mpCanvas=dom を試してください。?fakehands=1 は iPhone でも使え、MediaPipe
+        抜きでステレオ表示・向き合わせ・3操作だけを切り分けられます。
+        PC では ?fakecam=1&amp;autostart=1 で読み込み経路を、さらに &amp;fakehands=1
+        を足すと台本どおりに動く合成の手で3操作の経路を確認できます
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

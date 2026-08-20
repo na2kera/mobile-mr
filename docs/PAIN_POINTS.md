@@ -147,3 +147,74 @@
 - **どう対処したか**: URL パラメータでの調整で緩和（?detW= で検出解像度を上げる / ?camRes= で入力解像度を上げる / マーカーを大きく印刷して ?markerMm= を両端末で合わせる）。実機での実測: detW=1280 は検出 25〜30ms で描画が実質 30fps まで落ちて重い。**detW=960 が妥協点で、100mm マーカーで約 2.5m まで安定・検出 20ms 前後**。この結果を受けて 04 の既定値を 960 に変更した（03 は単独確認用なので 640 のまま）。根本対策（部屋規模の距離カバー）は未解決
 - **SDK ならどう解決するか（案）**: (1) 検出解像度の自動調整 — マーカーが小さくなってきたら detW を動的に上げる（常時高解像度は電池と発熱で不利） (2) マーカーの画面上サイズから「検出限界に近い」ことを検知してユーザーに警告する (3) 本命はマルチマーカー（docs/CONCEPT.md Phase 3 の将来拡張案）で、部屋の複数箇所にマーカーを貼って実用距離を面でカバーする。今回の実害がマルチマーカー着手の判断材料になる
 - **関連**: `demos/04-shared-room/main.ts` の DET_W / `src/shared/marker-detector.ts` / docs/CONCEPT.md「将来の拡張案：マルチマーカー」
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: MediaPipe の wasm 配信がバンドラ前提になっておらず、exports と FilesetResolver の決め打ちを迂回した
+
+- **何が苦しかったか**: `@mediapipe/tasks-vision` の標準手順は `FilesetResolver.forVisionTasks(basePath)` に wasm の置き場所ディレクトリを渡す（公式例は jsDelivr の CDN）。中で `${basePath}/vision_wasm_internal.js` と `.wasm` をファイル名決め打ちで探すため、Vite がハッシュ付きファイル名でアセットを出力する build では使えない。さらに package.json の `exports` が `./wasm/*` を公開していないため、`@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm?url` は rolldown の解決で `is not exported under the conditions` エラーになる（tsc は `?url` の型が vite/client のワイルドカードなので通ってしまい、build で初めて落ちる）。LAN + 自己署名 HTTPS の実機環境で CDN 依存を増やしたくない（「wss は Vite dev サーバーへの同居が必須」と同根）ので、ローカル配信にこだわった
+- **どう対処したか**: exports が公開しているサブパス `@mediapipe/tasks-vision/vision_wasm_internal.js` / `.wasm` を `?url` で import し、`WasmFileset`（ローダーと wasm の URL の組）を自前で組み立てて `HandLandmarker.createFromOptions` に渡した。SIMD 版のみ同梱し、`isSimdSupported()` が false の環境は明示エラーにした（nosimd 版も同梱すると dist が約 +11MB）
+- **SDK ならどう解決するか（案）**: `@mobile-mr/tracking` が wasm/モデルの配信を引き受け、バンドラ（Vite/webpack）向けのアセット解決をパッケージ側で済ませる。「CDN か自前配信か」は利用者が選べる1つのオプションにする
+- **追記（レビューでの確認）**: ローダーは ESM ではなく `<script>` 注入 + グローバル `ModuleFactory` 前提で動くため、CSP やモジュール Worker とは相性が悪い。また Vite dev は存在しないパスへの `fetch`（`Accept: */*`）にも index.html を 200 で返すので、モデルの取得では「HTTP 200 なのに中身が HTML」を自前のサイズ検証で弾く必要があった（実際に必要だったことを curl で確認済み）
+- **関連**: `demos/05-hand-interaction/hand-tracker.ts` の import 部分 / node_modules/@mediapipe/tasks-vision/package.json の exports
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: モデル（7.8MB）が npm パッケージに入っておらず、配布を自前で設計する必要があった
+
+- **何が苦しかったか**: HandLandmarker のモデル `hand_landmarker.task` は npm パッケージに含まれず、Google のストレージ（storage.googleapis.com）から実行時に取る前提。LAN 内の実機確認では iPhone 側が毎回インターネットへ取りに行くことになり、電波の弱い会場やオフライン LAN で詰む。かといって 7.8MB のバイナリを git に入れるのも避けたい。`modelAssetPath` に 404 になる URL を渡すと HTML をモデルとして読もうとして分かりにくいエラーになり、フォールバックもできない
+- **どう対処したか**: `npm run fetch:models` で `public/models/` に取得（gitignore）し、デモは「ローカル → 公式 URL」の順に自前で `fetch` してサイズを検証してから `modelAssetBuffer` で渡す。HUD に `model=local|remote` を出して、どちらから読んだか実機で分かるようにした
+- **SDK ならどう解決するか（案）**: SDK がモデルの取得元・キャッシュ（Cache API）・整合性検証を持ち、利用者は `hands: true` と書くだけにする。Phase 6 以降はモデルが増える（Pose 等）ので取得は1か所にまとめる
+- **関連**: `scripts/fetch-models.mjs` / `demos/05-hand-interaction/hand-tracker.ts` の fetchFirst / `demos/05-hand-interaction/main.ts` の MODEL_URLS
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: MediaPipe は手の「カメラからの距離」を返さず、3D 化は自前の最小二乗と FOV の仮定に依存する
+
+- **何が苦しかったか**: HandLandmarker が返すのは「画像上の正規化 2D 座標（z は手首基準の相対値）」と「手の中心を原点とした実寸 3D（worldLandmarks）」で、**カメラ座標系での絶対位置は返さない**。「ボールに触る」には手の絶対位置が要る。さらに画像位置 → 視線方向の換算には FOV が必要だが、実カメラの FOV はブラウザから取得できない（「カメラの焦点距離（内部パラメータ）がブラウザから取得できず」参照）。Phase 2 の「実カメラ・仮想カメラ・レンズの3つの FOV」問題が、ここでは**手の座標の精度**に直接効く
+- **どう対処したか**: worldLandmarks の形を画像上の見え方に当てはめ、手の中心の並進 (X, Y, 深度) を 42 本の式の最小二乗（3x3 正規方程式）で解いた。FOV は実カメラではなく**仮想カメラ + 背景の cover 切り抜き**（= 背景に映っている位置）を使い、「背景の手の真上に骨格が重なる」ことを優先した。仮想 FOV が現実とズレていても背景と仮想物体が同じだけズレる（自己整合）。合成データでは厳密に復元できることを Node の回帰テストで確認済みだが、実機での精度（worldLandmarks の実寸がどの程度正確か、ブレの大きさ）は未検証
+- **SDK ならどう解決するか（案）**: `mr.hands` が返す座標は「カメラ座標系の実寸」に統一し、FOV の管理（機種 DB・キャリブレーション）と合わせて SDK 内で吸収する。ステレオカメラや深度センサーが使える端末では置き換えられる差し込み口にする
+- **関連**: `demos/05-hand-interaction/hand-math.ts` の solveHandPlacement / placeLandmarks、`scripts/test-hand-math.mjs`
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: handedness が「鏡像（自撮り）」前提で、背面カメラでは左右が逆に返る
+
+- **何が苦しかったか**: MediaPipe の handedness（Left/Right）は前面カメラの鏡像映像を前提に付いており、背面カメラ（鏡像でない）では自分の右手が "Left" と返る。ドキュメント上はさりげない注記で、色分けを実装してみるまで気づきにくい
+- **どう対処したか**: 背面カメラ用途なのでデモ側でラベルを入れ替えた（R ⇔ L）。前面カメラに切り替えたらまた逆になる
+- **SDK ならどう解決するか（案）**: カメラの向き（facingMode / 鏡像かどうか）は SDK が知っているので、handedness の正規化を SDK の責務にする
+- **関連**: `demos/05-hand-interaction/main.ts` の applyHandResult（HAND_COLORS のコメント）
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: 「ユーザーの目の前」に物を置く基準が無く、向き合わせのヒューリスティックを自前で書いた
+
+- **何が苦しかったか**: DeviceOrientationControls の yaw はコンパス（北）基準なので、開始時にユーザーがどちらを向いているかは分からない。01/02 は物体を全方位に並べてこの問題を避けていたが、「手の届く所にボールを置く」Phase 5 では避けられない。開始タップはスマホを手に持って下を向いた状態で行われるので、そのときの yaw も当てにならない
+- **どう対処したか**: 最初は「開始後、頭が水平になった最初のフレームの yaw」で決めていたが、レビューで2つの穴が見つかった: (1) three-stdlib は最初のセンサーイベントまで `deviceOrientation` を全ゼロ（真下向き）で持つので `camera.quaternion` をそのまま信じられない、(2) 許可ダイアログ中は `controls` が null のままで、それを「頭追従なし」と誤認すると北向きで確定してしまう。現行は「許可フローの決着（sensorSettled）→ 最初の `deviceorientation` 受信 → 横向き + 水平（上下 30° 以内）が 1 秒連続」で確定し、確定後も正面から 90° 超のズレが 3 秒続いたら自動で取り直す（装着中はタップできないため）。45〜90° のズレは直せないまま。実機での挙動は未確認
+- **SDK ならどう解決するか（案）**: `mr.recenter()` と「装着検知（頭が水平で安定した）」を SDK が持ち、アプリは「ユーザー正面」座標系に置くだけにする。Phase 3 のマーカー座標系がある場では、マーカー基準で置くことでこの問題自体が消える
+- **関連**: `demos/05-hand-interaction/main.ts` の alignStageIfNeeded
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: 手トラッキングは PC で再現できず、検出後の経路を検証するために「合成の手」の注入口を作った
+
+- **何が苦しかったか**: MediaPipe は実際の手がカメラに映らないと何も返さないため、PC（特にヘッドレス）では「手を検出した後」のロジック（3D 化・骨格描画・接触・押下・指差し）が一切動かせない。Phase 2 の「getUserMedia を使うデモは PC で自動テストできない」と同じ構造で、今回は入力がカメラ映像ではなく認識結果
+- **どう対処したか**: `?fakehands=1` で MediaPipe を使わず、台本どおり（ボールを横切る → ボタンを押し込む → 的を指差す → 消える）に動く合成のランドマークを applyHandResult に流す。再現手順: `?fakecam=1&autostart=1&fakehands=1` を開いて約 13 秒待つと、HUD のカウンタが `touches>=1 presses>=1 selects>=1` になる（12 秒周期の台本: ボール横切り → ボタン押し込み → 的を指差し → 手なし）。この確認は Playwright でシステムの Chrome を headless 起動して行った（Playwright は依存追加になるのでリポジトリには入れていない）。形状生成と投影は Node の回帰テスト（`npm run test:hand`）と共有している
+- **SDK ならどう解決するか（案）**: 「トラッキングソース」を差し替え可能にして、MediaPipe / 録画したランドマーク列 / 台本の合成データを同じ口から入れられるようにする。カメラのモックソースと並べて、CI で操作ロジックまで検証できる形にする
+- **関連**: `demos/05-hand-interaction/fake-hands.ts` / `demos/05-hand-interaction/main.ts` の updateFakeHands
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: 単眼パススルーの背景には視差が無く、3D の手やボールと奥行きが矛盾する
+
+- **何が苦しかったか**: 背景（`scene.background` のカメラ映像）は両眼に同じ画像を出すので視差ゼロ（= 無限遠）だが、手の骨格やボールは 0.3〜0.5m に置かれ `eyeSep=64mm` 分の視差が付く。0.4m では片目あたり約 ±32mm（約 4.6°）ずれるので、「背景に映った手の真上に骨格が重なる」のは中心カメラでの話で、装着時は実際の手が遠くに融像し、骨格とボールだけ手前に浮く。「ボールを押す」の体感に直接効く。実装中はこの矛盾に気づかず、コードレビュー（2名とも指摘）で定量化された
+- **どう対処したか**: **未解決**（実機で程度を確かめてから選ぶ）。候補は (a) 手のレイヤーだけ視差ゼロで描く（両眼とも中心カメラ位置で描く専用パス）、(b) 背景テクスチャを片目ごとに手の深度ぶん横にずらして近景を合わせる（遠景が二重になる妥協）、(c) 受け入れる。コード上は hand-math.ts の placeLandmarks のコメントと CONCEPT.md §9 の Phase 5 項（既知の制約）に記載
+- **SDK ならどう解決するか（案）**: ステレオ描画側が「視差を付けないレイヤー」を一級機能として持つ（HUD・手の骨格・背景と一体で見せたいもの用）。Phase 6（バレーボール）の「ボールが手前に飛んでくる」演出は必ずこの問題を踏むので、設計前提として扱う
+- **関連**: `demos/05-hand-interaction/hand-math.ts` の placeLandmarks / `demos/05-hand-interaction/main.ts` の camera.add(view.group)
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: 例外 1 回でアニメーションループが止まり、装着中は原因も見えない
+
+- **何が苦しかったか**: three の `setAnimationLoop` はコールバックが throw すると次の `requestAnimationFrame` を予約しない（`WebGLAnimation.js`）。MediaPipe の `detectForVideo` をその中で呼んでいたので、GPU デリゲートが初期化は通るのに初回推論で落ちる端末（iOS Safari で起こり得る）や、回転中のサイズ 0 フレームで例外が出ると、背景・頭追従・HUD がまとめて凍結する。ゴーグル内では「固まった」としか見えず、HUD にも理由が出ない
+- **どう対処したか**: 推論を try/catch で隔離し、失敗したら HUD に出して tracker を捨てる。auto で GPU だった場合は一度だけ CPU で作り直す。サイズ 0 のフレームは渡さない。加えて、装着後は HUD が読めないので、ボールの見た目（読み込み中はワイヤーフレーム / ready で実体化 / error で赤）で状態を出すようにした
+- **SDK ならどう解決するか（案）**: 「トラッキングの失敗を描画から隔離する」を SDK の責務にする（トラッキングは別のループ or Worker で回し、失敗はイベントとして通知する）。装着中に読める状態表示（視野内の 3D インジケータ）も SDK 側で標準装備にする。01 からの「実機で console が見えない」痛点の装着時版
+- **関連**: `demos/05-hand-interaction/main.ts` の onTrackerFailure / showTrackerState
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: メインスレッドの同期推論がステレオ描画のフレーム時間を揺らす（実測待ち）
+
+- **何が苦しかったか**: MediaPipe の推論は同期でメインスレッドを塞ぐ。カメラの 30fps に追従して毎フレーム回すと、描画フレームが「16ms / 推論の分だけ長い」を交互に繰り返すジッタになり、VR では一定の低 fps より酔いやすい。さらに追跡中の手が `numHands` 未満だと毎フレーム全画面の palm detection も走るので、片手しか出さないのに `hands=2` だと常に重い。CPU デリゲートは video をフル解像度で 2D canvas に描いて `getImageData` で読むため、720p のままだと読み戻しだけで重い。iOS Safari では Worker + OffscreenCanvas + `createImageBitmap(video)` の経路が限定的で、逃げ道が狭い
+- **どう対処したか**: 既定を `hands=1` にし、`detIntervalMs`（固定間引き）と `detAdapt`（直近の推論時間 × 係数を最小間隔にする）、CPU 時は長辺 640 に縮小して渡す `detW`（03/04 の detW と同じ発想）を用意した。どれが iPhone で良いかは実測で決める（未計測）
+- **SDK ならどう解決するか（案）**: 推論を Worker に隔離し、描画ループは「最新の結果を読むだけ」にする。端末ごとの推論時間を見て間引きを自動調整する。これは Phase 6 で Pose も動かすなら必須
+- **関連**: `demos/05-hand-interaction/main.ts` の updateHands / `demos/05-hand-interaction/hand-tracker.ts` の detect
+
+## [2026-08-21] Phase 5 / 05-hand-interaction: パススルー + 開始フローのボイラープレートが 4 本目になり、numParam の署名が 2 種類に分岐した
+
+- **何が苦しかったか**: `openBackCameraStream` / `startCamera` / `updateBackgroundCover` / `createFakeCameraStream` / 全画面化 / HUD / `pageshow` のひとかたまり（約 250 行）が 02 / 03 / 04 / 05 に複製されている。`numParam` は 02（min/max なし）と 03/04/05（min/max 付き）で署名が 2 種類に分かれ、同じ名前のパラメータが demo によって受け付ける範囲が違う。05 では手の検出入力の縮小（03/04 の `detW`）を最初持っておらず、レビューで同じ発想を入れることになった（= 共通化されていれば自動的に付いてきた機能）
+- **どう対処したか**: 方針どおり今は抽出しない（デモ内に書く）。Phase 6 はこれら全部 + マーカー + 通信 + 手を統合するので、着手前に `src/shared/passthrough-camera.ts` と開始フロー（許可の直列化 + 全画面 + HUD）の抽出を判断する
+- **SDK ならどう解決するか（案）**: `@mobile-mr/core` の「カメラ・センサー・全画面の許可フローと背景描画」そのもの。4 本の写しが要求仕様（超広角優先・解像度指定・縦横比補正・回転追従・フェイクカメラ・HUD）になる
+- **関連**: `demos/02-passthrough/main.ts`, `demos/03-marker-anchor/main.ts`, `demos/04-shared-room/main.ts`, `demos/05-hand-interaction/main.ts` の各 `numParam` / `startCamera`
