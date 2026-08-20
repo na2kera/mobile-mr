@@ -39,6 +39,8 @@ export type HandTrackerOptions = {
   inputMaxSideCpu: number;
   /** MediaPipe に使わせる canvas。未指定なら MediaPipe が OffscreenCanvas を作る */
   canvas?: HTMLCanvasElement;
+  /** 取得済みのモデル。指定があれば modelUrls からの取得を省く（CPU での作り直し用） */
+  modelBuffer?: ArrayBuffer;
 };
 
 export type HandTracker = {
@@ -46,6 +48,8 @@ export type HandTracker = {
   readonly delegate: Delegate;
   /** 実際に読み込めたモデルの URL */
   readonly modelUrl: string;
+  /** 読み込んだモデル本体（作り直すときに使い回す） */
+  readonly modelBuffer: ArrayBuffer;
   /** 直近の推論の所要時間 [ms]（推論を走らせなかった呼び出しでは更新しない） */
   readonly lastMs: number;
   /** 直近の推論に渡した画像サイズ（"1280x720" 形式。HUD 用） */
@@ -75,7 +79,9 @@ export async function createHandTracker(
 
   // モデルは自前で fetch して buffer で渡す。modelAssetPath で渡すと 404 の HTML を
   // モデルとして読もうとして分かりにくいエラーになり、フォールバックもできないため
-  const { buffer, url: modelUrl } = await fetchFirst(opts.modelUrls, onProgress);
+  const { buffer, url: modelUrl } = opts.modelBuffer
+    ? { buffer: opts.modelBuffer, url: "(reused)" }
+    : await fetchFirst(opts.modelUrls, onProgress);
 
   const fileset = { wasmLoaderPath, wasmBinaryPath };
   const delegates: Delegate[] =
@@ -119,6 +125,7 @@ export async function createHandTracker(
   const tracker = {
     delegate,
     modelUrl,
+    modelBuffer: buffer,
     lastMs: 0,
     lastInput: "",
     detect(video: HTMLVideoElement): HandLandmarkerResult | null {
@@ -144,7 +151,9 @@ export async function createHandTracker(
           const canvas = document.createElement("canvas");
           scaled = {
             canvas,
-            ctx: canvas.getContext("2d", { willReadFrequently: true })!,
+            // CPU デリゲートは縮小後に getImageData で読むので読み戻し前提の canvas にする。
+            // GPU デリゲートはテクスチャとして取り込むので通常の canvas のまま
+            ctx: canvas.getContext("2d", { willReadFrequently: delegate === "CPU" })!,
           };
         }
         if (scaled.canvas.width !== w || scaled.canvas.height !== h) {

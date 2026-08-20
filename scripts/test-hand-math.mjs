@@ -2,7 +2,14 @@
 // `npm run test:hand` で実行する。MediaPipe 本体は実機でしか動かせないので、
 // 「正解の 3D 位置から作った入力を与えたら元の位置が復元されるか」を Node で検証する。
 // テストフレームワークは使わない（依存追加はスタック変更なので相談が要る）。
-// Node 24 は .ts を型消去してそのまま import できる（tsconfig の erasableSyntaxOnly と対応）
+// Node 22.18+ は .ts を型消去してそのまま import できる（tsconfig の erasableSyntaxOnly と対応）
+//
+// 検証しているもの / していないもの:
+//   - 検証済み: imageToRay が背景の cover 切り抜き（repeat/offset）の逆変換になっていること、
+//     最小二乗ソルバが「合成した入力から並進を厳密に復元する」こと、指差し判定、合成の手の台本
+//   - 未検証（仮定）: MediaPipe の worldLandmarks の規約（y 下向き・z はカメラから遠いほど大きい・
+//     軸が画像に揃っている）。生成側（fake-hands.ts）とソルバ（hand-math.ts）に同じ仮定を
+//     置いているので、仮定が違っていてもここは通る。実機で「手の上下・奥行きの向き」を確認すること
 import {
   HAND_CONNECTIONS,
   INDEX_TIP,
@@ -125,8 +132,8 @@ for (const truth of [
   });
   const p = solveHandPlacement(landmarks, world, mapping);
   check(
-    "ノイズ入りでも深度誤差 10% 以内",
-    p && Math.abs(p.depth - truth.depth) / truth.depth < 0.1,
+    "ノイズ入りでも深度誤差 5% 以内",
+    p && Math.abs(p.depth - truth.depth) / truth.depth < 0.05,
     p && `depth=${p.depth.toFixed(4)} (truth ${truth.depth})`,
   );
   check("ノイズ入りでは残差が 0 より大きい（残差が機能している）", p && p.residual > 1e-6);
@@ -137,24 +144,25 @@ for (const truth of [
   const world = toWorld(openHand());
   const same = world.map(() => ({ x: 0.5, y: 0.5, z: 0 }));
   const p = solveHandPlacement(same, world, mapping);
-  // 全点が同じ画像位置 = 手の大きさが 0 に見える → 深度が無限大か負になるので弾く
-  check("全点同一位置は null（または非物理的な深度にならない）", p === null || !(p.depth > 0 && p.depth < 100), p && `depth=${p.depth}`);
+  // 全点が同じ画像位置 = 手の大きさが 0 に見える → 正規方程式が特異になり null
+  check("全点同一位置（画像中心）は null", p === null, p && `depth=${p.depth}`);
   check("点が足りなければ null", solveHandPlacement([], [], mapping) === null);
   for (const [u, v] of [[0.3, 0.7], [0.9, 0.1], [0.51, 0.49]]) {
     const off = world.map(() => ({ x: u, y: v, z: 0 }));
     check(`全点同一位置 (${u}, ${v}) も null`, solveHandPlacement(off, world, mapping) === null);
   }
   // 手の一部がカメラより手前（深度 0 以下）になる入力: 残差計算で弾かれて null
+  // （手の厚み ≈ 1.3cm より浅い 5mm に置くと、いくつかの点の深度が負になる）
   {
-    const near = world.map((w) => project(0.02 + w.x, -0.01 - w.y, 0.03 + w.z, mapping));
+    const near = world.map((w) => project(0.02 + w.x, -0.01 - w.y, 0.005 + w.z, mapping));
     const pn = solveHandPlacement(near, world, mapping);
-    check("深度がほぼ 0 の手は null（手前に出過ぎ）", pn === null || pn.depth <= 0.05, pn && `depth=${pn.depth}`);
+    check("一部がカメラより手前に来る手は null", pn === null, pn && `depth=${pn.depth}`);
   }
   // 手のサイズを 0 にする（worldLandmarks が全部原点）: 形が無いので解けない
   const zero = world.map(() => ({ x: 0, y: 0, z: 0 }));
   const landmarks = world.map((w) => project(0.05 + w.x, -0.12 - w.y, 0.45 + w.z, mapping));
   const pz = solveHandPlacement(landmarks, zero, mapping);
-  check("実寸が 0 の手は深度を返さない", pz === null || !(pz.depth > 0.02), pz && `depth=${pz.depth}`);
+  check("実寸が 0 の手は null（深度 0 に解けてしまうので弾く）", pz === null, pz && `depth=${pz.depth}`);
 }
 
 // ---- 指差し判定 ----
@@ -254,7 +262,7 @@ for (const truth of [
   const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
   const noisy = world.map((w) => ({ x: w.x + rand() * 0.003, y: w.y + rand() * 0.003, z: w.z + rand() * 0.003 }));
   const p = solveHandPlacement(landmarks, noisy, mapping);
-  check("world ±3mm のノイズでも深度誤差 15% 以内", p && Math.abs(p.depth - truth.depth) / truth.depth < 0.15, p && `depth=${p.depth.toFixed(4)}`);
+  check("world ±3mm のノイズでも深度誤差 5% 以内", p && Math.abs(p.depth - truth.depth) / truth.depth < 0.05, p && `depth=${p.depth.toFixed(4)}`);
 }
 
 // ---- 指の伸び/曲げの中間帯は「伸びている」でも「曲がっている」でもない ----
@@ -269,6 +277,19 @@ for (const truth of [
   mid[INDEX_TIP] = { x: wrist.x + (dir.x / len) * (len + 0.01), y: wrist.y + (dir.y / len) * (len + 0.01), z: wrist.z + (dir.z / len) * (len + 0.01) };
   check("中間帯: extended でも curled でもない", !fingerExtended(mid, INDEX_TIP - 2, INDEX_TIP) && !fingerCurled(mid, INDEX_TIP - 2, INDEX_TIP));
   check("中間帯の人差し指では指差しにならない", !isPointingPose(mid));
+}
+
+// ---- 生成関数に依存しない性質: 同じ見え方で実寸を s 倍すると深度も s 倍になる ----
+// 「手の実寸で深度を決める」の核心。入力（画像座標）は固定し、worldLandmarks だけ拡大する
+{
+  const world = toWorld(openHand());
+  const landmarks = world.map((w) => project(0.05 + w.x, -0.12 - w.y, 0.45 + w.z, mapping));
+  const base = solveHandPlacement(landmarks, world, mapping);
+  for (const s of [0.5, 2, 3]) {
+    const scaled = world.map((w) => ({ x: w.x * s, y: w.y * s, z: w.z * s }));
+    const p = solveHandPlacement(landmarks, scaled, mapping);
+    check(`実寸 ×${s} → 深度 ×${s}`, base && p && near(p.depth, base.depth * s, 1e-6) && near(p.x, base.x * s, 1e-6) && near(p.y, base.y * s, 1e-6), p && `depth=${p.depth.toFixed(4)}`);
+  }
 }
 
 // ---- placeLandmarks の最小深度クランプ ----

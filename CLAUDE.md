@@ -53,7 +53,7 @@
 5. **Phase 5: MediaPipe で Hand / Body Tracking** ← いまここ（実装中: `demos/05-hand-interaction/`。Hand のみ。Body は Phase 9 で扱う）
 6. Phase 6: MRバレーボール（統合ゲーム第1弾）
 7. Phase 7-8: Surface Mapping → MRスプラトゥーン
-8. Phase 9: 現実の人物と Player ID の対応
+8. Phase 9: 現実の人物と Player ID の対応（Body Tracking はここで扱う）
 9. Phase 10: SDK / ライブラリ化（`@mobile-mr/core` ほか。詳細は CONCEPT.md §6）
 
 Phase 1〜9 は上記「ライブラリ化の3段階戦略」の段階1にあたる。Phase 10 は別リポジトリでの段階2 → このリポジトリへの段階3、の順で進める。

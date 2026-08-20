@@ -6,7 +6,7 @@
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-export const MODELS = [
+const MODELS = [
   {
     file: "hand_landmarker.task",
     url: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
@@ -23,7 +23,10 @@ for (const { file, url } of MODELS) {
     // 途中で切れたファイルを取得済みと誤認しないよう、配布元のサイズと照合する
     // （HEAD が失敗したらサイズ不明として取得済み扱い）
     const expected = await fetch(url, { method: "HEAD" })
-      .then((r) => Number(r.headers.get("content-length")))
+      .then((r) => {
+        const len = r.ok ? r.headers.get("content-length") : null;
+        return len === null ? NaN : Number(len);
+      })
       .catch(() => NaN);
     if (!Number.isFinite(expected) || expected === existing.size) {
       console.log(`skip: ${file} は取得済み (${(existing.size / 1e6).toFixed(1)}MB)`);
@@ -38,6 +41,11 @@ for (const { file, url } of MODELS) {
     process.exit(1);
   }
   const buf = Buffer.from(await res.arrayBuffer());
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > 0 && declared !== buf.length) {
+    console.error(`failed: サイズが一致しない (${buf.length} != ${declared}) ${url}`);
+    process.exit(1);
+  }
   await writeFile(dest, buf);
   console.log(`saved: public/models/${file} (${(buf.length / 1e6).toFixed(1)}MB)`);
 }

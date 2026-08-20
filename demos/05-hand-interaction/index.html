@@ -146,8 +146,20 @@
       </p>
       <button id="start-button" type="button">開始</button>
       <p>
-        調整: ?fov=70&amp;eyeSep=0.064&amp;camZoom=1 は 02 と同じ。手の検出は
-        ?hands=2&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0 で調整できます。
+        確認の見方: ボールが実体化したら手の検出の準備完了。装着して前を向き約1秒で
+        HUD が stage=aligned になり、ボール・ボタンが目の前に来ます（出なければ体ごと
+        90° 以上向きを変えて 3 秒待つと取り直します）。右手は青・左手は橙の骨格が
+        背景の手に重なります。HUD の R:0.45m は推定した手までの距離なので、実際の距離
+        （30〜60cm）と比べてください。両眼で見ると骨格が背景の手から少しずれるのは
+        単眼パススルーの既知の制約です。
+      </p>
+      <p>
+        調整: ?fov=70&amp;eyeSep=0.064&amp;camZoom=1 は 02 と同じ。手の検出の既定は
+        ?hands=1&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0&amp;detAdapt=0&amp;detW=0
+        で、重いときは ?delegate=cpu / ?detW=640 / ?detAdapt=1.5 / ?detIntervalMs=100、
+        誤検出が多いときは HUD の res= を見て ?maxResidual=、手が映らないときは
+        ?mpCanvas=dom を試してください。?fakehands=1 は iPhone でも使え、MediaPipe
+        抜きでステレオ表示・向き合わせ・3操作だけを切り分けられます。
         PC では ?fakecam=1&amp;autostart=1 で読み込み経路を、さらに &amp;fakehands=1
         を足すと台本どおりに動く合成の手で3操作の経路を確認できます
       </p>

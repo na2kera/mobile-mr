@@ -260,6 +260,8 @@ User A                     User B
 
 **目的**: 現実の身体をMR世界の入力装置として利用する。
 
+> 2026-08-21 の判断: Phase 5 の実装は **Hand のみ**。ゴーグル装着時に背面カメラへ映るのは自分の手で、自分の体は映らないため、Body Tracking は「相手の体を映す」Phase 9 で扱う（§9 参照）。
+
 **技術**: MediaPipe Tasks Vision
 
 **認識対象**: Hand（Wrist / Thumb / Index / Middle / Ring / Pinky）、Body（Head / Shoulder / Elbow / Wrist / Hip / Knee / Ankle 等）
@@ -281,7 +283,7 @@ mr.body.on("update", (pose) => {
 
 ここまでの技術を統合する最初の本格ゲーム。
 
-**使用機能**: Stereo Rendering / Camera Passthrough / Shared Coordinates / Multiplayer / Hand Tracking / Body Tracking / Physics
+**使用機能**: Stereo Rendering / Camera Passthrough / Shared Coordinates / Multiplayer / Hand Tracking / Physics（Body Tracking は Phase 9 に移したため、ここでは相手の位置は Phase 4 の頭の姿勢で代用する）
 
 **衝突**:
 
@@ -330,6 +332,8 @@ Surface Mappingを利用。ユーザーが現実の壁・床などに仮想イ�
 **共有するもの**: Surface ID / UV / Color・Team / Radius / Timestamp / Player ID
 
 ### Phase 9：現実の人物とPlayer IDの対応
+
+> Body Tracking（MediaPipe Pose）の受け皿でもある。背面カメラに映る「相手」の体を認識して Player ID と結びつける（Phase 5 で Hand のみ実装した経緯は Phase 5 の注記を参照）。
 
 **目的**: カメラに映っている現実の人物と、ネットワーク上のPlayerを対応させる。
 

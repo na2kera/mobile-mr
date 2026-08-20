@@ -56,7 +56,8 @@ const DET_INTERVAL_MS = numParam("detIntervalMs", 0, { min: 0, max: 1000 });
 // detAdapt: 直近の推論時間 × この係数も最小間隔にする（0 = 無効）。推論が描画フレームを
 // 毎回塞ぐ端末で、一定間隔の間引きに自動で落とすため。実機で比較して決める
 const DET_ADAPT = numParam("detAdapt", 0, { min: 0, max: 10 });
-// detW: 推論に渡す画像の長辺 [px]。0 = video そのまま（GPU）/ CPU デリゲートのときだけ 640 に縮小
+// detW: 推論に渡す画像の長辺 [px]。0 = 自動（GPU は video そのまま / CPU は 640 に縮小）。
+// CPU で縮小を切りたいときは映像より大きい値（例 4096）を指定する
 const DET_W = numParam("detW", 0, { min: 0, max: 4096 });
 // mpCanvas=dom: MediaPipe に DOM の canvas を渡す（OffscreenCanvas 絡みの不具合の切り分け用）
 const MP_CANVAS_DOM = params.get("mpCanvas") === "dom";
@@ -71,8 +72,10 @@ const MAX_DEPTH_M = numParam("maxDepth", 1.5, { min: 0.2, max: 10 });
 // maxResidual: 3D 化の当てはめ残差（深度 1 の平面上の長さ）がこれを超える検出は捨てる。
 // 実機での典型値が分かっていないので既定は無効（HUD の res= を見て決める）
 const MAX_RESIDUAL = numParam("maxResidual", Infinity, { min: 0 });
-// matchDist: 前フレームの手と「同じ手」とみなす手首位置の距離 [m]（スロット割当に使う）
-const MATCH_DIST_M = numParam("matchDist", 0.2, { min: 0.02, max: 2 });
+// matchDist: 前回の手と「同じ手」とみなす手首位置の距離 [m]（スロット割当に使う）。
+// 推論の間隔が空くほど手は遠くへ動けるので、実際の閾値は matchDist + matchSpeed × 経過秒
+const MATCH_DIST_M = numParam("matchDist", 0.15, { min: 0.02, max: 2 });
+const MATCH_SPEED_MPS = numParam("matchSpeed", 2, { min: 0, max: 20 });
 // MediaPipe の信頼度閾値（既定はライブラリと同じ 0.5）
 const MIN_DET = numParam("minDet", 0.5, { min: 0, max: 1 });
 const MIN_PRESENCE = numParam("minPresence", 0.5, { min: 0, max: 1 });
@@ -215,6 +218,8 @@ type HandSlot = {
   label: HandLabel;
   /** 平滑化済みの 21 点（カメラ座標系）。未検出なら null */
   ema: Vec3[] | null;
+  /** 前回検出した手首の生の位置（カメラ座標系。同じ手かどうかの照合に使う。EMA は遅れるので使わない） */
+  lastWrist: Vec3;
   lastSeenMs: number;
   depth: number;
   /** 3D 化の当てはめ残差（HUD 用。実機で maxResidual を決める材料） */
@@ -252,6 +257,7 @@ for (let i = 0; i < 2; i++) {
     rayPositions,
     label: "-",
     ema: null,
+    lastWrist: { x: 0, y: 0, z: 0 },
     lastSeenMs: -Infinity,
     depth: 0,
     residual: 0,
@@ -427,14 +433,20 @@ let detIntervalEma = 0;
 let lastResultHands = 0;
 
 let retriedWithCpu = false;
+/** 直近の tracker の失敗理由（再初期化で trackerStatus が上書きされても HUD に残す） */
+let lastTrackerError = "";
 
-async function initTracker(delegate: typeof DELEGATE = DELEGATE) {
+async function initTracker(
+  delegate: typeof DELEGATE = DELEGATE,
+  modelBuffer?: ArrayBuffer,
+) {
   trackerStatus = "loading";
   try {
     tracker = await createHandTracker(
       {
         numHands: NUM_HANDS,
         delegate,
+        modelBuffer,
         modelUrls: MODEL_URLS,
         minHandDetectionConfidence: MIN_DET,
         minHandPresenceConfidence: MIN_PRESENCE,
@@ -448,7 +460,8 @@ async function initTracker(delegate: typeof DELEGATE = DELEGATE) {
         renderHud();
       },
     );
-    const modelSource = tracker.modelUrl.startsWith("http") ? "remote" : "local";
+    const modelSource =
+      modelBuffer ? "reused" : tracker.modelUrl.startsWith("http") ? "remote" : "local";
     trackerStatus = `ready ${tracker.delegate} model=${modelSource}`;
     showTrackerState("ready");
   } catch (e: unknown) {
@@ -480,7 +493,9 @@ function showTrackerState(state: "loading" | "ready" | "error") {
  * HUD に出す。auto で GPU だったなら一度だけ CPU で作り直す
  */
 function onTrackerFailure(e: unknown) {
+  console.error("[hand-tracker] 推論に失敗:", e);
   const msg = e instanceof Error ? e.message : String(e);
+  lastTrackerError = `${tracker?.delegate ?? "?"}: ${msg}`;
   const failed = tracker;
   tracker = null;
   try {
@@ -490,9 +505,9 @@ function onTrackerFailure(e: unknown) {
   }
   if (failed?.delegate === "GPU" && DELEGATE === "auto" && !retriedWithCpu) {
     retriedWithCpu = true;
-    trackerStatus = `GPU で推論失敗 (${msg}) → CPU で再初期化`;
+    trackerStatus = `GPU で推論失敗 → CPU で再初期化`;
     showTrackerState("loading");
-    void initTracker("CPU");
+    void initTracker("CPU", failed.modelBuffer); // モデルは取得済みのものを使い回す
   } else {
     trackerStatus = `error: 推論失敗 ${msg}`;
     showTrackerState("error");
@@ -511,6 +526,11 @@ function updateFakeHands(now: number) {
   const mapping = currentViewMapping();
   if (!mapping) return;
   if (fakeStartMs < 0) fakeStartMs = now;
+  if (lastDetectAt > 0) {
+    detIntervalEma = detIntervalEma
+      ? detIntervalEma * 0.9 + (now - lastDetectAt) * 0.1
+      : now - lastDetectAt;
+  }
   lastDetectAt = now;
   // 台本の目標（ボール・中央ボタン・2番目の的）をカメラ座標系で渡す
   camera.worldToLocal(stage.localToWorld(fakeScene.ballCam.copy(BALL_HOME)));
@@ -562,6 +582,20 @@ function updateHands(now: number) {
       slot.hoverTarget = -1;
     }
   }
+  // 指先のワールド座標は毎フレーム取り直す。骨格は camera の子なので頭の回転に毎フレーム
+  // 追従するが、判定に使う座標が推論時（間引くと 100ms 以上前）の頭の向きのままだと、
+  // 「骨格は触っているのに判定が外れる」が起きる（コードレビュー指摘）
+  for (const slot of slots) {
+    if (slot.view.visible && slot.ema) updateTipsWorld(slot);
+  }
+}
+
+function updateTipsWorld(slot: HandSlot) {
+  for (const [k, tipIndex] of FINGER_TIPS.entries()) {
+    const p = slot.ema![tipIndex];
+    slot.tipsWorld[k].set(p.x, p.y, p.z);
+    camera.localToWorld(slot.tipsWorld[k]);
+  }
 }
 
 /** HandLandmarkerResult のうち使う部分（合成の手 fake-hands.ts も同じ形で渡す） */
@@ -608,36 +642,46 @@ function applyHandResult(result: HandResultLike, now: number) {
 
   // 2. スロット割当: 表示中のスロットと手首の位置が近いもの同士を「同じ手の続き」として組む。
   //    左右ラベルは背面カメラでは1フレームだけ反転することがあるので、割当には使わず色にだけ使う
-  //    （コードレビュー指摘: ラベルで固定すると反転のたびに骨格が2つ出て当たり判定がダブる）
+  //    （コードレビュー指摘: ラベルで固定すると反転のたびに骨格が2つ出て当たり判定がダブる）。
+  //    照合は前回の「生の」手首位置と行う（EMA は遅れるので、速い手が別の手に見えてしまう）
   const assignment = new Map<HandSlot, DetectedHand>();
   const continuing = new Set<HandSlot>();
   const taken = new Set<DetectedHand>();
-  const pairs: { slot: HandSlot; hand: DetectedHand; dist: number }[] = [];
+  const isLive = (s: HandSlot) => s.ema !== null && now - s.lastSeenMs <= LOST_HIDE_MS;
+  const pairs: { slot: HandSlot; hand: DetectedHand; dist: number; limit: number }[] = [];
   for (const slot of slots) {
-    if (!slot.ema || now - slot.lastSeenMs > LOST_HIDE_MS) continue;
+    if (!isLive(slot)) continue;
+    const limit = MATCH_DIST_M + (MATCH_SPEED_MPS * (now - slot.lastSeenMs)) / 1000;
     for (const hand of detected) {
-      const a = slot.ema[WRIST];
+      const a = slot.lastWrist;
       const b = hand.points[WRIST];
-      pairs.push({ slot, hand, dist: Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) });
+      pairs.push({ slot, hand, dist: Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z), limit });
     }
   }
   pairs.sort((p, q) => p.dist - q.dist);
-  for (const { slot, hand, dist } of pairs) {
-    if (dist > MATCH_DIST_M) break;
+  for (const { slot, hand, dist, limit } of pairs) {
+    if (dist > limit) continue;
     if (assignment.has(slot) || taken.has(hand)) continue;
     assignment.set(slot, hand);
     continuing.add(slot);
     taken.add(hand);
   }
-  // 続きではない手は空いているスロットへ（非表示のスロットを優先。無ければ、今フレーム
-  // 対応する手が見つからなかった表示中のスロットを乗っ取る = その手は消えたとみなす）
+  // 続きと判定できなかった手の置き場所。MediaPipe は NUM_HANDS を超える手を返さないので、
+  // 「表示中のスロット + 未対応の手」が NUM_HANDS を超えるなら、未対応の表示中スロットの
+  // どれかは同じ手が閾値を超えて動いただけ → 最も古いものを乗っ取る（骨格が2本出るのを防ぐ）。
+  // 超えないなら本当に新しい手なので、非表示のスロットに入れる
   for (const hand of detected) {
     if (taken.has(hand)) continue;
-    const free =
-      slots.find((s) => !assignment.has(s) && !(s.ema && now - s.lastSeenMs <= LOST_HIDE_MS)) ??
-      slots.find((s) => !assignment.has(s));
-    if (!free) break;
-    assignment.set(free, hand);
+    const liveUnassigned = slots
+      .filter((s) => !assignment.has(s) && isLive(s))
+      .sort((a, b) => a.lastSeenMs - b.lastSeenMs);
+    const liveCount = slots.filter((s) => isLive(s) || assignment.has(s)).length;
+    const mustReuse = liveUnassigned.length > 0 && liveCount + 1 > NUM_HANDS;
+    const target = mustReuse
+      ? liveUnassigned[0]
+      : (slots.find((s) => !assignment.has(s) && !isLive(s)) ?? liveUnassigned[0]);
+    if (!target) break;
+    assignment.set(target, hand);
     taken.add(hand);
   }
 
@@ -675,6 +719,7 @@ function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing:
   slot.depth = hand.depth;
   slot.residual = hand.residual;
   slot.lastSeenMs = now;
+  slot.lastWrist = hand.points[WRIST];
 
   // 指先のワールド座標（カメラの子なので camera.matrixWorld で変換）。前フレームは速度計算用に残す
   const hadPrev = slot.prevTipsWorld !== null;
@@ -682,11 +727,7 @@ function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing:
     for (const [k, v] of slot.prevTipsWorld.entries()) v.copy(slot.tipsWorld[k]);
     slot.prevTipsMs = slot.tipsWorldMs;
   }
-  for (const [k, tipIndex] of FINGER_TIPS.entries()) {
-    const p = slot.ema[tipIndex];
-    slot.tipsWorld[k].set(p.x, p.y, p.z);
-    camera.localToWorld(slot.tipsWorld[k]);
-  }
+  updateTipsWorld(slot);
   slot.tipsWorldMs = now;
   if (!hadPrev) {
     // 見つけた最初のフレームは「前 = 今」にして速度 0 から始める（原点からの大速度を作らない）
@@ -858,6 +899,9 @@ function updatePointing(dt: number) {
 // 揃えた後も、正面から 90° 超ずれた状態が RECENTER_MS 続いたら取り直す（装着中はタップ
 // できないので、体ごと向きを変えたときの自動再センター）
 let orientationReceived = false;
+/** センサー許可の結果が出た（許可 / 拒否 / 不要）か。許可ダイアログ中は controls が null のままなので、
+ *  それを「頭追従なし」と誤認して整列しないためのフラグ */
+let sensorSettled = false;
 const forward = new THREE.Vector3();
 let levelSinceMs = -1;
 let offAxisSinceMs = -1;
@@ -867,19 +911,20 @@ function isLevelForward(): boolean {
   return Math.abs(forward.y) <= 0.5;
 }
 
-function alignStage() {
-  stage.rotation.y = Math.atan2(-forward.x, -forward.z);
+/** 視線の水平方向（fwd）を正面にしてステージを回す */
+function alignStage(fwd: THREE.Vector3) {
+  stage.rotation.y = Math.atan2(-fwd.x, -fwd.z);
   stage.updateMatrixWorld(true);
   stageAligned = true;
 }
 
 function alignStageIfNeeded(now: number) {
-  if (!document.body.classList.contains("started")) return;
+  if (!sensorSettled) return;
   if (!(controls instanceof DeviceOrientationControls)) {
     // PC（OrbitControls）や、センサー許可が拒否されて頭追従が無い場合: 初期の向きが正面
     if (!stageAligned) {
       forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-      alignStage();
+      alignStage(forward);
     }
     return;
   }
@@ -888,7 +933,7 @@ function alignStageIfNeeded(now: number) {
     const landscape = innerWidth > innerHeight;
     if (landscape && isLevelForward()) {
       if (levelSinceMs < 0) levelSinceMs = now;
-      if (now - levelSinceMs >= ALIGN_HOLD_MS) alignStage();
+      if (now - levelSinceMs >= ALIGN_HOLD_MS) alignStage(forward);
     } else {
       levelSinceMs = -1;
     }
@@ -903,7 +948,7 @@ function alignStageIfNeeded(now: number) {
   if (diff > Math.PI / 2 && isLevelForward()) {
     if (offAxisSinceMs < 0) offAxisSinceMs = now;
     if (now - offAxisSinceMs >= RECENTER_MS) {
-      alignStage();
+      alignStage(forward);
       offAxisSinceMs = -1;
     }
   } else {
@@ -953,6 +998,7 @@ function enterFullscreen(onStatus: (status: string) => void) {
 // ---- デバッグ用 HUD（02 と同じ + 手の検出状態） ----
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
 const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "" };
+let lastHudText = "";
 function renderHud() {
   const handLines = slots
     .filter((s) => s.view.visible)
@@ -968,11 +1014,11 @@ function renderHud() {
     hudState.cam && `cam=${hudState.cam}`,
     hudState.fsResult && `fs=${hudState.fsResult}`,
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
-    `tracker=${trackerStatus}`,
+    `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handLines || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms in=${tracker?.lastInput || "-"}`,
     pointing && `point: ${pointing}`,
-    `touches=${touches} presses=${presses} selects=${selections} stage=${stageAligned ? "aligned" : "waiting"}`,
+    `touches=${touches} presses=${presses} selects=${selections} stage=${stageAligned ? "aligned" : sensorSettled ? "waiting(level)" : "waiting(permission)"}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -982,7 +1028,6 @@ function renderHud() {
     hud.textContent = text;
   }
 }
-let lastHudText = "";
 
 // ---- 開始フロー（02 と同じ直列化。iOS の制約はそちらのコメント参照） ----
 const fsButton = document.querySelector<HTMLButtonElement>("#fs-button")!;
@@ -1001,7 +1046,7 @@ fsButton.addEventListener("click", tryEnterFullscreen);
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 startButton.addEventListener("click", () => {
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE}`;
+  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE} smooth=${SMOOTH} detW=${DET_W} detAdapt=${DET_ADAPT} detIntervalMs=${DET_INTERVAL_MS}`;
   renderHud();
   // wasm + モデルの読み込み（数秒）は許可ダイアログと並行して進める。カメラの成否とは独立
   if (FAKE_HANDS) {
@@ -1028,6 +1073,7 @@ startButton.addEventListener("click", () => {
 
   if (!isTouchDevice) {
     startControls();
+    sensorSettled = true;
     void startCameraWithHud();
     return;
   }
@@ -1037,6 +1083,7 @@ startButton.addEventListener("click", () => {
   };
   if (!doe.requestPermission) {
     startControls();
+    sensorSettled = true;
     startCameraWithHud().then(tryEnterFullscreen);
     return;
   }
@@ -1047,12 +1094,14 @@ startButton.addEventListener("click", () => {
       hudState.sensor = state;
       renderHud();
       if (state === "granted") startControls();
+      sensorSettled = true; // 拒否でも確定（頭追従なしで正面に置く）
       await startCameraWithHud();
       if (state === "granted") tryEnterFullscreen();
     })
     .catch(async (e: unknown) => {
       hudState.sensor =
         e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      sensorSettled = true;
       renderHud();
       await startCameraWithHud();
     });
