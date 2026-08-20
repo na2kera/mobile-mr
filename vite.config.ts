@@ -85,6 +85,9 @@ export default defineConfig({
         "demo-04-shared-room": fileURLToPath(
           new URL("./demos/04-shared-room/index.html", import.meta.url),
         ),
+        "demo-05-hand-interaction": fileURLToPath(
+          new URL("./demos/05-hand-interaction/index.html", import.meta.url),
+        ),
       },
     },
   },

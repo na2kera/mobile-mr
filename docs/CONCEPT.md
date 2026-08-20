@@ -493,7 +493,7 @@ Multi-user MR
 
 ## 9. 現在地
 
-Phase 4（Multiplayer）まで完了。次は Phase 5（Hand / Body Tracking）。技術スタックは Vite / TypeScript / Three.js。
+Phase 4（Multiplayer）まで完了。Phase 5（Hand Tracking）を実装中。技術スタックは Vite / TypeScript / Three.js。
 
 - Phase 1 完了（2026-08-13, `demos/01-stereo-box/`）: 左右2眼レンダリング + ジャイロ頭追従 + 全画面化。iPhone 実機 + ゴーグルで確認済み
 - Phase 2 完了（2026-08-14, `demos/02-passthrough/`）: 背面超広角カメラの映像を `VideoTexture` → `scene.background` で両眼の背景に表示。縦横比補正・回転追従・解像度指定込み。iPhone 実機で確認済み
@@ -501,6 +501,9 @@ Phase 4（Multiplayer）まで完了。次は Phase 5（Hand / Body Tracking）�
 - Phase 4 完了（2026-08-20, `demos/04-shared-room/`）: WebSocket（Vite dev サーバー同居）でマーカー座標系の pose を交換し、相手の位置にアバターを表示。**iPhone 2台 + マーカーで実機確認済み（2026-08-20）**: 相互の位置一致・移動追従とも良好。単一マーカーの実用距離は detW=960 で約 2.5m（PAIN_POINTS 参照）
   - 実用距離を伸ばすアイデア（後々やる。実測 100mm ≈ 2.5m からの換算）: **(1) マーカー拡大印刷** — A4 短辺いっぱいの正方形（黒枠 190〜200mm、余白考慮）なら 4.5〜5m が期待でき、部屋規模に近づく。両端末で `?markerMm=` を実測値に合わせること（Room の空間設定検証で不一致は入室拒否される）。marker.html に印刷サイズ指定を足すとなお良い **(2) マルチマーカー** — Phase 3 の「将来の拡張案」参照。(1) で足りなければ着手
   - スコープ外と明示した項目: **bfcache 復帰時のカメラ再開**（WebSocket は再接続するがカメラは HUD 警告のみ。02/03 共通の未対応領域で、段階2 SDK の lifecycle 層でまとめて設計する。PAIN_POINTS 参照）、**認証・レート制限・本番サーバーへの組み込み**（LAN デモの範囲では不要。公開運用時の課題）
+- Phase 5 実装中（2026-08-21, `demos/05-hand-interaction/`）: MediaPipe HandLandmarker（`@mediapipe/tasks-vision` 1.0.1 を追加）で背面カメラに映った手を検出し、worldLandmarks の形を画像位置に当てはめる最小二乗でカメラ座標系の 3D 骨格に変換。ボールを押す・ボタンを押す・指差し（視点 → 指先の視線）で的を選ぶ、の3操作。単独端末・マーカーなし（Phase 6 で合流）。PC では合成の手（`?fakehands=1`）で全経路を確認済み、**実機未確認**
+  - スコープ: **Hand のみ**。Body Tracking は扱わない（ゴーグル装着時に背面カメラへ映るのは自分の手で、自分の体は映らない。Body は「相手の体」を映す話なので Phase 9 の「現実の人物と Player ID の対応」で扱う）
+  - 既知の制約（実機で要確認）: 深度は手の実寸からの推定（PAIN_POINTS 参照）。パススルーは単眼で背景に視差が無いため、3D の骨格と背景の手が奥行きで分離して見える可能性がある
 
 残りは
 

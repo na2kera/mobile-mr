@@ -50,7 +50,7 @@
 2. ~~Phase 2: Passthrough MR~~ — 背面カメラ映像を背景に（完了: `demos/02-passthrough/`）
 3. ~~Phase 3: QR/ARマーカーで現実座標への固定（共通座標系）~~ — ArUco マーカーを World Origin に（完了: `demos/03-marker-anchor/`）
 4. ~~Phase 4: Multiplayer（WebSocket、Room / position / rotation 共有）~~ — マーカー座標系の pose を交換し相手位置にアバター表示（完了: `demos/04-shared-room/`）
-5. **Phase 5: MediaPipe で Hand / Body Tracking** ← いまここ（未着手）
+5. **Phase 5: MediaPipe で Hand / Body Tracking** ← いまここ（実装中: `demos/05-hand-interaction/`。Hand のみ。Body は Phase 9 で扱う）
 6. Phase 6: MRバレーボール（統合ゲーム第1弾）
 7. Phase 7-8: Surface Mapping → MRスプラトゥーン
 8. Phase 9: 現実の人物と Player ID の対応
