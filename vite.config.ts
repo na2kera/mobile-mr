@@ -1,6 +1,9 @@
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
+// 拡張子付き import なのは Vite の configLoader: native 対応（拡張子なしだと
+// dev/build のたびに非対応警告が出て、将来の Vite で config が壊れる）
+import { sharedRoomServer } from "./server/shared-room.ts";
 
 // js-aruco2（demos/03 で使用）は top-level this へ代入する古い CJS 形式で、
 // Vite(rolldown) が exports を静的検出できず named import が組めない。
@@ -51,7 +54,7 @@ function jsAruco2Esm(): Plugin {
 // iOS Safari はセンサー/カメラ API が HTTPS 必須のため、dev サーバーを
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
-  plugins: [basicSsl(), jsAruco2Esm()],
+  plugins: [basicSsl(), jsAruco2Esm(), sharedRoomServer()],
   server: {
     host: true,
   },
@@ -78,6 +81,9 @@ export default defineConfig({
         ),
         "demo-ex2-1-joycon-rc": fileURLToPath(
           new URL("./demos/ex2-1-joycon-rc/index.html", import.meta.url),
+        ),
+        "demo-04-shared-room": fileURLToPath(
+          new URL("./demos/04-shared-room/index.html", import.meta.url),
         ),
       },
     },

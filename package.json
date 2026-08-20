@@ -6,13 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:room": "node scripts/test-shared-room.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "typescript": "~6.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "ws": "^8.21.3"
   },
   "dependencies": {
     "js-aruco2": "^2.0.0",
