@@ -206,8 +206,11 @@ for (const [x, y, z] of [
 let selections = 0;
 
 // ---- 手（最大2つ。左右で色を変える） ----
-// MediaPipe の handedness は「鏡像（自撮り）の映像」を前提に Left/Right を返すので、
-// 背面カメラ（鏡像でない）では逆になる。ここで入れ替えて「自分の右手 = R」にする
+// MediaPipe のドキュメントは「handedness は鏡像（自撮り）前提。鏡像でない画像では
+// アプリ側で入れ替えること」と言うが、iPhone 実機（1.0.1）では背面カメラのままで
+// 正しい Left/Right が返ってきた（2026-08-24 実機確認。入れ替えると逆になった）。
+// 既定は入れ替えなしとし、挙動が違う端末・バージョンに備えて ?swapHands=1 を残す
+const SWAP_HANDS = params.get("swapHands") === "1";
 const HAND_COLORS = { R: 0x8ab4f8, L: 0xffa657, "-": 0xe8eaed } as const;
 type HandLabel = keyof typeof HAND_COLORS;
 type HandSlot = {
@@ -626,10 +629,12 @@ function applyHandResult(result: HandResultLike, now: number) {
     if (!world || landmarks.length < LANDMARK_COUNT || world.length < LANDMARK_COUNT) continue;
     const placement = solveHandPlacement(landmarks, world, mapping);
     if (!placement || placement.depth > MAX_DEPTH_M || placement.residual > MAX_RESIDUAL) continue;
-    // 背面カメラなので MediaPipe の Left/Right を入れ替える（HAND_COLORS のコメント参照）
+    // Left/Right の扱いは HAND_COLORS のコメント参照（既定は入れ替えなし）
     const reported = result.handedness[i]?.[0]?.categoryName;
+    const raw: HandLabel =
+      reported === "Left" ? "L" : reported === "Right" ? "R" : "-";
     const label: HandLabel =
-      reported === "Left" ? "R" : reported === "Right" ? "L" : "-";
+      SWAP_HANDS && raw !== "-" ? (raw === "L" ? "R" : "L") : raw;
     detected.push({
       label,
       points: placeLandmarks(landmarks, world, placement, mapping),
