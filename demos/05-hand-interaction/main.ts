@@ -115,10 +115,13 @@ let camHFovDeg = 68;
 // ---- 操作対象のパラメータ ----
 // reach: ボタンパネルを置く距離 [m]。腕を伸ばせば届き、かつカメラに手が映る距離
 const REACH = numParam("reach", 0.55, { min: 0.2, max: 1.5 });
-// ballZ: ボールを置く距離 [m]。実機で 0.45 / 0.5 / 0.55 / 1.65 を比較して 0.7 に落ち着いた
-// （2026-08-26。近いほど視差の飛び出しがきつく感じる。腕を伸ばし切る位置がちょうど良い）
-const BALL_Z = numParam("ballZ", 0.7, { min: 0.2, max: 5 });
-const BALL_R = numParam("ballR", 0.06, { min: 0.02, max: 0.3 });
+// ballZ: ボールを置く距離 [m]。fov/camZoom の較正後に実機で比較し、ボタンと同じ 0.5 に
+// 落ち着いた（2026-08-26）
+const BALL_Z = numParam("ballZ", 0.5, { min: 0.2, max: 5 });
+// ballR: ボールの半径 [m]。バレーボールの実寸（直径約 21cm）。見慣れた大きさの物は
+// 「大きさから距離が読める」ので、単眼パススルーで乏しい遠近感の手がかりになる
+// （実機で「大きさが同じだと遠近感が掴みづらい」との報告を受けて 0.06 → 0.105 に）
+const BALL_R = numParam("ballR", 0.105, { min: 0.02, max: 0.3 });
 // dwellMs: 指差しで的を選ぶまでの滞留時間
 const DWELL_MS = numParam("dwellMs", 600, { min: 100, max: 5000 });
 /** 指先の当たり半径 [m]（ボール・ボタンとの接触判定に足す） */
@@ -153,7 +156,8 @@ scene.add(stage);
 let stageAligned = false;
 
 // 1. ボール（ばねで定位置に戻る）
-const BALL_HOME = new THREE.Vector3(0, 1.45, -BALL_Z);
+// ボールが大きくなったぶん、下のボタンパネル（y=1.3）と重ならない高さに置く
+const BALL_HOME = new THREE.Vector3(0, 1.5, -BALL_Z);
 const ballMaterial = new THREE.MeshStandardMaterial({
   color: 0xfdd663,
   emissive: 0xfdd663,
