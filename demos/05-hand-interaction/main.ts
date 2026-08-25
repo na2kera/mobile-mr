@@ -38,9 +38,13 @@ function numParam(
   const v = Number(params.get(name) ?? NaN);
   return Number.isFinite(v) && v >= min && v <= max ? v : fallback;
 }
-const FOV = numParam("fov", 70, { min: 20, max: 170 });
+// fov / camZoom の既定は、手持ちの VR ゴーグル + iPhone での実機較正値（2026-08-26）。
+// 実物と見比べながら「camZoom: 背景の手の大きさが肉眼と揃う」→「fov: 実測 0.7m に置いた
+// 実物と仮想ボールの距離感が揃う」の順で合わせた。レンズや端末が違えば要再較正。
+// PC のデバッグ表示には広すぎるので ?fov=70&camZoom=1 を付けると従来の見え方に戻る
+const FOV = numParam("fov", 135, { min: 20, max: 170 });
 const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
-const CAM_ZOOM = numParam("camZoom", 1, { min: 0.2, max: 5 });
+const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 
 // ---- 手トラッキングのパラメータ ----
 // hands: 同時に追跡する手の数。既定 1（MediaPipe は追跡中の手が numHands 未満だと

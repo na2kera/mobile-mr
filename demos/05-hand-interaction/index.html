@@ -154,7 +154,9 @@
         単眼パススルーの既知の制約です。
       </p>
       <p>
-        調整: ?fov=70&amp;eyeSep=0.064&amp;camZoom=1 は 02 と同じ。手の検出の既定は
+        調整: ?fov=135&amp;eyeSep=0.064&amp;camZoom=0.7 が既定（VRゴーグル + iPhone の
+        実機較正値。02 と違い、ゴーグル越しの距離感・スケール感に合わせてある）。
+        PC で見るときは ?fov=70&amp;camZoom=1 が見やすい。手の検出の既定は
         ?hands=1&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0&amp;detAdapt=0&amp;detW=0
         で、重いときは ?delegate=cpu / ?detW=640 / ?detAdapt=1.5 / ?detIntervalMs=100、
         誤検出が多いときは HUD の res= を見て ?maxResidual=、手が映らないときは
