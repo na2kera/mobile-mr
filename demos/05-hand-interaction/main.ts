@@ -10,6 +10,7 @@ import {
   FINGER_TIPS,
   INDEX_TIP,
   LANDMARK_COUNT,
+  MIDDLE_TIP,
   WRIST,
   isPointingPose,
   placeLandmarks,
@@ -69,6 +70,9 @@ const ALIGN_HOLD_MS = numParam("alignHoldMs", 1000, { min: 0, max: 10000 });
 const RECENTER_MS = numParam("recenterMs", 3000, { min: 0, max: 60000 });
 // maxDepth: これより遠いと推定された手は無視する（誤検出や他人の手は遠くに出やすい）
 const MAX_DEPTH_M = numParam("maxDepth", 1.5, { min: 0.2, max: 10 });
+// handScale: MediaPipe が返す手の実寸（worldLandmarks）に掛ける補正。深度は手の実寸に
+// 比例するので、モデルの申告する手の大きさ（HUD の hand=）が実際と違う場合はここで合わせる
+const HAND_SCALE = numParam("handScale", 1, { min: 0.2, max: 5 });
 // maxResidual: 3D 化の当てはめ残差（深度 1 の平面上の長さ）がこれを超える検出は捨てる。
 // 実機での典型値が分かっていないので既定は無効（HUD の res= を見て決める）
 const MAX_RESIDUAL = numParam("maxResidual", Infinity, { min: 0 });
@@ -240,6 +244,9 @@ type HandSlot = {
   depth: number;
   /** 3D 化の当てはめ残差（HUD 用。実機で maxResidual を決める材料） */
   residual: number;
+  /** 診断用（HUD）: モデル申告の手の長さ [cm] と画像上の割合 */
+  handCm: number;
+  handImgFrac: number;
   /** 5 指先のワールド座標（今フレーム）と前フレーム（速度計算用） */
   tipsWorld: THREE.Vector3[];
   tipsWorldMs: number;
@@ -277,6 +284,8 @@ for (let i = 0; i < 2; i++) {
     lastSeenMs: -Infinity,
     depth: 0,
     residual: 0,
+    handCm: 0,
+    handImgFrac: 0,
     tipsWorld: FINGER_TIPS.map(() => new THREE.Vector3()),
     tipsWorldMs: 0,
     prevTipsWorld: null,
@@ -652,6 +661,10 @@ type DetectedHand = {
   world: readonly Vec3[];
   depth: number;
   residual: number;
+  /** 診断用: MediaPipe が申告する手の長さ（手首 → 中指の先）[cm]（handScale 適用後） */
+  handCm: number;
+  /** 診断用: 画像上の手の長さ（映像の長辺に対する割合 0..1） */
+  handImgFrac: number;
 };
 
 function applyHandResult(result: HandResultLike, now: number) {
@@ -665,8 +678,12 @@ function applyHandResult(result: HandResultLike, now: number) {
   // 1. 各検出を 3D 化する。形が崩れているもの・遠すぎるものはここで捨てる
   const detected: DetectedHand[] = [];
   for (const [i, landmarks] of result.landmarks.entries()) {
-    const world = result.worldLandmarks[i];
-    if (!world || landmarks.length < LANDMARK_COUNT || world.length < LANDMARK_COUNT) continue;
+    const worldRaw = result.worldLandmarks[i];
+    if (!worldRaw || landmarks.length < LANDMARK_COUNT || worldRaw.length < LANDMARK_COUNT) continue;
+    const world =
+      HAND_SCALE === 1
+        ? worldRaw
+        : worldRaw.map((w) => ({ x: w.x * HAND_SCALE, y: w.y * HAND_SCALE, z: w.z * HAND_SCALE }));
     const placement = solveHandPlacement(landmarks, world, depthMapping);
     if (!placement || placement.depth > MAX_DEPTH_M || placement.residual > MAX_RESIDUAL) continue;
     // Left/Right の扱いは HAND_COLORS のコメント参照（既定は入れ替えなし）
@@ -675,12 +692,26 @@ function applyHandResult(result: HandResultLike, now: number) {
       reported === "Left" ? "L" : reported === "Right" ? "R" : "-";
     const label: HandLabel =
       SWAP_HANDS && raw !== "-" ? (raw === "L" ? "R" : "L") : raw;
+    // 診断値: モデルが申告する手の長さ（手首 0 → 中指の先 12）と、その画像上の長さ。
+    // 深度 = 実寸 / 見かけの角サイズ なので、この2つ + camFov でズレの原因を切り分けられる
+    const w0 = world[0];
+    const w12 = world[MIDDLE_TIP];
+    const handCm = Math.hypot(w12.x - w0.x, w12.y - w0.y, w12.z - w0.z) * 100;
+    const vw = video.videoWidth || 1;
+    const vh = video.videoHeight || 1;
+    const long = Math.max(vw, vh);
+    const handImgFrac = Math.hypot(
+      (landmarks[MIDDLE_TIP].x - landmarks[0].x) * (vw / long),
+      (landmarks[MIDDLE_TIP].y - landmarks[0].y) * (vh / long),
+    );
     detected.push({
       label,
       points: placeLandmarks(landmarks, world, placement, mapping),
       world,
       depth: placement.depth,
       residual: placement.residual,
+      handCm,
+      handImgFrac,
     });
     if (detected.length >= slots.length) break;
   }
@@ -763,6 +794,8 @@ function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing:
   slot.view.update(slot.ema);
   slot.depth = hand.depth;
   slot.residual = hand.residual;
+  slot.handCm = hand.handCm;
+  slot.handImgFrac = hand.handImgFrac;
   slot.lastSeenMs = now;
   slot.lastWrist = hand.points[WRIST];
 
@@ -1047,7 +1080,7 @@ let lastHudText = "";
 function renderHud() {
   const handLines = slots
     .filter((s) => s.view.visible)
-    .map((s) => `${s.label}:${s.depth.toFixed(2)}m res=${s.residual.toFixed(3)}${s.pointing ? " point" : ""}`)
+    .map((s) => `${s.label}:${s.depth.toFixed(2)}m hand=${s.handCm.toFixed(1)}cm img=${(s.handImgFrac * 100).toFixed(0)}% res=${s.residual.toFixed(3)}${s.pointing ? " point" : ""}`)
     .join(" ");
   const pointing = slots
     .filter((s) => s.pointing && s.hoverTarget >= 0)
