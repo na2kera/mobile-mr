@@ -91,6 +91,19 @@ const MODEL_URLS = params.get("model")
 // fake-hands.ts 参照）。?fakecam=1 と組み合わせてヘッドレスでも全経路を回せる
 const FAKE_HANDS = params.has("fakehands");
 
+// ---- 深度の基準 ----
+// depthMode=metric（既定）: 手の深度は実カメラの FOV（レンズ種別から推定。?camFov= で補正、
+//   03/04 と同じ方式）で実寸に合わせる。骨格の x/y（背景の手との重なり）は表示基準のまま。
+//   実機確認（2026-08-26）で、表示基準の深度は「仮想 FOV / 実効 FOV」の比がそのまま倍率になり、
+//   腕を伸ばした手（実測 0.6m 前後）が 0.25m と推定される（= ボールとの奥行き感覚がズレる）
+//   ことが分かったため、実寸基準を既定にした
+// depthMode=display: 従来の表示基準（仮想 FOV + cover）。fakehands は合成データが表示基準で
+//   作られているため常にこちらを使う
+const DEPTH_MODE =
+  FAKE_HANDS || params.get("depthMode") === "display" ? "display" : "metric";
+// 実カメラの水平 FOV [deg]（長辺方向）。カメラ起動時にレンズのラベルから推定して上書きする
+let camHFovDeg = 68;
+
 // ---- 操作対象のパラメータ ----
 // reach: ボール・ボタンを置く距離 [m]。腕を伸ばさずに届き、かつカメラに手が映る距離
 const REACH = numParam("reach", 0.45, { min: 0.2, max: 1.5 });
@@ -391,6 +404,13 @@ async function startCamera(
   updateBackgroundCover();
   video.addEventListener("resize", updateBackgroundCover);
   const label = stream.getVideoTracks()[0]?.label ?? "";
+  // 実カメラの FOV はブラウザから取得できないので、レンズ種別のラベルから機種平均を推定する
+  // （03/04 と同じ。詳細は PAIN_POINTS「カメラの焦点距離（内部パラメータ）がブラウザから取得できず」）
+  camHFovDeg = params.has("camFov")
+    ? numParam("camFov", 68, { min: 10, max: 170 })
+    : /ultra wide|超広角/i.test(label)
+      ? 106
+      : 68;
   return `${video.videoWidth}x${video.videoHeight} ${label}`.trim();
 }
 
@@ -413,6 +433,23 @@ function updateBackgroundCover() {
   ry /= CAM_ZOOM;
   texture.repeat.set(rx, ry);
   texture.offset.set((1 - rx) / 2, (1 - ry) / 2);
+}
+
+/**
+ * 実カメラの FOV に基づく、画像位置 → 実世界の方向の対応（深度の実寸推定用）。
+ * camHFovDeg は映像の長辺方向の FOV として扱う（縦持ちで映像が回転しても長辺に付く）
+ */
+function metricViewMapping(): ViewMapping | null {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const t = Math.tan(THREE.MathUtils.degToRad(camHFovDeg) / 2);
+  return {
+    tanHalfFov: t * (vh / Math.max(vw, vh)),
+    eyeAspect: vw / vh,
+    repeatX: 1,
+    repeatY: 1,
+  };
 }
 
 /** 現在の背景の貼り方と仮想カメラから、画像位置 → 視線方向の対応を作る（hand-math.ts 参照） */
@@ -620,6 +657,9 @@ type DetectedHand = {
 function applyHandResult(result: HandResultLike, now: number) {
   const mapping = currentViewMapping();
   if (!mapping) return;
+  // 深度（とその妥当性判定）だけ実寸基準で解く。x/y の重なりは表示基準（DEPTH_MODE 参照）
+  const depthMapping =
+    DEPTH_MODE === "metric" ? (metricViewMapping() ?? mapping) : mapping;
   lastResultHands = result.landmarks.length;
 
   // 1. 各検出を 3D 化する。形が崩れているもの・遠すぎるものはここで捨てる
@@ -627,7 +667,7 @@ function applyHandResult(result: HandResultLike, now: number) {
   for (const [i, landmarks] of result.landmarks.entries()) {
     const world = result.worldLandmarks[i];
     if (!world || landmarks.length < LANDMARK_COUNT || world.length < LANDMARK_COUNT) continue;
-    const placement = solveHandPlacement(landmarks, world, mapping);
+    const placement = solveHandPlacement(landmarks, world, depthMapping);
     if (!placement || placement.depth > MAX_DEPTH_M || placement.residual > MAX_RESIDUAL) continue;
     // Left/Right の扱いは HAND_COLORS のコメント参照（既定は入れ替えなし）
     const reported = result.handedness[i]?.[0]?.categoryName;
@@ -1051,7 +1091,7 @@ fsButton.addEventListener("click", tryEnterFullscreen);
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 startButton.addEventListener("click", () => {
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE} smooth=${SMOOTH} detW=${DET_W} detAdapt=${DET_ADAPT} detIntervalMs=${DET_INTERVAL_MS}`;
+  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE} smooth=${SMOOTH} detW=${DET_W} detAdapt=${DET_ADAPT} detIntervalMs=${DET_INTERVAL_MS} depth=${DEPTH_MODE}`;
   renderHud();
   // wasm + モデルの読み込み（数秒）は許可ダイアログと並行して進める。カメラの成否とは独立
   if (FAKE_HANDS) {
@@ -1070,6 +1110,7 @@ startButton.addEventListener("click", () => {
         hudState.cam = step;
         renderHud();
       });
+      hudState.base += ` camFov=${camHFovDeg}`;
     } catch (e: unknown) {
       hudState.cam = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     }

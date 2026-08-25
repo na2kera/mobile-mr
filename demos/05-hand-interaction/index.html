@@ -158,7 +158,9 @@
         ?hands=1&amp;delegate=auto&amp;smooth=0.5&amp;detIntervalMs=0&amp;detAdapt=0&amp;detW=0
         で、重いときは ?delegate=cpu / ?detW=640 / ?detAdapt=1.5 / ?detIntervalMs=100、
         誤検出が多いときは HUD の res= を見て ?maxResidual=、手が映らないときは
-        ?mpCanvas=dom を試してください。?fakehands=1 は iPhone でも使え、MediaPipe
+        ?mpCanvas=dom を試してください。手までの距離（HUD の R:）が実際とズレるときは
+        ?camFov=（超広角 106 / 標準 68 が既定）で補正、?depthMode=display で旧来の
+        表示基準に戻せます。?fakehands=1 は iPhone でも使え、MediaPipe
         抜きでステレオ表示・向き合わせ・3操作だけを切り分けられます。
         PC では ?fakecam=1&amp;autostart=1 で読み込み経路を、さらに &amp;fakehands=1
         を足すと台本どおりに動く合成の手で3操作の経路を確認できます
