@@ -109,8 +109,10 @@ const DEPTH_MODE =
 let camHFovDeg = 68;
 
 // ---- 操作対象のパラメータ ----
-// reach: ボール・ボタンを置く距離 [m]。腕を伸ばさずに届き、かつカメラに手が映る距離
-const REACH = numParam("reach", 0.45, { min: 0.2, max: 1.5 });
+// reach: ボール・ボタンを置く距離 [m]。腕を伸ばせば届き、かつカメラに手が映る距離。
+// 実機確認（2026-08-26）で「近いと視差の飛び出しがきつく、見た目より触れる位置が奥に感じる」
+// との報告があり 0.45 → 0.55 に変更（近距離ほど単眼パススルーの奥行き矛盾が目立つため）
+const REACH = numParam("reach", 0.55, { min: 0.2, max: 1.5 });
 const BALL_R = numParam("ballR", 0.06, { min: 0.02, max: 0.3 });
 // dwellMs: 指差しで的を選ぶまでの滞留時間
 const DWELL_MS = numParam("dwellMs", 600, { min: 100, max: 5000 });
