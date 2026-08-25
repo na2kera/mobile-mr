@@ -19,7 +19,7 @@ import {
   type VolleyballRoomConfig,
 } from "../src/shared/volleyball-protocol.ts";
 import { VolleyballGame } from "../src/shared/volleyball-game.ts";
-import { DEFAULT_COURT, type V3 } from "../src/shared/volleyball-sim.ts";
+import { DEFAULT_COURT, SERVE_FLIGHT_FACTOR, type V3 } from "../src/shared/volleyball-sim.ts";
 
 /** 1メッセージの上限。pose + 両手（63 数値 × 2）の JSON で 2KB 前後 */
 const MAX_PAYLOAD_BYTES = 8 * 1024;
@@ -201,8 +201,7 @@ function attach(httpServer: HttpServer) {
         netTop: config.netTop === "auto" ? DEFAULT_COURT.netTop : config.netTop,
         gravity: config.gravity,
         baseFlightSec: config.flightSec,
-        // サーブは打ち返しより少しゆっくり（受け手が構える時間）
-        serveFlightSec: config.flightSec * 1.3,
+        serveFlightSec: config.flightSec * SERVE_FLIGHT_FACTOR,
         reach: config.reach,
       },
     });

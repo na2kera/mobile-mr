@@ -30,7 +30,10 @@ import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import markerSvgUrl from "../../src/shared/marker-0.svg";
 import {
+  AIM_MIN_FROM_HEAD,
   DEFAULT_COURT,
+  NET_CLEARANCE,
+  SERVE_FLIGHT_FACTOR,
   aimPoint,
   botAimPoint,
   extrapolateBall,
@@ -272,7 +275,7 @@ let courtCfg: CourtConfig = {
   netTop: NET_TOP === "auto" ? DEFAULT_COURT.netTop : NET_TOP,
   gravity: GRAVITY,
   baseFlightSec: FLIGHT_SEC,
-  serveFlightSec: FLIGHT_SEC * 1.3,
+  serveFlightSec: FLIGHT_SEC * SERVE_FLIGHT_FACTOR,
   reach: REACH,
 };
 let builtNetTop = NaN;
@@ -942,8 +945,10 @@ function onState(state: GameState, cfg: CourtConfig) {
   // 期限切れやすれ違いで 1〜2m ワープしていた）
   if (predicted) {
     if (ev?.kind === "hit" && mine) {
+      // 受理でもサーバーの始点（巻き戻した軌跡上の点）と予測の始点は少し違うので吸収する
       predicted = null;
       acceptedHits++;
+      absorbJump(state.ball.pos);
     } else if (ev?.kind === "hit-rejected" && mine) {
       predicted = null;
       absorbJump(state.ball.pos);
@@ -1185,18 +1190,6 @@ function updateMessages(now: number) {
   } else if (netStatus !== "open") {
     text = "接続が切れました（再接続中）";
     color = "#f28b82";
-  } else if (myCourtZ !== null && Math.abs(myCourtZ) < courtCfg.reach + 0.1) {
-    // ネット際だと狙い点が顔の近く／相手陣に出る。立ち位置を直してもらう
-    text = `マーカーから離れてください\n（あと ${Math.ceil((courtCfg.reach + 0.1 - Math.abs(myCourtZ)) * 100)}cm）`;
-    color = "#fdd663";
-  } else if (auth.state.phase === "waiting") {
-    const s = auth.state;
-    text = me
-      ? "まもなくサーブ"
-      : s.sides.A && s.sides.B
-        ? "観戦中（両側とも埋まっています）"
-        : "マーカーを見て立ち位置を決めてください";
-    if (me && s.bot) text += "\n（相手がいないので BOT と練習）";
   } else if (auth.state.phase === "point" && auth.state.lastPoint) {
     const { winner, reason } = auth.state.lastPoint;
     const why = reason === "out" ? "アウト" : reason === "net" ? "ネット" : "落下";
@@ -1208,6 +1201,18 @@ function updateMessages(now: number) {
     color = me && winner === me ? "#81c995" : "#f28b82";
   } else if (flash && now < flash.untilMs) {
     text = flash.text;
+  } else if (myCourtZ !== null && Math.abs(myCourtZ) < AIM_MIN_FROM_HEAD + NET_CLEARANCE) {
+    // ネット際だと狙い点を頭の前に置けず頭上を通す軌道になる。立ち位置を直してもらう
+    text = `マーカーから離れてください\n（あと ${Math.ceil((AIM_MIN_FROM_HEAD + NET_CLEARANCE - Math.abs(myCourtZ)) * 100)}cm。今は頭上を通します）`;
+    color = "#fdd663";
+  } else if (auth.state.phase === "waiting") {
+    const s = auth.state;
+    text = me
+      ? "まもなくサーブ"
+      : s.sides.A && s.sides.B
+        ? "観戦中（両側とも埋まっています）"
+        : "マーカーを見て立ち位置を決めてください";
+    if (me && s.bot) text += "\n（相手がいないので BOT と練習）";
   } else if (auth.state.phase === "rally" && !me) {
     text = "観戦中";
   }

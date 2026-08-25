@@ -96,9 +96,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const near1 = aimPoint([0, 0.9, 0.5], "A", DEFAULT_COURT);
   check("aimPoint: 机の縁（0.5m）なら狙いは頭の 0.45m 前で自陣側", near(near1[2], 0.05, 1e-9));
   const near2 = aimPoint([0, 0.9, 0.35], "A", DEFAULT_COURT);
-  check("aimPoint: ネット際でも頭から 0.3m は離す", near(near2[2], 0.05, 1e-9));
+  check("aimPoint: ネット際（0.35m）でも頭から 0.3m は離す（高さは通常）", near(near2[2], 0.05, 1e-9) && near(near2[1], 0.8, 1e-9));
   const nearB = aimPoint([0, 0.9, -0.35], "B", DEFAULT_COURT);
   check("aimPoint: B 側でも同様（負側）", near(nearB[2], -0.05, 1e-9));
+  const tooClose = aimPoint([0, 0.9, 0.2], "A", DEFAULT_COURT);
+  check("aimPoint: 頭から 0.3m 離せないほどネット際なら自陣側に置き、頭上を通す", tooClose[2] >= DEFAULT_COURT.netHalfWidth * 0 + 0.05 && tooClose[2] > 0 && near(tooClose[1], 1.2, 1e-9), `aim=${tooClose.map((n) => n.toFixed(2))}`);
+  const onNet = aimPoint([0, 0.9, 0.0], "A", DEFAULT_COURT);
+  check("aimPoint: ネット面に立っていても狙い点は自陣側", onNet[2] > 0);
   const low = aimPoint([0, 0.15, 1.5], "A", DEFAULT_COURT);
   check("aimPoint: 頭が低くても狙いはボール半径 + 0.1 より上", low[1] >= DEFAULT_COURT.ballR + 0.1);
   // extrapolateBall はネットの反射を含む
@@ -127,8 +131,24 @@ function runFor(game, ms, now, onEvent, poses = []) {
     t += step;
     for (const [id, head] of poses) game.updatePose(id, head, true, t);
     for (const e of game.tick(step / 1000, t)) onEvent?.(e, t);
+    assertSidesConsistent(game);
   }
   return t;
+}
+
+/** 不変条件: sides と各 player.side が一致し、両側が同じ id にならない */
+let invariantFailures = 0;
+function assertSidesConsistent(game) {
+  const { A, B } = game.state.sides;
+  let ok = !(A !== null && A === B);
+  for (const p of game.players.values()) {
+    if (p.side && game.state.sides[p.side] !== p.id) ok = false;
+  }
+  for (const side of ["A", "B"]) {
+    const id = game.state.sides[side];
+    if (id !== null && game.players.get(id)?.side !== side) ok = false;
+  }
+  if (!ok) invariantFailures++;
 }
 
 {
@@ -183,6 +203,29 @@ function runFor(game, ms, now, onEvent, poses = []) {
     const moved = Math.hypot(...g2.state.ball.pos.map((v, k) => v - at[k]));
     check("150ms でボールは申告位置から動いている（前提）", moved > 0.05 && g2.state.phase === "rally", `moved=${moved.toFixed(3)} phase=${g2.state.phase}`);
     check("150ms 前の位置での申告は軌跡との距離で受理される", g2.hit("p1", at, [0, 0, 0], t));
+    check("受理後のボールは申告位置（巻き戻した軌跡上の点）から打ち返される", Math.hypot(...g2.state.ball.pos.map((v, k) => v - at[k])) < 0.05, `pos=${g2.state.ball.pos.map((n) => n.toFixed(3))} at=${at.map((n) => n.toFixed(3))}`);
+    // 受理で軌跡は捨てられ、打ち返した球は離れていくので、600ms 後に同じ旧位置を再申告しても通らない
+    t = runFor(g2, 600, t, null, [["p1", HEAD_A]]);
+    g2.players.get("p1").lastHitMs = -Infinity;
+    check("受理後は軌跡が捨てられ、同じ旧位置の再申告は拒否", g2.state.phase === "rally" && !g2.hit("p1", at, [0, 0, 0], t), `phase=${g2.state.phase} dist=${Math.hypot(...g2.state.ball.pos.map((v, k) => v - at[k])).toFixed(2)}`);
+  }
+  // 軌跡の長さ（hitTrailMs）より古い申告は拒否される: 軌跡なし（hitTrailMs=0）だと 200ms 前
+  // （落下 ≈ 0.6m 先）は通らない。既定の 400ms なら上のとおり通る
+  {
+    const g3 = new VolleyballGame({ random: () => 0, hitTrailMs: 0 });
+    let t = 0;
+    g3.join("p1", t);
+    t = runFor(g3, 2000, t, null, [["p1", HEAD_A]]);
+    let at = null;
+    for (let i = 0; i < 200 && !at; i++) {
+      t += 1000 / 60;
+      g3.updatePose("p1", HEAD_A, true, t);
+      g3.tick(1 / 60, t);
+      if (Math.hypot(...g3.state.ball.pos.map((v, k) => v - target[k])) < 0.15) at = [...g3.state.ball.pos];
+    }
+    t = runFor(g3, 200, t, null, [["p1", HEAD_A]]);
+    const moved = Math.hypot(...g3.state.ball.pos.map((v, k) => v - at[k]));
+    check("軌跡の長さより古い申告は拒否（hitTrailMs=0 なら 200ms 前は通らない）", g3.state.phase === "rally" && moved > 0.4 && !g3.hit("p1", at, [0, 0, 0], t), `moved=${moved.toFixed(2)} phase=${g3.state.phase}`);
   }
   const accepted = game.hit("p1", hitAt, [0, 0, -1], now);
   check("ボールの近くでの hit は受理", accepted);
@@ -237,10 +280,18 @@ function runFor(game, ms, now, onEvent, poses = []) {
   game.join("old", now);
   for (let i = 0; i < 3; i++) game.updatePose("old", [0, 0.9, 1.6], true, now + i);
   check("旧接続が A 側", game.state.sides.A === "old");
+  // 同室にいた観戦者は、占有者が 1s 止まっても側を奪えない（奪えるのは後から入った再接続だけ）
+  game.join("spectator", now);
   now += 1500; // 旧接続は切断されたが leave はまだ届いていない（evictStaleMs=1000 は超えた）
+  for (let i = 0; i < 3; i++) game.updatePose("spectator", [0, 0.9, 1.6], true, now + i);
+  check("占有者より前から同室にいた観戦者は追い出せない（空いている反対側に入る）", game.state.sides.A === "old" && game.state.sides.B === "spectator");
+  game.leave("spectator");
   game.join("new", now);
   for (let i = 0; i < 3; i++) game.updatePose("new", [0, 0.9, 1.6], true, now + i);
-  check("姿勢が途絶えた占有者を追い出して同じ側（A）に割当", game.state.sides.A === "new" && game.players.get("old").side === null);
+  check("姿勢が途絶えた占有者を、後から入室した再接続が追い出して同じ側（A）に割当", game.state.sides.A === "new" && game.players.get("old").side === null);
+  // ネット面付近（|z| < 0.1）の姿勢は投票に使われない
+  for (let i = 0; i < 6; i++) game.updatePose("new", [0, 0.9, i % 2 ? 0.05 : -0.05], true, now + 5 + i);
+  check("ネット面付近では側が付け替わらない", game.state.sides.A === "new");
   // 試合前なら反対側へ歩けば付け替わる
   for (let i = 0; i < 3; i++) game.updatePose("new", [0, 0.9, -1.6], true, now + 10 + i);
   check("waiting 中に反対側へ移動すると付け替え", game.state.sides.B === "new" && game.state.sides.A === null);
@@ -451,12 +502,20 @@ try {
   check("hit-rejected は他のプレイヤーには送られない", b.msgs.filter((m) => m.type === "state" && m.state.event?.kind === "hit-rejected").length === bRejBefore);
   clearInterval(keepAlive);
 
+  check("welcome の court に URL の軌道パラメータが反映される", aWelcome.court.gravity === DEFAULT_COURT.gravity && aWelcome.court.baseFlightSec === DEFAULT_COURT.baseFlightSec && aWelcome.court.reach === DEFAULT_COURT.reach);
+  const customRoom = await tryConnect(`${buildQuery("v-custom", { gravity: 3 })}&reach=0.5`);
+  const customWelcome = await waitForMsg(customRoom, (m) => m.type === "welcome");
+  check("gravity=3 / reach=0.5 を指定すると court に反映される", customWelcome?.court.gravity === 3 && customWelcome?.court.reach === 0.5 && near(customWelcome?.court.serveFlightSec, DEFAULT_COURT.baseFlightSec * 1.15, 1e-9));
+  customRoom.ws.close();
+
   // ---- 設定不一致・バージョン不一致は拒否 ----
   const mismatch = await tryConnect(buildQuery("v1", { netTop: 1.2 }));
   const mmError = await waitForMsg(mismatch, (m) => m.type === "error");
   check("netTop 不一致は error で入室拒否", !!mmError && mmError.reason.includes("不一致"));
   const gravMismatch = await tryConnect(buildQuery("v1", { gravity: 9.8 }));
   check("gravity 不一致も入室拒否", !!(await waitForMsg(gravMismatch, (m) => m.type === "error")));
+  const reachMismatch = await tryConnect(`${buildQuery("v1")}&reach=0.6`);
+  check("reach 不一致も入室拒否", !!(await waitForMsg(reachMismatch, (m) => m.type === "error")));
   const badVersion = await tryConnect(buildQuery("v1", { v: 999 }));
   check("プロトコルバージョン不一致は拒否", !!(await waitForMsg(badVersion, (m) => m.type === "error")));
   const badNet = await tryConnect(buildQuery("v2", { netTop: "abc" }));
@@ -491,6 +550,7 @@ try {
   check("別オリジンのブラウザ接続は拒否", rejectedOrigin);
 
   b.ws.close();
+  check("サイドの不変条件（sides と player.side の整合）が常に成り立つ", invariantFailures === 0, `failures=${invariantFailures}`);
   const failed = results.filter(([, ok]) => !ok);
   console.log(failed.length === 0 ? "\nALL PASS" : `\n${failed.length} FAILED`);
   exitCode = failed.length === 0 ? 0 : 1;

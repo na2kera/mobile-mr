@@ -144,22 +144,33 @@ export function launchVelocity(
 
 /** 狙い点を頭に近づけすぎない下限（頭からの水平距離 [m]）。顔面に飛ばさない */
 export const AIM_MIN_FROM_HEAD = 0.3;
-/** 狙い点をネットから最低これだけ手前に置く [m] */
+/** 狙い点をネットから最低これだけ手前に置く [m]（狙い点は必ず受け手の陣に置く） */
 export const NET_CLEARANCE = 0.05;
+/** ネット際で頭の前に置けないとき、代わりに頭上を通す高さ [m] */
+export const AIM_OVERHEAD = 0.3;
+/** サーブは打ち返しより少しゆっくり（受け手が構える時間） */
+export const SERVE_FLIGHT_FACTOR = 1.15;
+/** サーブの発射高さ（ネット上端から [m]）。高いほど最高点が上がり天井に近づく */
+export const SERVE_LAUNCH_ABOVE_NET = 0.3;
 
 /**
  * 相手の頭の位置から「手を出しそうな位置」を作る: 頭からネット側へ reach、少し下へ aimDrop。
  * 頭の向きは使わない（ボールを目で追う前提なので、ネット方向に手を出すとみなす）。
- * ネット際に立っているときは距離を縮めるが、頭から AIM_MIN_FROM_HEAD より近くには置かない
- * （それでもネットを越えるほど近い場合は越える = 立ち位置の問題として UI で案内する）
+ * 狙い点は必ず受け手の陣（ネットから NET_CLEARANCE 以上）に置く。ネット際に立っていて
+ * 頭から AIM_MIN_FROM_HEAD 離せないときは、顔面に飛ばさないよう頭上を通す高さにする
+ * （受け手には「マーカーから離れて」を案内する。打った側の失点にはしない）
  */
 export function aimPoint(head: V3, side: Side, court: CourtConfig): V3 {
   const sign = sideSign(side);
   const fromNet = Math.abs(head[2]);
-  const ahead = clamp(fromNet - NET_CLEARANCE, AIM_MIN_FROM_HEAD, court.reach);
+  const ahead = clamp(fromNet - NET_CLEARANCE, 0, court.reach);
+  const overhead = ahead < AIM_MIN_FROM_HEAD;
   // 頭が低い（座位・フェイク幾何）ときに狙い点が地面に埋まらないよう下限を付ける
-  const y = Math.max(head[1] - court.aimDrop, court.ballR + 0.1);
-  return [head[0], y, sign * (fromNet - ahead)];
+  const y = Math.max(
+    overhead ? head[1] + AIM_OVERHEAD : head[1] - court.aimDrop,
+    court.ballR + 0.1,
+  );
+  return [head[0], y, sign * Math.max(fromNet - ahead, NET_CLEARANCE)];
 }
 
 /** 相手がいない側（bot）を狙う位置。bot はここに落ちてくる球を打ち返す */
