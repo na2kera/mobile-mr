@@ -111,10 +111,9 @@ let camHFovDeg = 68;
 // ---- 操作対象のパラメータ ----
 // reach: ボタンパネルを置く距離 [m]。腕を伸ばせば届き、かつカメラに手が映る距離
 const REACH = numParam("reach", 0.55, { min: 0.2, max: 1.5 });
-// ballZ: ボールを置く距離 [m]。実機確認（2026-08-26）で「近いと視差の飛び出しがきつく、
-// 見た目より触れる位置が奥に感じる」との報告があり、要望により奥（1.65m）を既定にした。
-// 注意: 腕が届かない距離では「手で押す」は発動しない。触って試すときは ?ballZ=0.6 程度に
-const BALL_Z = numParam("ballZ", 1.65, { min: 0.2, max: 5 });
+// ballZ: ボールを置く距離 [m]。実機で 0.45 / 0.55 / 1.65 を比較した結果、
+// 「ボタンと同じ 0.5m 前後」に落ち着いた（2026-08-26。近すぎると視差の飛び出しがきつい）
+const BALL_Z = numParam("ballZ", 0.5, { min: 0.2, max: 5 });
 const BALL_R = numParam("ballR", 0.06, { min: 0.02, max: 0.3 });
 // dwellMs: 指差しで的を選ぶまでの滞留時間
 const DWELL_MS = numParam("dwellMs", 600, { min: 100, max: 5000 });
