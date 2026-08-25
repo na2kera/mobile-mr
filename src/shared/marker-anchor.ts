@@ -31,6 +31,11 @@ export type MarkerAnchorOptions = {
   resnapAfterMs: number;
   /** 前回の採用位置からこの距離 [m] を超える観測もスナップする */
   snapDistanceM: number;
+  /**
+   * 初検出以外のスナップを許すか（省略時は常に許す）。06 はラリー中に false にして、
+   * 目の前のボールごとコートが飛ぶのを避ける（当たり判定が壊れる）
+   */
+  canSnap?: () => boolean;
 };
 
 export type MarkerAnchor = {
@@ -128,8 +133,9 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     markerWorld.decompose(targetPos, targetQuat, targetScale);
     const snap =
       !self.everDetected ||
-      now - self.lastAcceptedMs > opts.resnapAfterMs ||
-      anchor.position.distanceTo(targetPos) > opts.snapDistanceM;
+      ((opts.canSnap?.() ?? true) &&
+        (now - self.lastAcceptedMs > opts.resnapAfterMs ||
+          anchor.position.distanceTo(targetPos) > opts.snapDistanceM));
     if (snap) {
       anchor.position.copy(targetPos);
       anchor.quaternion.copy(targetQuat);

@@ -23,6 +23,14 @@ export const VOLLEYBALL_PROTOCOL_VERSION = 1;
 export type VolleyballRoomConfig = SpaceConfig & {
   /** ネット上端の高さ [m]（マーカー面から）。"auto" はサーバーが頭の高さから決める */
   netTop: number | "auto";
+  /**
+   * 軌道のパラメータ（CourtConfig の gravity / baseFlightSec / reach）。実機で装着して初めて
+   * 正解が分かる値なので、サーバー再起動なしに URL から調整できるよう接続時に申告し、
+   * netTop と同じく room 内で一致を要求する（違うと同じボールの軌道が端末ごとに変わる）
+   */
+  gravity: number;
+  flightSec: number;
+  reach: number;
 };
 
 /** court 座標系での自分のカメラ姿勢 + 手の 21 点（見えているときだけ） */

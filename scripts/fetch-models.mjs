@@ -1,6 +1,6 @@
 // MediaPipe のモデル（hand_landmarker.task, 約 7.8MB）を public/models/ に取得する。
 // `npm run fetch:models` で実行する。バイナリなので git には入れない（.gitignore 済み）。
-// 取得していなくてもデモは動く（demos/05 は公式 URL にフォールバックする）が、
+// 取得していなくてもデモは動く（demos/05・06 は公式 URL にフォールバックする）が、
 // ローカルにあれば iPhone 側が Google のストレージに出て行かずに済み、
 // 電波の弱い場所やオフラインの LAN でも確認できる
 import { mkdir, stat, writeFile } from "node:fs/promises";

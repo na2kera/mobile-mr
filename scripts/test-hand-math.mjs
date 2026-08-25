@@ -37,7 +37,7 @@ function check(name, cond, detail = "") {
 }
 const near = (a, b, eps) => Math.abs(a - b) <= eps;
 
-// ---- 合成データ: 形状の生成と投影は demos/05 の fake-hands.ts と共有する ----
+// ---- 合成データ: 形状の生成と投影は src/shared/fake-hands.ts（05/06 の合成の手）と共有する ----
 // （?fakehands=1 でブラウザに入れる合成の手と同じ式をここで検証する）
 const openHand = () => syntheticHandShape("open");
 const pointingHand = () => syntheticHandShape("point");

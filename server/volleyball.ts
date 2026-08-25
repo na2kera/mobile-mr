@@ -24,6 +24,7 @@ import { DEFAULT_COURT, type V3 } from "../src/shared/volleyball-sim.ts";
 /** 1メッセージの上限。pose + 両手（63 数値 × 2）の JSON で 2KB 前後 */
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 
+// 回帰テストが half-open 切断を実時間で待てるよう短縮できる（04 と同じ環境変数を共用）
 const HEARTBEAT_INTERVAL_MS =
   Number(process.env.SHARED_ROOM_HEARTBEAT_MS ?? "") || 10000;
 
@@ -112,13 +113,33 @@ function parseRoomConfig(url: URL): VolleyballRoomConfig | null {
     if (!Number.isFinite(v) || v < 0.1 || v > 3) return null;
     netTop = v;
   }
-  return { markerId, markerMm, netTop };
+  // 軌道パラメータ（クライアントの numParam と同じ範囲。未指定は既定値）
+  const num = (name: string, fallback: number, min: number, max: number) => {
+    const raw = url.searchParams.get(name);
+    if (raw === null) return fallback;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= min && v <= max ? v : null;
+  };
+  const gravity = num("gravity", DEFAULT_COURT.gravity, 0.5, 20);
+  const flightSec = num("flightSec", DEFAULT_COURT.baseFlightSec, 0.3, 3);
+  const reach = num("reach", DEFAULT_COURT.reach, 0.1, 1.5);
+  if (gravity === null || flightSec === null || reach === null) return null;
+  return { markerId, markerMm, netTop, gravity, flightSec, reach };
 }
 
 function sameConfig(a: VolleyballRoomConfig, b: VolleyballRoomConfig): boolean {
   return (
-    a.markerId === b.markerId && a.markerMm === b.markerMm && a.netTop === b.netTop
+    a.markerId === b.markerId &&
+    a.markerMm === b.markerMm &&
+    a.netTop === b.netTop &&
+    a.gravity === b.gravity &&
+    a.flightSec === b.flightSec &&
+    a.reach === b.reach
   );
+}
+
+function describeConfig(c: VolleyballRoomConfig): string {
+  return `markerId=${c.markerId} markerMm=${c.markerMm} netTop=${c.netTop} gravity=${c.gravity} flightSec=${c.flightSec} reach=${c.reach}`;
 }
 
 function attach(httpServer: HttpServer) {
@@ -175,10 +196,15 @@ function attach(httpServer: HttpServer) {
   function createRoom(name: string, config: VolleyballRoomConfig): Room {
     const game = new VolleyballGame({
       autoNetTop: config.netTop === "auto",
-      court:
-        config.netTop === "auto"
-          ? undefined
-          : { ...DEFAULT_COURT, netTop: config.netTop },
+      court: {
+        ...DEFAULT_COURT,
+        netTop: config.netTop === "auto" ? DEFAULT_COURT.netTop : config.netTop,
+        gravity: config.gravity,
+        baseFlightSec: config.flightSec,
+        // サーブは打ち返しより少しゆっくり（受け手が構える時間）
+        serveFlightSec: config.flightSec * 1.3,
+        reach: config.reach,
+      },
     });
     const room: Room = {
       config,
@@ -241,14 +267,14 @@ function attach(httpServer: HttpServer) {
       }
       const config = parseRoomConfig(url);
       if (!config) {
-        reject(ws, "Room 設定 (markerId / markerMm / netTop) が不正です");
+        reject(ws, "Room 設定 (markerId / markerMm / netTop / gravity / flightSec / reach) が不正です");
         return;
       }
       let room = rooms.get(roomName);
       if (room && !sameConfig(room.config, config)) {
         reject(
           ws,
-          `room "${roomName}" の設定と不一致 (参加中: markerId=${room.config.markerId} markerMm=${room.config.markerMm} netTop=${room.config.netTop} / あなた: markerId=${config.markerId} markerMm=${config.markerMm} netTop=${config.netTop})`,
+          `room "${roomName}" の設定と不一致 (参加中: ${describeConfig(room.config)} / あなた: ${describeConfig(config)})`,
         );
         return;
       }
@@ -286,6 +312,9 @@ function attach(httpServer: HttpServer) {
           if (game.hit(id, msg.pos, msg.handVel, t)) {
             // 受理した打球は待たずに配る（クライアントの予測との差を最小にする）
             broadcastState(room, t);
+          } else {
+            // 拒否は申告者にだけ伝え、ローカル予測を即座に捨てさせる
+            send(ws, { type: "state", state: game.rejectionSnapshot(id, t), court: game.court });
           }
         }
       });

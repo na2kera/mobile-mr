@@ -10,18 +10,28 @@ export type Side = "A" | "B";
 export type CourtConfig = {
   /** ネット上端の高さ [m]（マーカー面 = 0 から） */
   netTop: number;
-  /** ネット下端の高さ [m]。これより下をくぐった球もネットに当たった扱い */
+  /** ネット下端の高さ [m]（見た目用。物理では下をくぐった球もネットに当たった扱いなので未使用） */
   netBottom: number;
   /** ネットの幅の半分 [m] */
   netHalfWidth: number;
   /** ボールの半径 [m]（バレーボール実寸 ≈ 0.105。05 と同じ） */
   ballR: number;
+  /**
+   * 重力 [m/s²]。現実の 9.8 ではなく低め（既定 4）。現実の重力で反応できる滞空時間（1s）を
+   * 要求すると最高点が g·t²/8 ≈ 1.2m 上がり、机上コートでは天井を突き抜けて、落下速度も
+   * 5m/s 超（当たり窓が手トラッカー 2 フレーム分）になる（レビュー指摘で机上計算）。
+   * MR の部屋の寸法と手トラッカーのレートに合わせた「非現実的だが遊べる」値
+   */
   gravity: number;
+  /** 打ち返しの基準滞空時間 [s]（手の速さで短くなる）。サーバーからクライアントへ配る */
+  baseFlightSec: number;
+  /** サーブ（自動トス）の滞空時間 [s]。ゆっくり目 */
+  serveFlightSec: number;
   /** 打ち返しの狙い: 相手の頭からネット側へこの距離 [m]（手を出す位置 = 顔の前 30〜60cm） */
   reach: number;
   /** 狙う高さ: 相手の頭からこれだけ下 [m]（目の高さより少し下に手が来る） */
   aimDrop: number;
-  /** コートの外（アウト）とみなす範囲 */
+  /** コートの外（アウト）とみなす範囲。yMin は地面判定が先に当たるので通常は到達しない（保険） */
   bounds: { x: number; z: number; yMin: number };
   /** 相手がいないときに bot が狙う位置の、ネットからの距離 [m] */
   botDistance: number;
@@ -32,7 +42,9 @@ export const DEFAULT_COURT: CourtConfig = {
   netBottom: 0.15,
   netHalfWidth: 0.6,
   ballR: 0.105,
-  gravity: 9.8,
+  gravity: 4,
+  baseFlightSec: 1.0,
+  serveFlightSec: 1.3,
   reach: 0.45,
   aimDrop: 0.1,
   bounds: { x: 3, z: 4, yMin: -1 },
@@ -54,13 +66,15 @@ export type Phase =
   /** ポイントが決まった直後（次のサーブまでの間） */
   | "point";
 
-export type PointReason = "ground" | "out";
+/** ground: 落下 / net: ネットに掛けて自陣に落下 / out: コート外 */
+export type PointReason = "ground" | "net" | "out";
 
 export type GameEvent = {
-  kind: "serve" | "hit" | "bot-hit" | "net" | "ground" | "out";
+  /** hit-rejected は申告者にだけ送る（予測を即座に捨てさせる） */
+  kind: "serve" | "hit" | "hit-rejected" | "bot-hit" | "net" | "ground" | "out";
   /** hit / bot-hit: 打った側。ground / out: 責任のある側（失点側） */
   side?: Side;
-  /** hit: 打ったプレイヤーの id */
+  /** hit / hit-rejected: 申告したプレイヤーの id */
   by?: string;
   t: number;
 };
@@ -128,18 +142,24 @@ export function launchVelocity(
   ];
 }
 
-/** 狙い点がネットに近づきすぎない下限（ネットからの距離 [m]）。ネット際に立っても自陣側に留める */
-export const AIM_MIN_FROM_NET = 0.25;
+/** 狙い点を頭に近づけすぎない下限（頭からの水平距離 [m]）。顔面に飛ばさない */
+export const AIM_MIN_FROM_HEAD = 0.3;
+/** 狙い点をネットから最低これだけ手前に置く [m] */
+export const NET_CLEARANCE = 0.05;
 
 /**
  * 相手の頭の位置から「手を出しそうな位置」を作る: 頭からネット側へ reach、少し下へ aimDrop。
  * 頭の向きは使わない（ボールを目で追う前提なので、ネット方向に手を出すとみなす）。
- * ネット際（reach 未満）に立っていても、狙い点は必ずその側に留める
+ * ネット際に立っているときは距離を縮めるが、頭から AIM_MIN_FROM_HEAD より近くには置かない
+ * （それでもネットを越えるほど近い場合は越える = 立ち位置の問題として UI で案内する）
  */
 export function aimPoint(head: V3, side: Side, court: CourtConfig): V3 {
   const sign = sideSign(side);
-  const fromNet = Math.max(Math.abs(head[2]) - court.reach, AIM_MIN_FROM_NET);
-  return [head[0], head[1] - court.aimDrop, sign * fromNet];
+  const fromNet = Math.abs(head[2]);
+  const ahead = clamp(fromNet - NET_CLEARANCE, AIM_MIN_FROM_HEAD, court.reach);
+  // 頭が低い（座位・フェイク幾何）ときに狙い点が地面に埋まらないよう下限を付ける
+  const y = Math.max(head[1] - court.aimDrop, court.ballR + 0.1);
+  return [head[0], y, sign * (fromNet - ahead)];
 }
 
 /** 相手がいない側（bot）を狙う位置。bot はここに落ちてくる球を打ち返す */
@@ -258,8 +278,9 @@ export function extrapolateBall(
 }
 
 /**
- * bot が打ち返すタイミングか: bot 側にあり、落下中で、ネット上端 + 0.35m を切ったら
- * （botAimPoint の高さ netTop + 0.3 に届く少し前）
+ * bot が打ち返すタイミングか: 相手が打った球が bot 側にあり、落下中で、ネット上端 + 0.35m を
+ * 切ったら（botAimPoint の高さ netTop + 0.3 に届く少し前）。自分の打球（相手がネット際にいて
+ * 狙い点が自陣に出た場合など）は打ち直さない
  */
 export function botShouldHit(
   ball: BallState,
@@ -268,6 +289,7 @@ export function botShouldHit(
 ): boolean {
   const [, y, z] = ball.pos;
   return (
+    ball.lastHit !== botSide &&
     sideOfZ(z) === botSide &&
     Math.abs(z) > court.ballR &&
     ball.vel[1] < 0 &&
@@ -283,9 +305,8 @@ export function returnVelocity(
   from: V3,
   target: V3,
   handSpeed: number,
-  baseFlightSec: number,
   court: CourtConfig,
 ): V3 {
-  const t = flightTimeForHandSpeed(handSpeed, baseFlightSec);
+  const t = flightTimeForHandSpeed(handSpeed, court.baseFlightSec);
   return launchVelocity(from, target, t, court.gravity);
 }

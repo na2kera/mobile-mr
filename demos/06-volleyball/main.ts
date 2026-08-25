@@ -68,13 +68,15 @@ const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 const CAM_RES = resolutionParam("camRes", [1280, 720]);
 
-// マーカー（04 と同じ既定）
+// マーカー（detW / lostMs は 04 と同じ既定。smooth は間引きに合わせて変更）
 const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
 const MARKER_DET_W = numParam("detW", 960, { min: 64, max: 4096 });
-const MARKER_SMOOTH = numParam("smooth", 0.25, { min: 0.01, max: 1 });
+// 04 は 30Hz × 0.25（時定数 ≈ 110ms）。06 は検出を 10Hz に間引くので 0.5（≈ 140ms）にしないと
+// アンカーの追従が目に見えて遅れる（レビュー指摘）
+const MARKER_SMOOTH = numParam("smooth", 0.5, { min: 0.01, max: 1 });
 // 手の推論（GPU 18ms）とマーカー検出（960px で 20ms）を毎フレーム両方回すと描画が持たないので、
 // マーカーは 10Hz に間引く（アンカーは静止物なので低頻度の補正で足りる）
 const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000 });
@@ -100,12 +102,14 @@ const MODEL_URLS = params.get("model")
   ? [params.get("model")!]
   : [`${import.meta.env.BASE_URL}models/hand_landmarker.task`, OFFICIAL_MODEL_URL];
 
-// Room / 通信（04 と同じ）
+// Room / 通信（room の扱いは 04 と同じ）
 const roomRaw = params.get("room");
 const ROOM =
   roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
+// 04 の 10Hz より高め: 頭に加えて手の 21 点を載せるので、相手の手の動きを滑らかに見せるため
 const SEND_INTERVAL_MS = 1000 / numParam("sendHz", 15, { min: 1, max: 60 });
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
+// 受信 15Hz を描画に馴染ませる係数（04 は 10Hz で 0.25）
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
 // ネットの高さ。"auto" はサーバーが頭の高さから決める。room 内で一致が必要（サーバーが検証）
 const netTopRaw = params.get("netTop");
@@ -113,20 +117,27 @@ const NET_TOP: number | "auto" =
   netTopRaw === null || netTopRaw === "auto"
     ? "auto"
     : numParam("netTop", 0.6, { min: 0.1, max: 3 });
+// 軌道のパラメータ。実機で装着して初めて正解が出る値なので URL から変えられるようにし、
+// サーバーへ申告して room 内で一致させる（既定値の根拠は volleyball-sim.ts の CourtConfig）
+const GRAVITY = numParam("gravity", DEFAULT_COURT.gravity, { min: 0.5, max: 20 });
+const FLIGHT_SEC = numParam("flightSec", DEFAULT_COURT.baseFlightSec, { min: 0.3, max: 3 });
+const REACH = numParam("reach", DEFAULT_COURT.reach, { min: 0.1, max: 1.5 });
 
 // 当たり判定
 /** 指先の当たり半径 [m]（05 と同じ） */
 const TIP_R = 0.012;
 /** 手のひら（MCP の重心）の当たり半径 [m] */
 const PALM_R = 0.04;
-/** 当たりを少し甘くする余裕 [m]（深度推定は数 cm ぶれる） */
-const HIT_MARGIN = numParam("hitMargin", 0.02, { min: 0, max: 0.2 });
+/**
+ * 当たりの余裕 [m]。誤差は等方ではなく視線方向（カメラの Z）に偏る（両眼の視差 ±3cm、
+ * 深度推定 8%。PAIN_POINTS の 05 実機 2 参照）ので、横方向は小さく、奥行き方向は大きく取る
+ */
+const HIT_MARGIN_XY = numParam("hitMarginXY", 0.02, { min: 0, max: 0.2 });
+const HIT_MARGIN_Z = numParam("hitMarginZ", 0.08, { min: 0, max: 0.3 });
 /** 自分の連続 hit を送らない間隔 [ms]（サーバーの cooldown と同程度） */
 const LOCAL_HIT_COOLDOWN_MS = 300;
-/** 自分の打球の予測を、サーバーの確認なしに描き続ける上限 [ms] */
-const PREDICT_MAX_MS = 400;
-/** サーバーの基準滞空時間 [s]（server/volleyball.ts の DEFAULT_GAME_OPTIONS.baseFlightSec と揃える。予測用） */
-const BASE_FLIGHT_SEC = 1.1;
+/** 自分の打球の予測を、サーバーの確認なしに描き続ける上限 [ms]（RTT 程度。超えたら権威へ戻す） */
+const PREDICT_MAX_MS = 250;
 
 // デバッグ
 const FAKE_CAM = params.has("fakecam");
@@ -135,7 +146,7 @@ const FAKE_CAM = params.has("fakecam");
 // マーカーを下に寄せるとカメラがマーカーの上辺側（court -Z = B 側）に立つ形になり、
 // 狙い点が自陣側に来てラリーが回る。fakeMarkerPx はマーカーの描画サイズ（小さいほど遠い）
 const FAKE_SHIFT = numParam("fakeShift", 0, { min: -200, max: 200 });
-const FAKE_SHIFT_Y = numParam("fakeShiftY", 0, { min: -200, max: 200 });
+const FAKE_SHIFT_Y = numParam("fakeShiftY", 0, { min: -240, max: 240 });
 const FAKE_MARKER_PX = numParam("fakeMarkerPx", 240, { min: 30, max: 400 });
 const FAKE_HANDS = params.has("fakehands");
 
@@ -177,11 +188,93 @@ anchor.add(
 // 側の色: A（court +Z 側）= 青、B = 橙
 const SIDE_COLORS: Record<Side, number> = { A: 0x8ab4f8, B: 0xffa657 };
 
-// コートの見た目（ネット・支柱・両サイドの床・スコアボード）。ネットの高さは
+// ---- 文字パネル（CanvasTexture）。装着中は HUD が読めないので、視界内に状態を出す ----
+class TextPanel {
+  readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  private readonly canvas = document.createElement("canvas");
+  private readonly ctx: CanvasRenderingContext2D;
+  private readonly texture: THREE.CanvasTexture;
+  private last = "";
+  constructor(widthM: number, heightM: number, px = 768) {
+    this.canvas.width = px;
+    this.canvas.height = Math.round((px * heightM) / widthM);
+    this.ctx = this.canvas.getContext("2d")!;
+    this.texture = new THREE.CanvasTexture(this.canvas);
+    this.texture.colorSpace = THREE.SRGBColorSpace;
+    this.mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(widthM, heightM),
+      new THREE.MeshBasicMaterial({
+        map: this.texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    this.mesh.renderOrder = 20;
+    this.mesh.visible = false;
+  }
+  /** 改行区切りの複数行。空文字で非表示 */
+  set(text: string, color = "#e8eaed") {
+    const key = `${color}\n${text}`;
+    if (key === this.last) return;
+    this.last = key;
+    this.mesh.visible = text !== "";
+    if (!this.mesh.visible) return;
+    const { canvas, ctx } = this;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "rgba(20, 22, 26, 0.65)";
+    ctx.beginPath();
+    ctx.roundRect(0, 0, canvas.width, canvas.height, 24);
+    ctx.fill();
+    const lines = text.split("\n");
+    // 行数から決めた大きさで長い行が収まらなければ、文字を潰さず（maxWidth は横に圧縮する）
+    // フォントを小さくする
+    let size = Math.min(canvas.height / (lines.length + 0.6), canvas.width / 14);
+    const maxW = canvas.width * 0.94;
+    for (let i = 0; i < 8; i++) {
+      ctx.font = `bold ${size}px system-ui, sans-serif`;
+      const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      if (widest <= maxW) break;
+      size *= Math.max(0.6, maxW / widest);
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = color;
+    lines.forEach((line, i) => {
+      const y = (canvas.height * (i + 1)) / (lines.length + 1);
+      ctx.fillText(line, canvas.width / 2, y);
+    });
+    this.texture.needsUpdate = true;
+  }
+}
+
+// スコアボードはネットの上に置く。ネットの高さで位置だけ変わるので、作り直す courtVisuals とは
+// 別のグループに入れる（dispose の対象にしない。レビュー指摘）
+const scorePanels = [new TextPanel(0.6, 0.16), new TextPanel(0.6, 0.16)];
+const scoreGroup = new THREE.Group();
+court.add(scoreGroup);
+for (const [flip, panel] of scorePanels.entries()) {
+  panel.mesh.rotation.y = flip * Math.PI; // 裏から見ても読めるように 2 枚を背中合わせに
+  scoreGroup.add(panel.mesh);
+}
+// 視界内メッセージ（カメラの子。中央より下に置いてボールの邪魔をしない）
+const message = new TextPanel(0.9, 0.24);
+message.mesh.position.set(0, -0.28, -1.2);
+camera.add(message.mesh);
+
+// コートの見た目（ネット・支柱・両サイドの床）。ネットの高さは
 // サーバーから来る court で変わるので、寸法依存のものは rebuildCourt で作り直す
 const courtVisuals = new THREE.Group();
 court.add(courtVisuals);
-let courtCfg: CourtConfig = { ...DEFAULT_COURT, netTop: NET_TOP === "auto" ? DEFAULT_COURT.netTop : NET_TOP };
+// サーバーから court が届くまでの仮の値（welcome で上書きされる）
+let courtCfg: CourtConfig = {
+  ...DEFAULT_COURT,
+  netTop: NET_TOP === "auto" ? DEFAULT_COURT.netTop : NET_TOP,
+  gravity: GRAVITY,
+  baseFlightSec: FLIGHT_SEC,
+  serveFlightSec: FLIGHT_SEC * 1.3,
+  reach: REACH,
+};
 let builtNetTop = NaN;
 
 function buildNetGrid(w: number, h: number, nx: number, ny: number): THREE.LineSegments {
@@ -265,72 +358,9 @@ function rebuildCourt(cfg: CourtConfig) {
     floor.position.set(0, 0.002, sign * 1);
     courtVisuals.add(floor);
   }
-  // スコアボード（ネットの上、両面。裏から見ても読めるように 2 枚を背中合わせに）
-  for (const flip of [0, 1]) {
-    const panel = scorePanels[flip];
-    panel.mesh.position.set(0, cfg.netTop + 0.22, 0);
-    panel.mesh.rotation.y = flip * Math.PI;
-    courtVisuals.add(panel.mesh);
-  }
+  scoreGroup.position.set(0, cfg.netTop + 0.22, 0);
 }
 
-// ---- 文字パネル（CanvasTexture）。装着中は HUD が読めないので、視界内に状態を出す ----
-class TextPanel {
-  readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  private readonly canvas = document.createElement("canvas");
-  private readonly ctx: CanvasRenderingContext2D;
-  private readonly texture: THREE.CanvasTexture;
-  private last = "";
-  constructor(widthM: number, heightM: number, px = 768) {
-    this.canvas.width = px;
-    this.canvas.height = Math.round((px * heightM) / widthM);
-    this.ctx = this.canvas.getContext("2d")!;
-    this.texture = new THREE.CanvasTexture(this.canvas);
-    this.texture.colorSpace = THREE.SRGBColorSpace;
-    this.mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(widthM, heightM),
-      new THREE.MeshBasicMaterial({
-        map: this.texture,
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-      }),
-    );
-    this.mesh.renderOrder = 20;
-    this.mesh.visible = false;
-  }
-  /** 改行区切りの複数行。空文字で非表示 */
-  set(text: string, color = "#e8eaed") {
-    const key = `${color}\n${text}`;
-    if (key === this.last) return;
-    this.last = key;
-    this.mesh.visible = text !== "";
-    if (!this.mesh.visible) return;
-    const { canvas, ctx } = this;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "rgba(20, 22, 26, 0.65)";
-    ctx.beginPath();
-    ctx.roundRect(0, 0, canvas.width, canvas.height, 24);
-    ctx.fill();
-    const lines = text.split("\n");
-    const size = Math.min(canvas.height / (lines.length + 0.6), canvas.width / 14);
-    ctx.font = `bold ${size}px system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = color;
-    lines.forEach((line, i) => {
-      const y = (canvas.height * (i + 1)) / (lines.length + 1);
-      ctx.fillText(line, canvas.width / 2, y, canvas.width * 0.94);
-    });
-    this.texture.needsUpdate = true;
-  }
-}
-
-const scorePanels = [new TextPanel(0.6, 0.16), new TextPanel(0.6, 0.16)];
-// 視界内メッセージ（カメラの子。中央より下に置いてボールの邪魔をしない）
-const message = new TextPanel(0.9, 0.24);
-message.mesh.position.set(0, -0.28, -1.2);
-camera.add(message.mesh);
 
 // ---- ボール ----
 const ballR = courtCfg.ballR;
@@ -362,6 +392,16 @@ const shadowMaterial = new THREE.MeshBasicMaterial({
 const ballShadow = new THREE.Mesh(new THREE.CircleGeometry(ballR, 24), shadowMaterial);
 ballShadow.rotation.x = -Math.PI / 2;
 court.add(ballShadow);
+// ボールから床への垂線（影と合わせて、視差の無い背景の上でも高さと位置が読めるように）
+const dropPositions = new Float32Array(6);
+const dropGeometry = new THREE.BufferGeometry();
+dropGeometry.setAttribute("position", new THREE.BufferAttribute(dropPositions, 3));
+const ballDrop = new THREE.Line(
+  dropGeometry,
+  new THREE.LineBasicMaterial({ color: 0xe8eaed, transparent: true, opacity: 0.35 }),
+);
+ballDrop.frustumCulled = false;
+court.add(ballDrop);
 
 // ---- ピア（相手）: 頭のアバター + 手の骨格。court 座標系で受け取るので court の子 ----
 type Peer = {
@@ -413,7 +453,7 @@ function removePeer(id: string) {
   if (!peer) return;
   peer.group.removeFromParent();
   peer.materials.forEach((m) => m.dispose());
-  for (const h of peer.hands) h.group.removeFromParent();
+  for (const h of peer.hands) h.dispose();
   peers.delete(id);
 }
 
@@ -503,11 +543,17 @@ type HandSlot = {
   depth: number;
   residual: number;
   handCm: number;
-  /** 当たり判定点のワールド座標（今フレーム）と前フレーム（速度用） */
+  /** 当たり判定点のワールド座標（毎フレーム、今の頭の向きで更新） */
   contactsWorld: THREE.Vector3[];
-  contactsWorldMs: number;
-  prevContactsWorld: THREE.Vector3[] | null;
-  prevContactsMs: number;
+  /**
+   * 当たり判定点の速度 [m/s]（ワールド座標）。推論時のスナップショット同士の差で計算する
+   * （contactsWorld は頭の回転で毎フレーム動くので、そこから速度を取ると頭の回転が混ざる。
+   * レビュー指摘）。未検出・初回は 0
+   */
+  contactsVel: THREE.Vector3[];
+  /** 直近の推論時点のスナップショットと時刻（速度計算用） */
+  snapContacts: THREE.Vector3[] | null;
+  snapMs: number;
 };
 const slots: HandSlot[] = [];
 for (let i = 0; i < 2; i++) {
@@ -523,9 +569,9 @@ for (let i = 0; i < 2; i++) {
     residual: 0,
     handCm: 0,
     contactsWorld: Array.from({ length: CONTACT_COUNT }, () => new THREE.Vector3()),
-    contactsWorldMs: 0,
-    prevContactsWorld: null,
-    prevContactsMs: 0,
+    contactsVel: Array.from({ length: CONTACT_COUNT }, () => new THREE.Vector3()),
+    snapContacts: null,
+    snapMs: 0,
   });
 }
 
@@ -550,7 +596,8 @@ resize();
 addEventListener("resize", resize);
 
 // ---- パススルー（src/shared/passthrough-camera.ts） ----
-// PC デバッグ用フェイクカメラ: チェッカーボードの中央にマーカー（04 と同じ。fakeShift で横にずらす）
+// PC デバッグ用フェイクカメラ: チェッカーボードの中央にマーカー（04 と同じ描き方。
+// fakeShift / fakeShiftY / fakeMarkerPx で位置と大きさを変える。パラメータのコメント参照）
 const markerImg = new Image();
 markerImg.src = markerSvgUrl;
 function fakeStream(): MediaStream {
@@ -597,6 +644,8 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     camHFovDeg: () => pt.camHFovDeg,
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
+    // ラリー中は目の前のボールごとコートが飛ぶと当たり判定が壊れるので lerp だけ（レビュー指摘）
+    canSnap: () => auth?.state.phase !== "rally",
   });
 }
 
@@ -710,7 +759,7 @@ function updateHands(now: number) {
     if (slot.view.visible && now - slot.lastSeenMs > HAND_LOST_MS) {
       slot.view.hide();
       slot.ema = null;
-      slot.prevContactsWorld = null;
+      slot.snapContacts = null;
     }
   }
   // 当たり判定点のワールド座標は毎フレーム取り直す（頭の回転に追従。05 のレビュー指摘と同じ）
@@ -815,7 +864,7 @@ function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing:
     }
   } else {
     slot.ema = hand.points;
-    slot.prevContactsWorld = null;
+    slot.snapContacts = null;
   }
   if (slot.label !== hand.label) {
     slot.label = hand.label;
@@ -827,17 +876,19 @@ function updateSlot(slot: HandSlot, hand: DetectedHand, now: number, continuing:
   slot.handCm = hand.handCm;
   slot.lastSeenMs = now;
   slot.lastWrist = hand.points[WRIST];
-  const hadPrev = slot.prevContactsWorld !== null;
-  if (slot.prevContactsWorld) {
-    for (const [k, v] of slot.prevContactsWorld.entries()) v.copy(slot.contactsWorld[k]);
-    slot.prevContactsMs = slot.contactsWorldMs;
-  }
   updateContactsWorld(slot);
-  slot.contactsWorldMs = now;
-  if (!hadPrev) {
-    slot.prevContactsWorld = slot.contactsWorld.map((v) => v.clone());
-    slot.prevContactsMs = now;
+  // 速度: 前回の推論時点のスナップショットとの差（初回は 0）
+  const dt = (now - slot.snapMs) / 1000;
+  if (slot.snapContacts && dt > 0) {
+    for (const [k, v] of slot.contactsVel.entries()) {
+      v.subVectors(slot.contactsWorld[k], slot.snapContacts[k]).divideScalar(dt);
+    }
+  } else {
+    for (const v of slot.contactsVel) v.set(0, 0, 0);
   }
+  if (!slot.snapContacts) slot.snapContacts = slot.contactsWorld.map((v) => v.clone());
+  else for (const [k, v] of slot.snapContacts.entries()) v.copy(slot.contactsWorld[k]);
+  slot.snapMs = now;
 }
 
 // ---- 試合の状態（サーバー権威 + クライアント外挿） ----
@@ -846,8 +897,14 @@ let netStatus = "idle";
 let client: GameClient | null = null;
 /** 直近の権威状態と、その受信時刻（この時刻を基準に外挿する） */
 let auth: { state: GameState; recvMs: number } | null = null;
-/** 自分の打球の予測（サーバーの確認が来るまでの間だけ使う） */
-let predicted: { ball: BallState; sinceMs: number } | null = null;
+/** 自分の打球の予測（サーバーの確認が来るまでの間だけ使う）。seq は送信時点の権威 seq */
+let predicted: { ball: BallState; sinceMs: number; seq: number } | null = null;
+/** 短時間だけ出す視界内メッセージ（サーブ等） */
+let flash: { text: string; untilMs: number } | null = null;
+/** カメラ起動の失敗理由（装着中に読めるよう視界内に出す） */
+let cameraError = "";
+/** 直近に送った自分の court 座標系での位置（ネット際の警告用） */
+let myCourtZ: number | null = null;
 let lastLocalHitMs = -Infinity;
 let localHits = 0;
 let acceptedHits = 0;
@@ -869,26 +926,44 @@ function mySide(): Side | null {
   return sideOf(selfId);
 }
 
+/** 権威状態へ戻すときに、描画位置との差をオフセットに取って少しずつ消す（急に飛ばない） */
+function absorbJump(authPos: V3) {
+  if (!displayedValid) return;
+  visualOffset.set(displayedBall.x - authPos[0], displayedBall.y - authPos[1], displayedBall.z - authPos[2]);
+  if (visualOffset.length() > 0.5) visualOffset.set(0, 0, 0);
+}
+
 function onState(state: GameState, cfg: CourtConfig) {
   const now = performance.now();
-  // 自分の打球がサーバーに受理されたら（自分の hit イベント）、予測を捨てて権威に戻る
-  if (state.event?.kind === "hit" && state.event.by === selfId) {
-    predicted = null;
-    acceptedHits++;
-  }
-  const key = state.event ? `${state.seq}:${state.event.kind}` : "";
-  if (key && key !== lastEventKey) {
-    lastEventKey = key;
-    if (state.event?.kind === "hit" || state.event?.kind === "bot-hit") {
-      flashUntilMs = now + 150;
+  const ev = state.event;
+  const mine = ev?.by === selfId;
+  // 自分の打球の予測を捨てる条件: 受理された / 拒否された / 別の出来事（bot の返球・落下・
+  // サーブ）で権威が先に進んだ。捨てるときは描画位置との差を吸収する（レビュー指摘:
+  // 期限切れやすれ違いで 1〜2m ワープしていた）
+  if (predicted) {
+    if (ev?.kind === "hit" && mine) {
+      predicted = null;
+      acceptedHits++;
+    } else if (ev?.kind === "hit-rejected" && mine) {
+      predicted = null;
+      absorbJump(state.ball.pos);
+    } else if (state.seq > predicted.seq) {
+      predicted = null;
+      absorbJump(state.ball.pos);
     }
-    console.log(`[game] event ${state.event?.kind} side=${state.event?.side ?? "-"} by=${state.event?.by ?? "-"} score=${state.score.A}-${state.score.B} phase=${state.phase}`);
+  } else {
+    absorbJump(state.ball.pos);
   }
-  // 受信直前の描画位置との差をオフセットにして、少しずつ消す（急に飛ばない）
-  if (displayedValid && !predicted) {
-    const [x, y, z] = state.ball.pos;
-    visualOffset.set(displayedBall.x - x, displayedBall.y - y, displayedBall.z - z);
-    if (visualOffset.length() > 0.5) visualOffset.set(0, 0, 0);
+  if (ev?.kind === "hit-rejected") {
+    if (mine) console.log("[game] hit rejected by server");
+  } else {
+    const key = ev ? `${state.seq}:${ev.kind}` : "";
+    if (key && key !== lastEventKey) {
+      lastEventKey = key;
+      if (ev?.kind === "hit" || ev?.kind === "bot-hit") flashUntilMs = now + 150;
+      if (ev?.kind === "serve") flash = { text: "サーブ", untilMs: now + 1000 };
+      console.log(`[game] event ${ev?.kind} side=${ev?.side ?? "-"} by=${ev?.by ?? "-"} score=${state.score.A}-${state.score.B} phase=${state.phase}`);
+    }
   }
   auth = { state, recvMs: now };
   courtCfg = cfg;
@@ -899,7 +974,7 @@ function connect() {
   if (ROOM === null) return;
   client = connectGame(
     ROOM,
-    { markerId: MARKER_ID, markerMm: MARKER_MM, netTop: NET_TOP },
+    { markerId: MARKER_ID, markerMm: MARKER_MM, netTop: NET_TOP, gravity: GRAVITY, flightSec: FLIGHT_SEC, reach: REACH },
     {
       onStatus: (status) => {
         netStatus = status;
@@ -946,6 +1021,7 @@ function sendPoseIfDue(now: number) {
   courtInv.copy(court.matrixWorld).invert();
   poseMatrix.multiplyMatrices(courtInv, camera.matrixWorld);
   poseMatrix.decompose(posePos, poseQuat, poseScale);
+  myCourtZ = posePos.z;
   const hands: number[][] = [];
   for (const slot of slots) {
     if (!slot.view.visible || !slot.ema) continue;
@@ -972,9 +1048,10 @@ function round3(v: number): number {
 }
 
 // ボールの描画位置を更新し、自分の手との接触を判定する
-const tmpLocal = new THREE.Vector3();
-const tmpPrevLocal = new THREE.Vector3();
 const tmpHandVel = new THREE.Vector3();
+const tmpOffset = new THREE.Vector3();
+const tmpFwd = new THREE.Vector3();
+const ballWorld = new THREE.Vector3();
 const spinAxis = new THREE.Vector3();
 const spinQuat = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -987,7 +1064,11 @@ function updateBall(now: number, dt: number) {
   }
   ball.visible = anchor.visible;
   ballShadow.visible = anchor.visible;
-  if (predicted && now - predicted.sinceMs > PREDICT_MAX_MS) predicted = null;
+  if (predicted && now - predicted.sinceMs > PREDICT_MAX_MS) {
+    // 期限切れ: 権威の現在位置へ、差を吸収しながら戻す
+    predicted = null;
+    absorbJump(extrapolateBall(auth.state.ball, (now - auth.recvMs) / 1000, courtCfg).pos);
+  }
   const base = predicted ?? { ball: auth.state.ball, sinceMs: auth.recvMs };
   const phase = auth.state.phase;
   const cur =
@@ -1014,6 +1095,8 @@ function updateBall(now: number, dt: number) {
   const h = Math.max(0, displayedBall.y - ballR);
   shadowMaterial.opacity = Math.max(0.06, 0.32 - h * 0.12);
   ballShadow.scale.setScalar(1 + h * 0.15);
+  dropPositions.set([displayedBall.x, displayedBall.y - ballR, displayedBall.z, displayedBall.x, 0.003, displayedBall.z]);
+  dropGeometry.attributes.position.needsUpdate = true;
   ballMaterial.emissiveIntensity = now < flashUntilMs ? 0.9 : 0;
   ballMaterial.opacity = 1;
   ballMaterial.transparent = phase === "waiting";
@@ -1024,29 +1107,34 @@ function updateBall(now: number, dt: number) {
   if (phase !== "rally" || !client || now - lastLocalHitMs < LOCAL_HIT_COOLDOWN_MS) return;
   const side = mySide();
   if (!side) return;
+  // 判定は表示位置ではなく外挿した権威位置（visualOffset 抜き）に対して行い、申告もその値にする
+  court.localToWorld(ballWorld.set(cur.pos[0], cur.pos[1], cur.pos[2]));
+  tmpFwd.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(spinQuat));
   for (const slot of slots) {
     if (!slot.view.visible) continue;
-    const tipDt = slot.prevContactsWorld ? (slot.contactsWorldMs - slot.prevContactsMs) / 1000 : 0;
     for (const [k, pWorld] of slot.contactsWorld.entries()) {
-      court.worldToLocal(tmpLocal.copy(pWorld));
-      const r = (k === CONTACT_COUNT - 1 ? PALM_R : TIP_R) + ballR + HIT_MARGIN;
-      if (tmpLocal.distanceTo(displayedBall) >= r) continue;
-      tmpHandVel.set(0, 0, 0);
-      if (slot.prevContactsWorld && tipDt > 0) {
-        court.worldToLocal(tmpPrevLocal.copy(slot.prevContactsWorld[k]));
-        tmpHandVel.subVectors(tmpLocal, tmpPrevLocal).divideScalar(tipDt);
-      }
-      const pos: V3 = [displayedBall.x, displayedBall.y, displayedBall.z];
+      const r = (k === CONTACT_COUNT - 1 ? PALM_R : TIP_R) + ballR;
+      // 視線方向に伸ばした当たり: 奥行き成分と横成分を分けて比べる
+      tmpOffset.subVectors(ballWorld, pWorld);
+      const along = tmpOffset.dot(tmpFwd);
+      const lateral = tmpOffset.addScaledVector(tmpFwd, -along).length();
+      if (lateral >= r + HIT_MARGIN_XY || Math.abs(along) >= r + HIT_MARGIN_Z) continue;
+      // 手の速度を court 座標系へ（回転だけ。court のスケールは 1）
+      tmpHandVel.copy(slot.contactsVel[k]);
+      court.getWorldQuaternion(spinQuat);
+      tmpHandVel.applyQuaternion(spinQuat.invert());
+      const pos: V3 = [cur.pos[0], cur.pos[1], cur.pos[2]];
       const handVel: V3 = [tmpHandVel.x, tmpHandVel.y, tmpHandVel.z];
-      // 予測: サーバーと同じ式で相手の顔の前へ（相手の頭は受信済みの姿勢から。いなければ bot の位置）
+      // 予測: サーバーと同じ式で相手の顔の前へ（相手の頭は受信済みの姿勢から。未受信なら bot の位置）
       const opp = otherSide(side);
       const oppId = auth.state.sides[opp];
       const oppPeer = oppId ? peers.get(oppId) : undefined;
-      const target: V3 = oppPeer
-        ? aimPoint([oppPeer.targetPos.x, oppPeer.targetPos.y, oppPeer.targetPos.z], opp, courtCfg)
-        : botAimPoint(opp, courtCfg, () => 0.5);
-      const vel = returnVelocity(pos, target, tmpHandVel.length(), BASE_FLIGHT_SEC, courtCfg);
-      predicted = { ball: { pos, vel, lastHit: side }, sinceMs: now };
+      const target: V3 =
+        oppPeer && oppPeer.lastPoseMs !== -Infinity
+          ? aimPoint([oppPeer.targetPos.x, oppPeer.targetPos.y, oppPeer.targetPos.z], opp, courtCfg)
+          : botAimPoint(opp, courtCfg, () => 0.5);
+      const vel = returnVelocity(pos, target, tmpHandVel.length(), courtCfg);
+      predicted = { ball: { pos, vel, lastHit: side }, sinceMs: now, seq: auth.state.seq };
       visualOffset.set(0, 0, 0);
       client.sendHit(pos, handVel);
       lastLocalHitMs = now;
@@ -1077,6 +1165,9 @@ function updateMessages(now: number) {
   if (netStatus.startsWith("error")) {
     text = `接続できません\n${netStatus.slice(7, 60)}`;
     color = "#f28b82";
+  } else if (cameraError) {
+    text = `カメラを開けません\n${cameraError.slice(0, 40)}`;
+    color = "#f28b82";
   } else if (!passthrough) {
     text = "カメラを起動中…";
   } else if (!markerAnchor?.everDetected) {
@@ -1091,22 +1182,36 @@ function updateMessages(now: number) {
   } else if (!auth) {
     text = netStatus === "open" ? "入室中…" : `サーバーに接続中… (${netStatus})`;
     color = "#fdd663";
+  } else if (netStatus !== "open") {
+    text = "接続が切れました（再接続中）";
+    color = "#f28b82";
+  } else if (myCourtZ !== null && Math.abs(myCourtZ) < courtCfg.reach + 0.1) {
+    // ネット際だと狙い点が顔の近く／相手陣に出る。立ち位置を直してもらう
+    text = `マーカーから離れてください\n（あと ${Math.ceil((courtCfg.reach + 0.1 - Math.abs(myCourtZ)) * 100)}cm）`;
+    color = "#fdd663";
   } else if (auth.state.phase === "waiting") {
-    text = me ? "まもなくサーブ" : "マーカーを見て立ち位置を決めてください";
-    if (me && auth.state.bot) text += "\n（相手がいないので BOT と練習）";
+    const s = auth.state;
+    text = me
+      ? "まもなくサーブ"
+      : s.sides.A && s.sides.B
+        ? "観戦中（両側とも埋まっています）"
+        : "マーカーを見て立ち位置を決めてください";
+    if (me && s.bot) text += "\n（相手がいないので BOT と練習）";
   } else if (auth.state.phase === "point" && auth.state.lastPoint) {
     const { winner, reason } = auth.state.lastPoint;
-    const why = reason === "out" ? "アウト" : "落下";
+    const why = reason === "out" ? "アウト" : reason === "net" ? "ネット" : "落下";
     text = me
       ? winner === me
         ? `ポイント！（相手の${why}）`
         : `失点…（${why}）`
       : `${winner} 側のポイント`;
     color = me && winner === me ? "#81c995" : "#f28b82";
-  } else if (auth.state.phase === "rally" && !markerAnchor.isTracking(now, MARKER_LOST_MS)) {
-    // ロスト中は表示を続ける（その場で回転だけ追従）。歩くとずれるので注意だけ出す
-    text = "";
+  } else if (flash && now < flash.untilMs) {
+    text = flash.text;
+  } else if (auth.state.phase === "rally" && !me) {
+    text = "観戦中";
   }
+  // ラリー中のマーカーロストは毎ラリー起きる（見上げるため）ので、あえて何も出さない
   message.set(text, color);
 }
 
@@ -1205,6 +1310,7 @@ startButton.addEventListener("click", () => {
         hudState.base += ` camFov=${passthrough!.camHFovDeg}`;
       } catch (e: unknown) {
         hudState.cam = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        cameraError = hudState.cam;
       }
     },
     tryEnterFullscreen,

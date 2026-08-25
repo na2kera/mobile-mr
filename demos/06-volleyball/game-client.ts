@@ -45,6 +45,9 @@ export function connectGame(
     markerId: String(config.markerId),
     markerMm: String(config.markerMm),
     netTop: String(config.netTop),
+    gravity: String(config.gravity),
+    flightSec: String(config.flightSec),
+    reach: String(config.reach),
   });
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${VOLLEYBALL_PATH}?${query}`;
   let ws: WebSocket | null = null;

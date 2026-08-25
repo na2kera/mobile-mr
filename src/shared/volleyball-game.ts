@@ -20,6 +20,7 @@ import type {
   CourtConfig,
   GameEvent,
   GameState,
+  PointReason,
   Side,
   V3,
 } from "./volleyball-sim.ts";
@@ -31,12 +32,22 @@ export type GameOptions = {
   /** waiting → 最初のサーブ、point → 次のサーブ までの間 [ms] */
   serveDelayMs: number;
   pointDelayMs: number;
-  /** 打ち返しの基準滞空時間 [s]（手の速さで短くなる） */
-  baseFlightSec: number;
-  /** サーブ（自動トス）の滞空時間 [s]。ゆっくり目 */
-  serveFlightSec: number;
-  /** hit の受理: クライアント申告のボール位置とサーバーのボール位置の許容差 [m] */
+  /** hit の受理: クライアント申告のボール位置と、サーバーのボールの直近の軌跡との許容差 [m] */
   hitToleranceM: number;
+  /**
+   * hit の受理で遡る軌跡の長さ [ms]。クライアントの表示は受信時刻基準で片道遅延ぶん遅れ、
+   * hit がサーバーに届くまでにさらに片道かかるので、申告位置はサーバーの現在位置より
+   * RTT × 速度ぶん手前になる（レビュー指摘）。直近の位置を覚えておき最短距離で判定する
+   */
+  hitTrailMs: number;
+  /**
+   * サイド割当に必要な、同じ側で連続して受信した追跡姿勢の数。初検出はスナップした
+   * 単発観測なので 1 回で確定せず、数回同じ側にいることを確かめる
+   */
+  sideVotes: number;
+  /** サイドの占有者の姿勢がこの時間途絶えていれば、新しいプレイヤーがその側を奪える [ms]
+   *  （再接続で id が変わったときの旧接続のゴースト対策。poseStaleMs より短くする） */
+  evictStaleMs: number;
   /** 同じプレイヤーの連続 hit を捨てる間隔 [ms]（指が触れ続けても 1 回にする） */
   hitCooldownMs: number;
   /** プレイヤーの姿勢がこの時間更新されなければ「いない」扱い（サイドを空ける） */
@@ -54,9 +65,10 @@ export const DEFAULT_GAME_OPTIONS: Omit<GameOptions, "random"> = {
   autoNetTop: true,
   serveDelayMs: 1500,
   pointDelayMs: 2000,
-  baseFlightSec: 1.1,
-  serveFlightSec: 1.4,
   hitToleranceM: 0.4,
+  hitTrailMs: 400,
+  sideVotes: 3,
+  evictStaleMs: 1000,
   hitCooldownMs: 250,
   poseStaleMs: 3000,
   botReturnRate: 0.75,
@@ -70,6 +82,9 @@ export type Player = {
   tracking: boolean;
   lastPoseMs: number;
   lastHitMs: number;
+  /** サイド割当の投票（連続して同じ側にいた回数） */
+  voteSide: Side | null;
+  votes: number;
 };
 
 export class VolleyballGame {
@@ -82,6 +97,10 @@ export class VolleyballGame {
   private lastEvents: GameEvent[] = [];
   /** いま bot へ向かっている球を bot が見送るか（球が bot へ向かうたびに抽選する） */
   private botMissesThisBall = false;
+  /** このラリーの直近の打球がネットに触れたか（自陣に落ちたとき「ネット」の失点にする） */
+  private netTouched = false;
+  /** ラリー中のボール位置の履歴（hitTrailMs ぶん。hit の受理判定用） */
+  private trail: { t: number; pos: V3 }[] = [];
 
   constructor(opts: Partial<GameOptions> & { random?: () => number } = {}) {
     this.opts = {
@@ -112,6 +131,8 @@ export class VolleyballGame {
       tracking: false,
       lastPoseMs: now,
       lastHitMs: -Infinity,
+      voteSide: null,
+      votes: 0,
     };
     this.players.set(id, p);
     return p;
@@ -126,8 +147,10 @@ export class VolleyballGame {
   }
 
   /**
-   * 姿勢の受信。最初に追跡できた姿勢で立っている側（Z の符号）にサイドを割り当てる。
-   * その側が埋まっていれば反対側（両方埋まっていれば観戦 = null のまま）
+   * 姿勢の受信。追跡できた姿勢が sideVotes 回連続で同じ側（Z の符号）なら、その側に割り当てる。
+   * その側が埋まっていれば反対側（両方埋まっていれば観戦 = null のまま）。占有者の姿勢が
+   * 途絶えていれば追い出して奪う（再接続のゴースト対策）。試合前（waiting）の間は
+   * 反対側へ歩いて行けば割り当てを付け替える
    */
   updatePose(id: string, head: V3, tracking: boolean, now: number) {
     const p = this.players.get(id);
@@ -135,25 +158,40 @@ export class VolleyballGame {
     p.head = head;
     p.tracking = tracking;
     p.lastPoseMs = now;
-    if (p.side === null && tracking) {
-      const want = sideOfZ(head[2]);
-      const side =
-        this.state.sides[want] === null
-          ? want
-          : this.state.sides[otherSide(want)] === null
-            ? otherSide(want)
-            : null;
-      if (side) {
-        p.side = side;
-        this.state.sides[side] = id;
-        this.refreshSides();
-      }
+    if (!tracking) return;
+    const want = sideOfZ(head[2]);
+    if (p.voteSide === want) p.votes++;
+    else {
+      p.voteSide = want;
+      p.votes = 1;
     }
+    if (p.votes < this.opts.sideVotes) return;
+    if (p.side === want) return;
+    if (p.side !== null && this.state.phase !== "waiting") return; // 試合中は固定
+    const canTake = (side: Side): boolean => {
+      const holder = this.state.sides[side];
+      if (holder === null || holder === id) return true;
+      const other = this.players.get(holder);
+      if (!other || now - other.lastPoseMs > this.opts.evictStaleMs) {
+        if (other) other.side = null;
+        this.state.sides[side] = null;
+        return true;
+      }
+      return false;
+    };
+    let side: Side | null = null;
+    if (canTake(want)) side = want;
+    else if (p.side === null && canTake(otherSide(want))) side = otherSide(want);
+    if (side === null) return;
+    if (p.side) this.state.sides[p.side] = null;
+    p.side = side;
+    this.state.sides[side] = id;
+    this.refreshSides();
   }
 
   /**
-   * プレイヤーからの「触れた」申告。ボールが本当にその近くにあり、ラリー中で、
-   * 同じプレイヤーの直前の hit から間隔が空いていれば受理して打ち返す。
+   * プレイヤーからの「触れた」申告。ボールが本当にその近くにあり、自陣側（ネット際は許容）にあり、
+   * ラリー中で、同じプレイヤーの直前の hit から間隔が空いていれば受理して打ち返す。
    * @returns 受理したか
    */
   hit(id: string, claimedPos: V3, handVel: V3, now: number): boolean {
@@ -161,18 +199,20 @@ export class VolleyballGame {
     if (!p || !p.side) return false;
     if (this.state.phase !== "rally") return false;
     if (now - p.lastHitMs < this.opts.hitCooldownMs) return false;
-    if (dist3(this.state.ball.pos, claimedPos) > this.opts.hitToleranceM)
+    const ball = this.state.ball;
+    // 申告位置は遅延ぶん過去のボール位置なので、直近の軌跡との最短距離で判定する
+    let nearest = dist3(ball.pos, claimedPos);
+    for (const { pos } of this.trail) nearest = Math.min(nearest, dist3(pos, claimedPos));
+    if (nearest > this.opts.hitToleranceM) return false;
+    // 相手陣のボールは打てない（ネットの真上付近だけ許す）
+    if (sideOfZ(ball.pos[2]) !== p.side && Math.abs(ball.pos[2]) > this.court.ballR)
       return false;
     p.lastHitMs = now;
     const target = this.targetFor(otherSide(p.side));
-    const vel = returnVelocity(
-      this.state.ball.pos,
-      target,
-      len3(handVel),
-      this.opts.baseFlightSec,
-      this.court,
-    );
-    this.state.ball = { pos: this.state.ball.pos, vel, lastHit: p.side };
+    const vel = returnVelocity(ball.pos, target, len3(handVel), this.court);
+    this.state.ball = { pos: ball.pos, vel, lastHit: p.side };
+    this.trail = [];
+    this.netTouched = false;
     this.botMissesThisBall = this.opts.random() >= this.opts.botReturnRate;
     this.emit({ kind: "hit", side: p.side, by: id, t: now });
     return true;
@@ -204,14 +244,21 @@ export class VolleyballGame {
           this.toWaiting();
           break;
         }
+        this.trail.push({ t: now, pos: this.state.ball.pos });
+        while (this.trail.length && now - this.trail[0].t > this.opts.hitTrailMs) {
+          this.trail.shift();
+        }
         const r = stepBall(this.state.ball, dtSec, this.court);
         this.state.ball = r.ball;
         if (r.event === "net") {
+          this.netTouched = true;
           this.emit({ kind: "net", t: now });
         } else if (r.event === "ground") {
-          // 落ちた側の失点
+          // 落ちた側の失点。自分の打球がネットに掛かって自陣に落ちたなら「ネット」
           const loser = sideOfZ(r.ball.pos[2]);
-          this.endPoint(otherSide(loser), "ground", now);
+          const reason =
+            this.netTouched && r.ball.lastHit === loser ? "net" : "ground";
+          this.endPoint(otherSide(loser), reason, now);
         } else if (r.event === "out") {
           // アウトは打った側の責任。サーブ直後（lastHit なし）なら飛んでいった側の失点
           const loser = r.ball.lastHit ?? sideOfZ(r.ball.pos[2]);
@@ -226,10 +273,12 @@ export class VolleyballGame {
           const vel = launchVelocity(
             this.state.ball.pos,
             target,
-            this.opts.baseFlightSec,
+            this.court.baseFlightSec,
             this.court.gravity,
           );
           this.state.ball = { pos: this.state.ball.pos, vel, lastHit: bot };
+          this.trail = [];
+          this.netTouched = false;
           this.emit({ kind: "bot-hit", side: bot, t: now });
         }
         break;
@@ -278,10 +327,16 @@ export class VolleyballGame {
       if (p.side && now - p.lastPoseMs > this.opts.poseStaleMs) {
         this.state.sides[p.side] = null;
         p.side = null;
+        p.votes = 0;
         changed = true;
       }
     }
     if (changed) this.refreshSides();
+  }
+
+  /** 申告者にだけ返す「拒否」の状態（seq は進めない。予測を捨てさせるための通知） */
+  rejectionSnapshot(id: string, now: number): GameState {
+    return { ...this.snapshot(), event: { kind: "hit-rejected", by: id, t: now } };
   }
 
   /** サイドの埋まり具合から bot の側を決める。片側だけ人がいれば反対側が bot */
@@ -319,25 +374,28 @@ export class VolleyballGame {
     const vel = launchVelocity(
       from,
       target,
-      this.opts.serveFlightSec,
+      this.court.serveFlightSec,
       this.court.gravity,
     );
     this.state.ball = { pos: from, vel, lastHit: null };
+    this.trail = [];
     this.botMissesThisBall = false;
+    this.netTouched = false;
     this.state.phase = "rally";
     this.state.lastPoint = null;
     this.serveAtMs = -1;
     this.emit({ kind: "serve", side: to, t: now });
   }
 
-  private endPoint(winner: Side, reason: "ground" | "out", now: number) {
+  private endPoint(winner: Side, reason: PointReason, now: number) {
     this.state.score[winner]++;
     this.state.phase = "point";
     this.state.lastPoint = { winner, reason };
     // 失点した側がレシーブする（次の球を打ち返す機会を与える）
     this.state.serveTo = otherSide(winner);
     this.serveAtMs = now + this.opts.pointDelayMs;
-    this.emit({ kind: reason, side: otherSide(winner), t: now });
+    // イベント種別は「落ちた / 出た」。ネット絡みの失点も落下として通知する（理由は lastPoint に）
+    this.emit({ kind: reason === "out" ? "out" : "ground", side: otherSide(winner), t: now });
   }
 
   /**
