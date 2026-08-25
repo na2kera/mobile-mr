@@ -1124,7 +1124,7 @@ fsButton.addEventListener("click", tryEnterFullscreen);
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 startButton.addEventListener("click", () => {
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE} smooth=${SMOOTH} detW=${DET_W} detAdapt=${DET_ADAPT} detIntervalMs=${DET_INTERVAL_MS} depth=${DEPTH_MODE}`;
+  hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"} hands=${NUM_HANDS} delegate=${DELEGATE} smooth=${SMOOTH} detW=${DET_W} detAdapt=${DET_ADAPT} detIntervalMs=${DET_INTERVAL_MS} depth=${DEPTH_MODE} handScale=${HAND_SCALE}`;
   renderHud();
   // wasm + モデルの読み込み（数秒）は許可ダイアログと並行して進める。カメラの成否とは独立
   if (FAKE_HANDS) {
