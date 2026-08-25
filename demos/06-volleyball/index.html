@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>06. MR Volleyball — Mobile MR</title>
+    <style>
+      /* 見た目は 04/05 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #start-button {
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜05 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・手・通信・試合の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>06. MR Volleyball</h1>
+      <p>
+        <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
+        >して机に水平に置き、マーカーを挟んで向かい合ってください。マーカーの真上に
+        仮想のネットが立ち、ボールが自分の顔の前へ山なりに飛んできます。
+        <strong>顔の前 30〜60cm に手を出して</strong>ボールに触れると、相手の顔の前へ自動で打ち返します
+        （狙いは自動。手を速く振ると速い球になります）。
+        落とした側の失点で、床に落ちると 2 秒後に次の球がトスされます。
+      </p>
+      <p>
+        1台だけでも遊べます（相手側は bot が返球。たまに落とします）。2台で対戦するときは両方で同じ
+        URL を開くだけです（既定 room: demo。分けたいときは ?room=名前）。
+        立ち位置はマーカーを見た時点で自動で決まります（マーカーの下辺側 = A、上辺側 = B）。
+      </p>
+      <p id="room-error" hidden></p>
+      <button id="start-button" type="button">開始</button>
+      <p>
+        確認の見方: 開始後、まず机のマーカーを見ます（視界内の案内が「マーカーを見て」から
+        変わります）。ボールと骨格が出たら準備完了。マーカーから目を離して見上げても
+        ネット・ボールはその場に残ります（ジャイロで追従。歩くとずれるのでその場で）。
+        右手は青・左手は橙の骨格が背景の手に重なります。ボールの真下の影で高さが分かります。
+      </p>
+      <p>
+        調整: ?fov=135&amp;eyeSep=0.064&amp;camZoom=0.7&amp;handScale=1 が既定（05 と同じ較正値。
+        手の実寸較正は 05 と同じく ?handScale=実測÷申告）。マーカーは ?markerMm=100&amp;camFov=106
+        &amp;detW=960&amp;markerIntervalMs=100（手と同居させるため検出は 10Hz に間引き）。
+        ネットの高さは ?netTop=auto（頭の高さから自動。数値 [m] で固定可。room 内で一致が必要）。
+        打ち返しの狙い・速さはサーバー側の設定。
+        PC では ?fov=70&amp;camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1
+        で、合成の手がボールに触れて bot とラリーを続けるところまで見られます
+        （2 タブで &amp;fakeShift=60 / -60 を付けると対戦の経路）
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

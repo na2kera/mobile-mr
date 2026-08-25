@@ -154,14 +154,14 @@
 - **どう対処したか**: exports が公開しているサブパス `@mediapipe/tasks-vision/vision_wasm_internal.js` / `.wasm` を `?url` で import し、`WasmFileset`（ローダーと wasm の URL の組）を自前で組み立てて `HandLandmarker.createFromOptions` に渡した。SIMD 版のみ同梱し、`isSimdSupported()` が false の環境は明示エラーにした（nosimd 版も同梱すると dist が約 +11MB）
 - **SDK ならどう解決するか（案）**: `@mobile-mr/tracking` が wasm/モデルの配信を引き受け、バンドラ（Vite/webpack）向けのアセット解決をパッケージ側で済ませる。「CDN か自前配信か」は利用者が選べる1つのオプションにする
 - **追記（レビューでの確認）**: ローダーは ESM ではなく `<script>` 注入 + グローバル `ModuleFactory` 前提で動くため、CSP やモジュール Worker とは相性が悪い。また Vite dev は存在しないパスへの `fetch`（`Accept: */*`）にも index.html を 200 で返すので、モデルの取得では「HTTP 200 なのに中身が HTML」を自前のサイズ検証で弾く必要があった（実際に必要だったことを curl で確認済み）
-- **関連**: `demos/05-hand-interaction/hand-tracker.ts` の import 部分 / node_modules/@mediapipe/tasks-vision/package.json の exports
+- **関連**: `src/shared/hand-tracker.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） の import 部分 / node_modules/@mediapipe/tasks-vision/package.json の exports
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: モデル（7.8MB）が npm パッケージに入っておらず、配布を自前で設計する必要があった
 
 - **何が苦しかったか**: HandLandmarker のモデル `hand_landmarker.task` は npm パッケージに含まれず、Google のストレージ（storage.googleapis.com）から実行時に取る前提。LAN 内の実機確認では iPhone 側が毎回インターネットへ取りに行くことになり、電波の弱い会場やオフライン LAN で詰む。かといって 7.8MB のバイナリを git に入れるのも避けたい。`modelAssetPath` に 404 になる URL を渡すと HTML をモデルとして読もうとして分かりにくいエラーになり、フォールバックもできない
 - **どう対処したか**: `npm run fetch:models` で `public/models/` に取得（gitignore）し、デモは「ローカル → 公式 URL」の順に自前で `fetch` してサイズを検証してから `modelAssetBuffer` で渡す。HUD に `model=local|remote` を出して、どちらから読んだか実機で分かるようにした
 - **SDK ならどう解決するか（案）**: SDK がモデルの取得元・キャッシュ（Cache API）・整合性検証を持ち、利用者は `hands: true` と書くだけにする。Phase 6 以降はモデルが増える（Pose 等）ので取得は1か所にまとめる
-- **関連**: `scripts/fetch-models.mjs` / `demos/05-hand-interaction/hand-tracker.ts` の fetchFirst / `demos/05-hand-interaction/main.ts` の MODEL_URLS
+- **関連**: `scripts/fetch-models.mjs` / `src/shared/hand-tracker.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） の fetchFirst / `demos/05-hand-interaction/main.ts` の MODEL_URLS
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: MediaPipe は手の「カメラからの距離」を返さず、3D 化は自前の最小二乗と FOV の仮定に依存する
 
@@ -170,7 +170,7 @@
 - **実機確認（2026-08-26, iPhone）**: 腕を伸ばし切った手（実距離 0.6m 前後のはず）が R:0.25 と推定され、「操作はできるが奥行きの感覚がズレる」ことが判明。表示基準の深度は「実効 FOV / 仮想 FOV」の比がそのまま倍率になり、標準カメラ + 720p クロップの狭い実効視野だと 0.4 倍程度に縮む計算で報告値と一致する。対処: 深度（と遠すぎ判定）だけ実カメラの FOV（レンズのラベルから推定、`?camFov=` 補正。03/04 と同じ方式）で実寸に合わせる depthMode=metric を既定にし、x/y の重なりは表示基準を維持、従来の挙動は `?depthMode=display` に残した。結局この痛点も「実カメラ FOV が取得できない」問題（Phase 3 の痛点）に合流する
 - **実機確認 2 回目（2026-08-26, iPhone）— worldLandmarks の絶対スケールは実際の半分程度**: 深度を実カメラ FOV 基準（depthMode=metric, 超広角 camFov=106）にしても R は実距離の半分弱のままだった。診断表示（HUD の hand= = モデルが申告する手首→中指の長さ）を足して原因を特定: **実測 23cm の手に対して申告は 10.5〜12cm（約 0.45〜0.5 倍）**。深度は手の実寸に比例するので、これがそのまま R の不足分だった。`?handScale=1.9`（実測 ÷ 申告）で較正すると、メジャーで測った 50cm に対して R=0.46（誤差 8%）まで合った。つまり深度合わせには**ユーザーごとの手の実寸による較正が必須**
 - **SDK ならどう解決するか（案）**: `mr.hands` が返す座標は「カメラ座標系の実寸」に統一し、FOV の管理（機種 DB・キャリブレーション）と合わせて SDK 内で吸収する。手の実寸は「初回に手の長さを1回入力する（or 既知サイズの物と一緒に映すキャリブレーション）」を標準フローにする。ステレオカメラや深度センサーが使える端末では置き換えられる差し込み口にする
-- **関連**: `demos/05-hand-interaction/hand-math.ts` の solveHandPlacement / placeLandmarks、`scripts/test-hand-math.mjs`
+- **関連**: `src/shared/hand-math.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） の solveHandPlacement / placeLandmarks、`scripts/test-hand-math.mjs`
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: handedness の左右が「鏡像前提」の注記と実挙動で食い違い、実機で試すまで確定できなかった
 
@@ -191,7 +191,7 @@
 - **何が苦しかったか**: MediaPipe は実際の手がカメラに映らないと何も返さないため、PC（特にヘッドレス）では「手を検出した後」のロジック（3D 化・骨格描画・接触・押下・指差し）が一切動かせない。Phase 2 の「getUserMedia を使うデモは PC で自動テストできない」と同じ構造で、今回は入力がカメラ映像ではなく認識結果
 - **どう対処したか**: `?fakehands=1` で MediaPipe を使わず、台本どおり（ボールを横切る → ボタンを押し込む → 的を指差す → 消える）に動く合成のランドマークを applyHandResult に流す。再現手順: `?fakecam=1&autostart=1&fakehands=1` を開いて約 13 秒待つと、HUD のカウンタが `touches>=1 presses>=1 selects>=1` になる（12 秒周期の台本: ボール横切り → ボタン押し込み → 的を指差し → 手なし）。この確認は Playwright でシステムの Chrome を headless 起動して行った（Playwright は依存追加になるのでリポジトリには入れていない）。形状生成と投影は Node の回帰テスト（`npm run test:hand`）と共有している
 - **SDK ならどう解決するか（案）**: 「トラッキングソース」を差し替え可能にして、MediaPipe / 録画したランドマーク列 / 台本の合成データを同じ口から入れられるようにする。カメラのモックソースと並べて、CI で操作ロジックまで検証できる形にする
-- **関連**: `demos/05-hand-interaction/fake-hands.ts` / `demos/05-hand-interaction/main.ts` の updateFakeHands
+- **関連**: `src/shared/fake-hands.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） / `demos/05-hand-interaction/main.ts` の updateFakeHands
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: 単眼パススルーの背景には視差が無く、3D の手やボールと奥行きが矛盾する
 
@@ -201,7 +201,7 @@
 - **実機確認 2（2026-08-26）— 体感への影響**: 深度を較正した状態で「遠くの的の距離感は自然になったが、手前のボール（0.45m）は**見た目はかなり手前に感じるのに、実際に触れられるのは結構奥**」という報告。視差ゼロの平らな背景に対して、視差を持つ近距離の仮想物だけが強く飛び出して見えるため、見かけの距離 < 実際に触れる距離（実寸で正しい位置）のギャップになる。遠景ほど視差が小さいので矛盾が目立たない、という理論どおりの傾向
 - **実機較正（2026-08-26）— 「3つの FOV」の初の定量データ**: 0.7m のボールが 0.3m に見える（約 2.3 倍のズレ）状態から、(1) `camZoom=0.7` で背景の手の大きさを肉眼に一致させ、(2) 実測 0.7m に置いた実物と見比べながら `fov=135` で仮想物の距離感を一致させた（仮想描画は tan 比で約 3.4 倍縮小）。つまり**このゴーグルのレンズ越しの実効視野は仮想 FOV 70° の想定よりはるかに広く、これまでの全デモは「拡大されて近く見える」状態で動いていた**。Phase 2 の痛点「スケール感の正解が分からない」の正解値がゴーグル込みの実機比較で初めて取れた。この値は 05 の既定値に反映（レンズ・端末が違えば要再較正）。camZoom=0.7 の代償として映像の上下端にフチの引き伸ばし帯が出るが、レンズの視野外なら気にならない
 - **SDK ならどう解決するか（案）**: ステレオ描画側が「視差を付けないレイヤー」を一級機能として持つ（HUD・手の骨格・背景と一体で見せたいもの用）。Phase 6（バレーボール）の「ボールが手前に飛んでくる」演出は必ずこの問題を踏むので、設計前提として扱う
-- **関連**: `demos/05-hand-interaction/hand-math.ts` の placeLandmarks / `demos/05-hand-interaction/main.ts` の camera.add(view.group)
+- **関連**: `src/shared/hand-math.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） の placeLandmarks / `demos/05-hand-interaction/main.ts` の camera.add(view.group)
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: 例外 1 回でアニメーションループが止まり、装着中は原因も見えない
 
@@ -216,7 +216,7 @@
 - **どう対処したか**: 既定を `hands=1` にし、`detIntervalMs`（固定間引き）と `detAdapt`（直近の推論時間 × 係数を最小間隔にする）、CPU 時は長辺 640 に縮小して渡す `detW`（03/04 の detW と同じ発想）を用意した
 - **実測（2026-08-26, iPhone 実機）**: GPU デリゲートで **infer=18ms・every 28ms（約 35Hz）**、hands=1・1280x720 入力。体感のカクつきの報告もなく、既定構成（hands=1 / GPU / 間引きなし）で問題なかった。心配していた「GPU 初期化は通るが推論で落ちる」も発生せず
 - **SDK ならどう解決するか（案）**: 推論を Worker に隔離し、描画ループは「最新の結果を読むだけ」にする。端末ごとの推論時間を見て間引きを自動調整する。これは Phase 6 で Pose も動かすなら必須
-- **関連**: `demos/05-hand-interaction/main.ts` の updateHands / `demos/05-hand-interaction/hand-tracker.ts` の detect
+- **関連**: `demos/05-hand-interaction/main.ts` の updateHands / `src/shared/hand-tracker.ts`（05 実装当時は demos/05-hand-interaction/ 直下。Phase 6 で共用化のため移動） の detect
 
 ## [2026-08-21] Phase 5 / 05-hand-interaction: パススルー + 開始フローのボイラープレートが 4 本目になり、numParam の署名が 2 種類に分岐した
 
@@ -224,3 +224,52 @@
 - **どう対処したか**: 方針どおり今は抽出しない（デモ内に書く）。Phase 6 はこれら全部 + マーカー + 通信 + 手を統合するので、着手前に `src/shared/passthrough-camera.ts` と開始フロー（許可の直列化 + 全画面 + HUD）の抽出を判断する
 - **SDK ならどう解決するか（案）**: `@mobile-mr/core` の「カメラ・センサー・全画面の許可フローと背景描画」そのもの。4 本の写しが要求仕様（超広角優先・解像度指定・縦横比補正・回転追従・フェイクカメラ・HUD）になる
 - **関連**: `demos/02-passthrough/main.ts`, `demos/03-marker-anchor/main.ts`, `demos/04-shared-room/main.ts`, `demos/05-hand-interaction/main.ts` の各 `numParam` / `startCamera`
+
+## [2026-08-26] Phase 6 / 06-volleyball: 座標系が 3 段（カメラ → マーカー → コート）になり、揃え損ないが主なバグ源になった
+
+- **何が苦しかったか**: 手は MediaPipe の結果としてカメラ座標系、相手の頭とボールはマーカー座標系（04）、ゲームのルールは「Y が上」のコート座標系で書きたい、と 3 つの座標系を毎フレーム行き来する。マーカーを机に水平に置くと**マーカー座標系の +Z（面の法線）が上**になるので、そのままではボールの重力を -Z に書くことになり、court = マーカーを X 軸まわりに +90° 回した子 Group を挟んで Y 上に直した。回転の符号（+90° か -90° か）を間違えると「上」がマーカーの裏側になり、実機以外では気づきにくい。さらに手の点（カメラの子）→ ワールド → court、頭の姿勢 = court⁻¹ × camera、ボール（court の子）→ カメラ座標（フェイクの手用）と変換の向きが場所ごとに違い、`updateMatrixWorld` の呼び忘れで 1 フレーム古い行列を使うバグも踏んだ。ヘッドレス確認で見つかった実害: フェイクカメラではマーカーがカメラに正対する（= プレイヤーがネット面 Z=0 に立つ幾何）ため、「相手の頭からネット側へ 0.45m」の狙い点が相手陣に出て bot が延々と打ち続けた。実機でもネット際に立てば同じことが起きるので、狙い点を自陣側にクランプした
+- **どう対処したか**: court 座標系の定義を protocol ファイルの先頭コメントに固定し、サーバーもクライアントも court 座標系だけを喋る（マーカー座標系は 06 のクライアント内部にしか出てこない）。フェイクカメラにマーカーを縦にずらす/小さくする `fakeShiftY` / `fakeMarkerPx` を足して「自陣側に立つ」幾何を作れるようにした。回転の向きは Node のテストではなく three.js の実行で確認するしかなく、未検証の部分（実機で「ネットが机から上に立つか」）が残る
+- **SDK ならどう解決するか（案）**: `@mobile-mr/spatial` が「名前付きフレーム」（camera / marker:0 / world-up）と相互変換 API を持ち、利用者は「マーカー基準で Y 上の座標系」を 1 行で宣言できるようにする。フェイク入力（カメラ・マーカー・手）も同じフレーム定義から生成し、「テストの幾何が現実と違う」ことで見逃すバグを減らす
+- **関連**: `src/shared/volleyball-protocol.ts` 先頭 / `demos/06-volleyball/main.ts` の court 定義・sendPoseIfDue・updateBall / `src/shared/volleyball-sim.ts` の aimPoint（AIM_MIN_FROM_NET）
+
+## [2026-08-26] Phase 6 / 06-volleyball: 3DoF + 手のブレでは打球方向を制御できず、オートエイムに倒した
+
+- **何が苦しかったか**: 「手で打つ方向にボールが飛ぶ」を素直に実装すると、(1) 手の速度は推論 30Hz × 深度誤差 数 cm の差分なので向きがほぼノイズ、(2) 自分の位置は 3DoF なので「相手がどこにいるか」を自分の頭の位置基準で正確に知る手段が無い（マーカーが視界に無いときは特に）。この 2 つが重なって、物理どおりに飛ばすとほぼ全球がアウトかネットになる
+- **どう対処したか**: 打ち返しは**相手の頭の前（ネット側 0.45m・少し下）へ自動で山なりに飛ばす**ことにし、手の速さは滞空時間（1.1s → 最短 0.65s）にだけ効かせた。相手の頭の位置はサーバーが持つ相手の最新姿勢（マーカー座標系での 6DoF、ロスト中は最後の値）から取る。「触れたら飛ぶ」体験にはなるが、「打ち分ける」楽しさは無い
+- **SDK ならどう解決するか（案）**: 手の速度推定（数フレームの最小二乗、深度方向の重み下げ）を `@mobile-mr/tracking` が提供し、ゲーム側は「方向は手・強さは自動」など段階的なアシストを選べるようにする。マルチマーカー等で 6DoF が取れれば方向制御の前提が整う
+- **関連**: `src/shared/volleyball-sim.ts` の aimPoint / returnVelocity / flightTimeForHandSpeed、`src/shared/volleyball-game.ts` の hit
+
+## [2026-08-26] Phase 6 / 06-volleyball: サーバー権威 + クライアント予測のネットコードを自前で書いた
+
+- **何が苦しかったか**: 「全端末で同じボールを見る」ためにサーバーが物理を持つ（CONCEPT の Server Authoritative）と、クライアントは 20Hz の権威状態の間を埋める外挿・受信時の飛びの吸収・自分の打球の即時反映（サーバー往復を待つと手応えが 1 フレーム以上遅れる）・予測が拒否されたときの戻し、を全部書く必要があった。時刻同期も論点になった（サーバー時刻に合わせるか、受信時刻を「今」とみなすか。LAN なら遅延 × 速度 = 数 cm なので後者で妥協）。ゲーム固有ではなく、位置を共有するものすべてに再発する種類の仕事
+- **どう対処したか**: 純粋関数 `stepBall` / `extrapolateBall` をサーバーとクライアントで共有し、クライアントは「直近の権威状態 + 受信からの経過時間」で外挿。受信時は描画位置との差を `visualOffset` に取って 80ms の時定数で消す。自分の hit は同じ式でローカル予測し、サーバーの `event.by === 自分` で権威に戻す（400ms で強制的に戻す）。04 の pose 中継（相手の頭・手）は 04 と同じ補間
+- **SDK ならどう解決するか（案）**: `@mobile-mr/network` に「権威状態 + 決定的な step 関数 + ローカル予測」の同期プリミティブを持たせ、ゲームは step 関数と状態の型を渡すだけにする。時刻同期（ping による offset 推定）も SDK 側で
+- **関連**: `demos/06-volleyball/main.ts` の onState / updateBall（predicted, visualOffset）、`server/volleyball.ts` の tick / broadcastState、`src/shared/volleyball-sim.ts`
+
+## [2026-08-26] Phase 6 / 06-volleyball: Room サーバーのボイラープレートが 2 本目になった（04 の中継サーバーを拡張できなかった）
+
+- **何が苦しかったか**: 04 の `server/shared-room.ts` は「pose を中継するだけ」で、tick ループもゲーム状態も無い。06 はサーバーが物理・得点・bot を持つので、接続の受け付け（Origin 検証・バージョン / Room 設定の一致検証・welcome / join / leave・heartbeat・メンバー 0 の後始末）を**そのまま写して** `server/volleyball.ts` を作った。04 を拡張すると 04 のデモの挙動が変わりうること、CONCEPT §6 で「コア + アダプタ」の分離は段階 2 でやると決めていること、が理由。写しは約 120 行で、レビュー指摘で直した箇所（Origin・quat の正規化・half-open）が 2 か所に存在する状態になった
+- **どう対処したか**: 写した部分にはコメントで出所を書き、ルール（`VolleyballGame`）だけは純粋クラスに分けて Node テストで検証できるようにした。プロトコルは 04 と別（`/api/volleyball`、バージョン独立）
+- **SDK ならどう解決するか（案）**: CONCEPT §6 の「コア + アダプタ」に加えて、コア層に「Room ごとの tick と権威状態」のフックを持たせる（`createRoomServer({ path, validateConfig, onTick, onMessage })`）。04 の中継も 06 の対戦も同じコアの上の薄い差分になる。段階 2 の要求仕様として、この 2 本の写しの差分がそのまま材料
+- **関連**: `server/shared-room.ts` / `server/volleyball.ts`（attach 関数の前半がほぼ同一）
+
+## [2026-08-26] Phase 6 / 06-volleyball: マーカー検出と手推論を同じフレームで回すと描画予算が足りない
+
+- **何が苦しかったか**: 05 の実測は手推論 18ms（GPU）、04 の実測はマーカー検出 20ms（detW=960）。06 は両方要るので毎フレーム両方回すと 40ms 超 = 描画が 25fps 以下になる計算（メインスレッドの同期処理なので並列にできない。05 の痛点「メインスレッドの同期推論がステレオ描画のフレーム時間を揺らす」の合流版）。どちらを削るかはゲームの性質で決まる: ボールに触る手は高頻度が要り、静止したマーカー（アンカー）は低頻度の補正で足りる
+- **どう対処したか**: マーカー検出を `markerIntervalMs=100`（10Hz）に間引き、手は毎フレーム。アンカーの平滑化（smooth=0.25）は 10Hz でも 1 秒程度で収束する。実機での実測は未（iPhone で fps を見て決め直す）
+- **SDK ならどう解決するか（案）**: 複数のトラッカー（マーカー・手・将来は体）を 1 つのスケジューラが優先度と予算で間引く。Worker に逃がせるもの（マーカー検出は getImageData なので可能）は逃がす
+- **関連**: `demos/06-volleyball/main.ts` の MARKER_INTERVAL_MS、`src/shared/marker-anchor.ts` の minIntervalMs
+
+## [2026-08-26] Phase 6 / 06-volleyball: 「見上げるとマーカーを失う」競技で 3DoF の限界がそのまま実害になった
+
+- **何が苦しかったか**: バレーボールはボールを見上げ、相手を見る。机のマーカーはそのどちらの向きでも視界から外れる（Phase 4 の実機で予告されていたとおり）。04 の「ロストしたら表示を消す」方針だとボールを見上げた瞬間に全部消えるので成立しない
+- **どう対処したか**: 06 では**ロスト中もアンカーを最後の姿勢のまま維持**し、ジャイロの回転だけで追従する（Phase 3 の「3DoF で割り切る」と「マーカーで初期位置合わせ」の組み合わせ）。マーカーが再び見えたらズレを lerp で吸収し、2 秒以上ロストしていた・0.3m 以上ずれたときはスナップする。マーカーの枠を赤くしてロスト中であることは見せる。代償: その場から歩くとコート全体が付いてくる（HUD と説明で「その場で」と案内するだけ）。ロスト中に相手の位置も古くなる（サーバーへ送る pose は tracking=false 付きで送り続け、相手側は半透明にする）
+- **SDK ならどう解決するか（案）**: アンカーの「ロスト時の方針」（hide / hold / hold + fade）を `@mobile-mr/spatial` のオプションにし、Phase 3 で挙げたマルチマーカーで「部屋のどこかを見ていればいい」状態にするのが本命。06 が実機でどの程度ずれるかが、マルチマーカー着手の判断材料
+- **関連**: `src/shared/marker-anchor.ts`（resnapAfterMs / snapDistanceM）、`demos/06-volleyball/main.ts` のループ末尾（anchor.visible の扱い）
+
+## [2026-08-26] Phase 6 / 06-volleyball: PC の自動確認で「2 プレイヤー」を回すには別ウィンドウが要る（裏タブは描画ループが止まる）
+
+- **何が苦しかったか**: 04 では 2 タブで対戦の経路を確認していたが、06 で同じことをヘッドレス Chrome でやると**裏タブ側の requestAnimationFrame が止まり**、pose 送信も接触判定も動かず「片方だけ参加している」結果になる（HUD が空・サイド未割当）。最初はアプリのバグと誤認した。加えてこの環境では Chrome 拡張（Claude in Chrome）も Playwright も使えず、CDP を ws で直接叩く確認スクリプトを書いて凌いだ
+- **どう対処したか**: 2 つ目のページを `Target.createTarget({ newWindow: true })` で別ウィンドウに開く。確認スクリプト自体はリポジトリに入れていない（依存追加を避けるため。04/05 と同じ）
+- **SDK ならどう解決するか（案）**: 「複数クライアントの同時確認」を SDK のテストハーネスとして持つ（Node 上でクライアントのロジックだけを回すモード。描画とトラッキングを差し替え可能にしておけば rAF に依存しない）。これは 05 の「トラッキングソースを差し替え可能に」と同じ方向
+- **関連**: `demos/06-volleyball/index.html` の PC 確認手順（`fakeShiftY=±150` で両側に立たせる）

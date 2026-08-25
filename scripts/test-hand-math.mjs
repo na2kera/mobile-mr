@@ -1,4 +1,4 @@
-// demos/05-hand-interaction/hand-math.ts（手ランドマーク → カメラ座標系の変換）の回帰テスト。
+// src/shared/hand-math.ts（手ランドマーク → カメラ座標系の変換）の回帰テスト。
 // `npm run test:hand` で実行する。MediaPipe 本体は実機でしか動かせないので、
 // 「正解の 3D 位置から作った入力を与えたら元の位置が復元されるか」を Node で検証する。
 // テストフレームワークは使わない（依存追加はスタック変更なので相談が要る）。
@@ -21,14 +21,14 @@ import {
   isPointingPose,
   placeLandmarks,
   solveHandPlacement,
-} from "../demos/05-hand-interaction/hand-math.ts";
+} from "../src/shared/hand-math.ts";
 import {
   centered,
   fakeHandResult,
   projectToImage,
   scriptedHand,
   syntheticHandShape,
-} from "../demos/05-hand-interaction/fake-hands.ts";
+} from "../src/shared/fake-hands.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
