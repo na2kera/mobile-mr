@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# MediaPipe のモデル（npm run fetch:models で取得。バイナリなので管理しない）
+public/models/*.task

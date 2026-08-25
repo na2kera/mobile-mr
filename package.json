@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:room": "node scripts/test-shared-room.mjs"
+    "test:room": "node scripts/test-shared-room.mjs",
+    "test:hand": "node scripts/test-hand-math.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
@@ -18,8 +20,12 @@
     "ws": "^8.21.3"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "js-aruco2": "^2.0.0",
     "three": "^0.185.1",
     "three-stdlib": "^2.36.1"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }
