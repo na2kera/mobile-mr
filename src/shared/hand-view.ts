@@ -81,6 +81,16 @@ export class HandView {
     this.group.visible = false;
   }
 
+  /** ピアの入れ替えなどで作り直すときに GPU リソースを解放する（06 で追加） */
+  dispose() {
+    this.group.removeFromParent();
+    this.joints.dispose(); // instanceMatrix のバッファ
+    this.joints.geometry.dispose();
+    this.jointMaterial.dispose();
+    this.bones.geometry.dispose();
+    this.boneMaterial.dispose();
+  }
+
   get visible() {
     return this.group.visible;
   }

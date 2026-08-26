@@ -2,10 +2,10 @@ import * as THREE from "three";
 import { StereoEffect } from "three/examples/jsm/effects/StereoEffect.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { DeviceOrientationControls } from "three-stdlib";
-import { createHandTracker } from "./hand-tracker";
-import type { HandTracker } from "./hand-tracker";
-import { HandView } from "./hand-view";
-import { scriptedHand } from "./fake-hands";
+import { createHandTracker } from "../../src/shared/hand-tracker";
+import type { HandTracker } from "../../src/shared/hand-tracker";
+import { HandView } from "../../src/shared/hand-view";
+import { scriptedHand } from "../../src/shared/fake-hands";
 import {
   FINGER_TIPS,
   INDEX_TIP,
@@ -15,8 +15,8 @@ import {
   isPointingPose,
   placeLandmarks,
   solveHandPlacement,
-} from "./hand-math";
-import type { Vec3, ViewMapping } from "./hand-math";
+} from "../../src/shared/hand-math";
+import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 
 // Phase 5: MR Hand Interaction。
 // 背面カメラの映像（パススルー）に映った自分の手を MediaPipe HandLandmarker で検出し、
