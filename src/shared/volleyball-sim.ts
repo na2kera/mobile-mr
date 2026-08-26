@@ -112,10 +112,6 @@ export function sideOfZ(z: number): Side {
   return z >= 0 ? "A" : "B";
 }
 
-export function v3(x: number, y: number, z: number): V3 {
-  return [x, y, z];
-}
-
 export function dist3(a: V3, b: V3): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }

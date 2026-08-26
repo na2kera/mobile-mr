@@ -42,6 +42,12 @@ export type GameOptions = {
    */
   hitTrailMs: number;
   /**
+   * 巻き戻しの上限 [m]。受理した hit はボールを申告に近い過去位置へ戻してから打ち返すが、
+   * 現在位置からこれ以上離れた過去へは戻さない（ネットを越えた球が相手の目の前で
+   * 戻ってくるのを防ぐ。相手側の吸収の上限 0.5m とも揃える）
+   */
+  maxRewindM: number;
+  /**
    * サイド割当に必要な、同じ側で連続して受信した追跡姿勢の数。初検出はスナップした
    * 単発観測なので 1 回で確定せず、数回同じ側にいることを確かめる
    */
@@ -74,6 +80,7 @@ export const DEFAULT_GAME_OPTIONS: Omit<GameOptions, "random"> = {
   pointDelayMs: 2000,
   hitToleranceM: 0.4,
   hitTrailMs: 400,
+  maxRewindM: 0.5,
   sideVotes: 3,
   evictStaleMs: 1000,
   voteDeadZoneM: 0.1,
@@ -219,7 +226,7 @@ export class VolleyballGame {
     let nearest = dist3(ball.pos, claimedPos);
     for (const { pos } of this.trail) {
       const d = dist3(pos, claimedPos);
-      if (d < nearest) {
+      if (d < nearest && dist3(pos, ball.pos) <= this.opts.maxRewindM) {
         nearest = d;
         from = pos;
       }
@@ -368,6 +375,8 @@ export class VolleyballGame {
     }
   }
 
+  /** 全員がいなくなったら待機へ。スコアは残す（追跡が途切れて戻ってきた続きを遊べるように。
+   *  全員が退室すれば room ごと消えるので新しい試合になる） */
   private toWaiting() {
     this.state.phase = "waiting";
     this.state.ball = restingBall(this.court);

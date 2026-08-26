@@ -209,6 +209,27 @@ function assertSidesConsistent(game) {
     g2.players.get("p1").lastHitMs = -Infinity;
     check("受理後は軌跡が捨てられ、同じ旧位置の再申告は拒否", g2.state.phase === "rally" && !g2.hit("p1", at, [0, 0, 0], t), `phase=${g2.state.phase} dist=${Math.hypot(...g2.state.ball.pos.map((v, k) => v - at[k])).toFixed(2)}`);
   }
+  // 巻き戻しの上限: 現在位置から maxRewindM より遠い過去位置へは戻さない（ネットを越えた球が戻らない）
+  {
+    const g4 = new VolleyballGame({ random: () => 0, maxRewindM: 0.1 });
+    let t = 0;
+    g4.join("p1", t);
+    t = runFor(g4, 2000, t, null, [["p1", HEAD_A]]);
+    let at = null;
+    for (let i = 0; i < 200 && !at; i++) {
+      t += 1000 / 60;
+      g4.updatePose("p1", HEAD_A, true, t);
+      g4.tick(1 / 60, t);
+      if (Math.hypot(...g4.state.ball.pos.map((v, k) => v - target[k])) < 0.15) at = [...g4.state.ball.pos];
+    }
+    // 100ms（≈0.25m 落下）進める: 許容差 0.4m の内側だが maxRewindM=0.1 の外側
+    t = runFor(g4, 100, t, null, [["p1", HEAD_A]]);
+    const nowPos = [...g4.state.ball.pos];
+    const moved = Math.hypot(...nowPos.map((v, k) => v - at[k]));
+    const ok = g4.hit("p1", at, [0, 0, 0], t);
+    const rewound = Math.hypot(...g4.state.ball.pos.map((v, k) => v - nowPos[k]));
+    check("maxRewindM を超える過去へは巻き戻さない（受理はされ、始点は現在位置寄り）", moved > 0.1 && ok && rewound <= 0.1 + 1e-9, `moved=${moved.toFixed(3)} ok=${ok} rewound=${rewound.toFixed(3)}`);
+  }
   // 軌跡の長さ（hitTrailMs）より古い申告は拒否される: 軌跡なし（hitTrailMs=0）だと 200ms 前
   // （落下 ≈ 0.6m 先）は通らない。既定の 400ms なら上のとおり通る
   {

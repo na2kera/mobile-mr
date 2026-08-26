@@ -915,7 +915,6 @@ let lastEventKey = "";
 /** 権威状態の受信で生じる位置の飛びを隠すための、描画位置と外挿位置の差（減衰させる） */
 const visualOffset = new THREE.Vector3();
 const displayedBall = new THREE.Vector3();
-const prevDisplayedBall = new THREE.Vector3();
 let displayedValid = false;
 let flashUntilMs = -Infinity;
 
@@ -929,10 +928,18 @@ function mySide(): Side | null {
   return sideOf(selfId);
 }
 
-/** 権威状態へ戻すときに、描画位置との差をオフセットに取って少しずつ消す（急に飛ばない） */
-function absorbJump(authPos: V3) {
+/**
+ * 権威状態へ戻すときに、描画位置との差をオフセットに取って少しずつ消す（急に飛ばない）。
+ * 差は「権威状態を今まで外挿した位置」に対して取る（受信時点の位置に対して取ると、
+ * 受信からの経過ぶんだけ次フレームの外挿位置とずれる）
+ */
+function absorbJump(authState: GameState, recvMs: number, now: number) {
   if (!displayedValid) return;
-  visualOffset.set(displayedBall.x - authPos[0], displayedBall.y - authPos[1], displayedBall.z - authPos[2]);
+  const pos =
+    authState.phase === "rally"
+      ? extrapolateBall(authState.ball, (now - recvMs) / 1000, courtCfg).pos
+      : authState.ball.pos;
+  visualOffset.set(displayedBall.x - pos[0], displayedBall.y - pos[1], displayedBall.z - pos[2]);
   if (visualOffset.length() > 0.5) visualOffset.set(0, 0, 0);
 }
 
@@ -948,16 +955,16 @@ function onState(state: GameState, cfg: CourtConfig) {
       // 受理でもサーバーの始点（巻き戻した軌跡上の点）と予測の始点は少し違うので吸収する
       predicted = null;
       acceptedHits++;
-      absorbJump(state.ball.pos);
+      absorbJump(state, now, now);
     } else if (ev?.kind === "hit-rejected" && mine) {
       predicted = null;
-      absorbJump(state.ball.pos);
+      absorbJump(state, now, now);
     } else if (state.seq > predicted.seq) {
       predicted = null;
-      absorbJump(state.ball.pos);
+      absorbJump(state, now, now);
     }
   } else {
-    absorbJump(state.ball.pos);
+    absorbJump(state, now, now);
   }
   if (ev?.kind === "hit-rejected") {
     if (mine) console.log("[game] hit rejected by server");
@@ -1059,20 +1066,17 @@ const tmpFwd = new THREE.Vector3();
 const ballWorld = new THREE.Vector3();
 const spinAxis = new THREE.Vector3();
 const spinQuat = new THREE.Quaternion();
+const tmpQuat = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
 
 function updateBall(now: number, dt: number) {
-  if (!auth) {
-    ball.visible = false;
-    ballShadow.visible = false;
-    return;
-  }
-  ball.visible = anchor.visible;
-  ballShadow.visible = anchor.visible;
+  // 権威状態が来るまでは出さない（アンカー未検出の間は親の anchor が非表示なので、ここでは見ない）
+  ball.visible = ballShadow.visible = ballDrop.visible = auth !== null;
+  if (!auth) return;
   if (predicted && now - predicted.sinceMs > PREDICT_MAX_MS) {
     // 期限切れ: 権威の現在位置へ、差を吸収しながら戻す
     predicted = null;
-    absorbJump(extrapolateBall(auth.state.ball, (now - auth.recvMs) / 1000, courtCfg).pos);
+    absorbJump(auth.state, auth.recvMs, now);
   }
   const base = predicted ?? { ball: auth.state.ball, sinceMs: auth.recvMs };
   const phase = auth.state.phase;
@@ -1082,7 +1086,6 @@ function updateBall(now: number, dt: number) {
       : base.ball;
   // オフセットを 80ms の時定数で消す
   visualOffset.multiplyScalar(Math.exp(-dt / 0.08));
-  prevDisplayedBall.copy(displayedBall);
   displayedBall.set(cur.pos[0], cur.pos[1], cur.pos[2]).add(visualOffset);
   ball.position.copy(displayedBall);
   // 回転（速度に垂直な軸まわりに、転がる速さで）
@@ -1114,7 +1117,7 @@ function updateBall(now: number, dt: number) {
   if (!side) return;
   // 判定は表示位置ではなく外挿した権威位置（visualOffset 抜き）に対して行い、申告もその値にする
   court.localToWorld(ballWorld.set(cur.pos[0], cur.pos[1], cur.pos[2]));
-  tmpFwd.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(spinQuat));
+  tmpFwd.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(tmpQuat));
   for (const slot of slots) {
     if (!slot.view.visible) continue;
     for (const [k, pWorld] of slot.contactsWorld.entries()) {
@@ -1126,8 +1129,8 @@ function updateBall(now: number, dt: number) {
       if (lateral >= r + HIT_MARGIN_XY || Math.abs(along) >= r + HIT_MARGIN_Z) continue;
       // 手の速度を court 座標系へ（回転だけ。court のスケールは 1）
       tmpHandVel.copy(slot.contactsVel[k]);
-      court.getWorldQuaternion(spinQuat);
-      tmpHandVel.applyQuaternion(spinQuat.invert());
+      court.getWorldQuaternion(tmpQuat);
+      tmpHandVel.applyQuaternion(tmpQuat.invert());
       const pos: V3 = [cur.pos[0], cur.pos[1], cur.pos[2]];
       const handVel: V3 = [tmpHandVel.x, tmpHandVel.y, tmpHandVel.z];
       // 予測: サーバーと同じ式で相手の顔の前へ（相手の頭は受信済みの姿勢から。未受信なら bot の位置）
@@ -1201,8 +1204,8 @@ function updateMessages(now: number) {
     color = me && winner === me ? "#81c995" : "#f28b82";
   } else if (flash && now < flash.untilMs) {
     text = flash.text;
-  } else if (myCourtZ !== null && Math.abs(myCourtZ) < AIM_MIN_FROM_HEAD + NET_CLEARANCE) {
-    // ネット際だと狙い点を頭の前に置けず頭上を通す軌道になる。立ち位置を直してもらう
+  } else if (me && myCourtZ !== null && Math.abs(myCourtZ) < AIM_MIN_FROM_HEAD + NET_CLEARANCE) {
+    // ネット際だと狙い点を頭の前に置けず頭上を通す軌道になる。立ち位置を直してもらう（観戦者には出さない）
     text = `マーカーから離れてください\n（あと ${Math.ceil((AIM_MIN_FROM_HEAD + NET_CLEARANCE - Math.abs(myCourtZ)) * 100)}cm。今は頭上を通します）`;
     color = "#fdd663";
   } else if (auth.state.phase === "waiting") {
