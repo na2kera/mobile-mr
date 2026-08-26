@@ -256,7 +256,7 @@
 ## [2026-08-26] Phase 6 / 06-volleyball: マーカー検出と手推論を同じフレームで回すと描画予算が足りない
 
 - **何が苦しかったか**: 05 の実測は手推論 18ms（GPU）、04 の実測はマーカー検出 20ms（detW=960）。06 は両方要るので毎フレーム両方回すと 40ms 超 = 描画が 25fps 以下になる計算（メインスレッドの同期処理なので並列にできない。05 の痛点「メインスレッドの同期推論がステレオ描画のフレーム時間を揺らす」の合流版）。どちらを削るかはゲームの性質で決まる: ボールに触る手は高頻度が要り、静止したマーカー（アンカー）は低頻度の補正で足りる
-- **どう対処したか**: マーカー検出を `markerIntervalMs=100`（10Hz）に間引き、手は毎フレーム。アンカーの平滑化（smooth=0.25）は 10Hz でも 1 秒程度で収束する。実機での実測は未（iPhone で fps を見て決め直す）
+- **どう対処したか**: マーカー検出を `markerIntervalMs=100`（10Hz）に間引き、手は毎フレーム。アンカーの平滑化は 10Hz に合わせて smooth=0.5（04 の 0.25 のままだと時定数 350ms で追従が目に見えて遅れる）。実機での実測は未（iPhone で fps を見て決め直す）
 - **SDK ならどう解決するか（案）**: 複数のトラッカー（マーカー・手・将来は体）を 1 つのスケジューラが優先度と予算で間引く。Worker に逃がせるもの（マーカー検出は getImageData なので可能）は逃がす
 - **関連**: `demos/06-volleyball/main.ts` の MARKER_INTERVAL_MS、`src/shared/marker-anchor.ts` の minIntervalMs
 
@@ -272,7 +272,7 @@
 - **何が苦しかったか**: 04 では 2 タブで対戦の経路を確認していたが、06 で同じことをヘッドレス Chrome でやると**裏タブ側の requestAnimationFrame が止まり**、pose 送信も接触判定も動かず「片方だけ参加している」結果になる（HUD が空・サイド未割当）。最初はアプリのバグと誤認した。加えてこの環境では Chrome 拡張（Claude in Chrome）も Playwright も使えず、CDP を ws で直接叩く確認スクリプトを書いて凌いだ
 - **どう対処したか**: 2 つ目のページを `Target.createTarget({ newWindow: true })` で別ウィンドウに開く。確認スクリプト自体はリポジトリに入れていない（依存追加を避けるため。04/05 と同じ）
 - **SDK ならどう解決するか（案）**: 「複数クライアントの同時確認」を SDK のテストハーネスとして持つ（Node 上でクライアントのロジックだけを回すモード。描画とトラッキングを差し替え可能にしておけば rAF に依存しない）。これは 05 の「トラッキングソースを差し替え可能に」と同じ方向
-- **関連**: `demos/06-volleyball/index.html` の PC 確認手順（`fakeShiftY=±150` で両側に立たせる）
+- **関連**: `demos/06-volleyball/index.html` の PC 確認手順（`fakeMarkerPx=80&fakeShiftY=±190` で両側に立たせる）/ `scripts/headless-volleyball.mjs`（`npm run check:volley`。依存を増やさず CDP を ws で直接叩く）
 
 ## [2026-08-26] Phase 6 / 06-volleyball: 現実の重力は MR の部屋には大きすぎる（机上計算まで気づかなかった）
 
@@ -292,5 +292,5 @@
 
 - **何が苦しかったか**: 05 では `detW` / `smooth` / `lostHideMs` が手の設定、04 では同じ名前がマーカーの設定だった。06 で両方が要り、05 のブックマーク URL をそのまま持ち込むと**別の意味**（手の縮小のつもりがマーカーの検出解像度）に化ける。手用を `handDetW` / `handSmooth` / `handLostMs` に改名して逃げたが、名前の規則は無い
 - **どう対処したか**: 06 のパラメータ名を main.ts のコメントと index.html の案内に明記した。`?handScale=` のように「較正値は毎回付ける」ものは、統合デモが増えるほど付け忘れが起きる
-- **SDK ならどう解決するか（案）**: フラットな URL クエリではなく構造化された設定（`tracking.hands.smooth`、`space.marker.detW`）にし、端末ごとの較正値（fov / camZoom / handScale）は localStorage 等に保存して自動で付ける「デバイスプロファイル」を持つ
+- **SDK ならどう解決するか（案）**: フラットな URL クエリではなく構造化された設定（`tracking.hands.smooth`、`space.marker.detW`）にし、端末ごとの較正値（fov / camZoom / handScale）は localStorage 等に保存して自動で付ける「デバイスプロファイル」を持つ。06 のレビューで「README の裸の URL では手が当たらない」と指摘されたとおり、較正値を URL に毎回書かせる運用は初見の人に破綻する
 - **関連**: `demos/06-volleyball/main.ts` のパラメータ定義、`demos/06-volleyball/index.html` の調整の案内

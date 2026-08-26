@@ -165,8 +165,9 @@ export class VolleyballGame {
 
   /**
    * 姿勢の受信。追跡できた姿勢が sideVotes 回連続で同じ側（Z の符号）なら、その側に割り当てる。
-   * その側が埋まっていれば反対側（両方埋まっていれば観戦 = null のまま）。占有者の姿勢が
-   * 途絶えていれば追い出して奪う（再接続のゴースト対策）。試合前（waiting）の間は
+   * その側が他人で埋まっていれば観戦のまま（= null。反対側へ歩けば割り当たる。空いている反対側に
+   * 勝手に入れると、狙い点が実際の頭と逆側に作られて当たらない対戦になる。レビュー指摘）。
+   * 占有者の姿勢が途絶えていれば追い出して奪う（再接続のゴースト対策）。試合前（waiting）の間は
    * 反対側へ歩いて行けば割り当てを付け替える
    */
   updatePose(id: string, head: V3, tracking: boolean, now: number) {
@@ -198,13 +199,10 @@ export class VolleyballGame {
       }
       return false;
     };
-    let side: Side | null = null;
-    if (canTake(want)) side = want;
-    else if (p.side === null && canTake(otherSide(want))) side = otherSide(want);
-    if (side === null) return;
+    if (!canTake(want)) return;
     if (p.side) this.state.sides[p.side] = null;
-    p.side = side;
-    this.state.sides[side] = id;
+    p.side = want;
+    this.state.sides[want] = id;
     this.refreshSides();
   }
 

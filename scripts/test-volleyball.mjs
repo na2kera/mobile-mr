@@ -58,6 +58,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const r = stepBall(high, 0.2, DEFAULT_COURT);
     check("ネットより高ければ通過（イベントなし）", r.event === null && r.ball.pos[2] < 0);
   }
+  // 終点がちょうど Z=0 の面上でもネットに当たる（z !== 0 を条件にすると次のステップですり抜ける）
+  {
+    const exact = { pos: [0, 0.3, 0.1], vel: [0, 0, -1], lastHit: "A" };
+    const r1 = stepBall(exact, 0.1, DEFAULT_COURT);
+    check("終点が Z=0 ちょうどでも net イベント", r1.event === "net" && r1.ball.pos[2] > 0, `z=${r1.ball.pos[2]} event=${r1.event}`);
+    // サーブ（z0=0 から離れる）は引っかからない
+    const serve = { pos: [0, 1.2, 0], vel: [0, 0, 2], lastHit: null };
+    check("z0=0 から離れる出だしはネット判定しない", stepBall(serve, 0.05, DEFAULT_COURT).event === null);
+  }
   // ネットの横（幅の外）は通過
   {
     const wide = { pos: [1.0, 0.5, 0.2], vel: [0, 0, -2], lastHit: "A" };
@@ -267,12 +276,15 @@ function assertSidesConsistent(game) {
   check("落下後は point フェーズ", game.state.phase === "point" && game.state.lastPoint?.winner === "B" && game.state.lastPoint?.reason === "ground");
   check("失点した側（A）が次のサーブを受ける", game.state.serveTo === "A");
   check("point フェーズ中の hit は拒否", !game.hit("p1", game.state.ball.pos, [0, 0, 0], now));
-  // 2 人目: 同じ側（Z>0）で追跡開始しても反対側（B）に割り当てられ、bot は消える
+  // 2 人目: 同じ側（Z>0）に立っていれば観戦のまま（空いている反対側に勝手に入れない）。
+  // 反対側（Z<0）へ歩けば B に割り当てられ、bot は消える
   game.join("p2", now);
   game.updatePose("p2", [0, 0.9, 1.2], true, now);
   check("1 回の姿勢ではまだ割り当てない（投票）", game.players.get("p2").side === null);
   for (let i = 0; i < 3; i++) game.updatePose("p2", [0, 0.9, 1.2], true, now + i);
-  check("2 人目が同じ側にいても反対側へ割当", game.state.sides.B === "p2");
+  check("2 人目が同じ側にいる間は観戦（反対側へ勝手に入れない）", game.players.get("p2").side === null && game.state.sides.B === null);
+  for (let i = 0; i < 3; i++) game.updatePose("p2", [0, 0.9, -1.2], true, now + 3 + i);
+  check("反対側へ歩けば B に割当", game.state.sides.B === "p2");
   check("両側に人がいれば bot なし", game.state.bot === null);
   // 3 人目は観戦（どちらにも割り当てられない）
   game.join("p3", now);
@@ -305,7 +317,7 @@ function assertSidesConsistent(game) {
   game.join("spectator", now);
   now += 1500; // 旧接続は切断されたが leave はまだ届いていない（evictStaleMs=1000 は超えた）
   for (let i = 0; i < 3; i++) game.updatePose("spectator", [0, 0.9, 1.6], true, now + i);
-  check("占有者より前から同室にいた観戦者は追い出せない（空いている反対側に入る）", game.state.sides.A === "old" && game.state.sides.B === "spectator");
+  check("占有者より前から同室にいた観戦者は追い出せず、観戦のまま", game.state.sides.A === "old" && game.state.sides.B === null && game.players.get("spectator").side === null);
   game.leave("spectator");
   game.join("new", now);
   for (let i = 0; i < 3; i++) game.updatePose("new", [0, 0.9, 1.6], true, now + i);

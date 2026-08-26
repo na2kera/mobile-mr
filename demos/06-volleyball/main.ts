@@ -39,6 +39,7 @@ import {
   extrapolateBall,
   otherSide,
   returnVelocity,
+  sideOfZ,
 } from "../../src/shared/volleyball-sim";
 import type {
   BallState,
@@ -1154,6 +1155,21 @@ function updateBall(now: number, dt: number) {
   }
 }
 
+/**
+ * サイドが無いとき（観戦中）の案内。自分の立っている側が他人で埋まっていて反対側が空いていれば
+ * 「反対側へ」（サーバーは空いている反対側へ勝手に入れないので、歩いてもらう必要がある）
+ */
+function spectatorMessage(s: GameState): string {
+  if (s.sides.A && s.sides.B) return "観戦中（両側とも埋まっています）";
+  if (myCourtZ !== null && Math.abs(myCourtZ) >= 0.1) {
+    const here = sideOfZ(myCourtZ);
+    if (s.sides[here] && !s.sides[otherSide(here)]) {
+      return "この側は使用中です\n反対側へ移動してください";
+    }
+  }
+  return "マーカーを見て立ち位置を決めてください";
+}
+
 // ---- 視界内メッセージとスコアボード ----
 function updateMessages(now: number) {
   const s = auth?.state;
@@ -1208,16 +1224,12 @@ function updateMessages(now: number) {
     // ネット際だと狙い点を頭の前に置けず頭上を通す軌道になる。立ち位置を直してもらう（観戦者には出さない）
     text = `マーカーから離れてください\n（あと ${Math.ceil((AIM_MIN_FROM_HEAD + NET_CLEARANCE - Math.abs(myCourtZ)) * 100)}cm。今は頭上を通します）`;
     color = "#fdd663";
+  } else if (!me) {
+    text = spectatorMessage(auth.state);
+    if (auth.state.phase !== "waiting") color = "#fdd663";
   } else if (auth.state.phase === "waiting") {
-    const s = auth.state;
-    text = me
-      ? "まもなくサーブ"
-      : s.sides.A && s.sides.B
-        ? "観戦中（両側とも埋まっています）"
-        : "マーカーを見て立ち位置を決めてください";
-    if (me && s.bot) text += "\n（相手がいないので BOT と練習）";
-  } else if (auth.state.phase === "rally" && !me) {
-    text = "観戦中";
+    text = "まもなくサーブ";
+    if (auth.state.bot) text += "\n（相手がいないので BOT と練習）";
   }
   // ラリー中のマーカーロストは毎ラリー起きる（見上げるため）ので、あえて何も出さない
   message.set(text, color);
