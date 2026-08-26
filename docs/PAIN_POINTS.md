@@ -301,3 +301,24 @@
 - **どう対処したか**: 実機で `?fov=94` にすると枠が印刷物に重なり、ネットが机の幅を超えて見えることを確認（2026-08-27）。06 の既定を `fov=auto`（camFov・camZoom・映像の縦横比から背景整合の値を毎フレーム計算。`Passthrough.backgroundFovDeg()`）にした。05 の「135 でないとボールが近く大きく見える」との矛盾は未解消のまま（06 では 94 で「良さそう」との報告。距離感は eyeSep 等で別途詰める）
 - **SDK ならどう解決するか（案）**: 「背景に整合する FOV」は幾何から一意に決まるので SDK が常に自動計算する（利用者に fov を触らせない）。ゴーグルのレンズ由来の「距離感の補正」はそれとは別のパラメータ（レンズプロファイル）として持ち、混ぜない。05 の較正手順は「camZoom で背景の大きさ → fov で距離感」だったが、これは fov に 2 つの役割を負わせていたのが失敗の原因
 - **関連**: `src/shared/passthrough-camera.ts` の backgroundFovDeg / `demos/06-volleyball/main.ts` の FOV_FIXED / PAIN_POINTS「単眼パススルーの背景には視差が無く…」の実機較正（2026-08-26）
+
+## [2026-08-27] Phase 6-2 / 06-2-darts: Room サーバーのボイラープレートが 3 本目になった
+
+- **何が苦しかったか**: 06 で「2 本目」と記録した `server/volleyball.ts` の接続受け付け（Origin 検証・バージョン / Room 設定の一致検証・welcome / join / leave・heartbeat・メンバー 0 の後始末・pose の中継）を、そのまま `server/darts.ts` に写した（約 150 行）。差分は「Room 設定の項目」「ゲーム固有メッセージ（throw）の検証」「tick の中身」だけ。3 本とも同じ構造なのに、レビューで直した箇所（Origin / quat 正規化 / half-open）が 3 か所に散らばっている。クライアント側の `game-client.ts`（再接続とメッセージ振り分け）も 04 / 06 / 06-2 で 3 本目
+- **どう対処したか**: 写した。06 と同じくルール（`DartsGame`）だけを純粋クラスに分けて Node テストで検証。プロトコルは別パス（`/api/darts`）で 04 / 06 と独立
+- **SDK ならどう解決するか（案）**: 06 の案（`createRoomServer({ path, parseConfig, sameConfig, parseMessage, onTick })`）がそのまま。3 本の差分が「Room 設定のスキーマ」「メッセージのスキーマ」「tick」の 3 点に収まることが今回で確認できたので、段階 2 ではこの 3 点をパラメータにしたコアを最初に作る。クライアント側も `connectRoom({ path, config, onMessage })` に畳める
+- **関連**: `server/shared-room.ts` / `server/volleyball.ts` / `server/darts.ts`、`demos/04-shared-room/room-client.ts` / `demos/06-volleyball/game-client.ts` / `demos/06-2-darts/game-client.ts`
+
+## [2026-08-27] Phase 6-2 / 06-2-darts: 「投げた（離した）」瞬間は手トラッカーから直接は取れない
+
+- **何が苦しかったか**: ダーツは「手が速く動いている途中でダーツが離れる」動作だが、MediaPipe は手の 21 点しか返さず、ダーツも「離した」も無い。手のひらの速度が閾値（1.5m/s）を超えて壁方向に動き始めたら「振り」、ピークから半分に減速したら「離した」とみなす状態機械を自作した。そのうえ (1) 速度は EMA 平滑化した位置の差分なので遅れ、ピーク位置は実際より手前に出る（離す位置はピーク時ではなく減速検出時の位置を使うことにした） (2) ヘッドレス Chrome ではフレームレートが低く、0.25 秒の振りが 2〜3 サンプルしか無いので位置の遅れが 0.3m にもなった（PC 確認は `handSmooth=1` で回避） (3) 手トラッカーの速度は 05 の実寸と同じく過小に出る可能性が高く、現実の重力 9.8 で届くかは実機でしか分からない
+- **どう対処したか**: 上記の状態機械 + `throwMinSpeed` / `releaseRatio` / `throwGain` を URL で調整可能にした。実機の較正値は未取得
+- **SDK ならどう解決するか（案）**: 「手のジェスチャ検出」層に、速度ベースのイベント（swing-start / release / peak）と、平滑化の遅れを補償した位置・速度を持たせる。06 の hit（接触）と 06-2 の throw（離す）は同じ「手の速度の時系列」から出るので、SDK の hand 層はランドマークだけでなく速度・加速度の推定値と時刻を返すべき
+- **関連**: `demos/06-2-darts/main.ts`（updateThrowDetection / release）、`src/shared/hand-slots.ts`（contactsVel）
+
+## [2026-08-27] Phase 6-2 / 06-2-darts: 手スロット処理が 3 本目になるところで src/shared へ抽出した
+
+- **何が苦しかったか**: 05 の「MediaPipe の結果 → 深度の解法 → 2 スロットへの割当 → EMA → 接触点の速度」（約 250 行）を 06 で写し、06-2 でまた写すことになった。06 の時点で「4 本目のボイラープレート」として開始フロー等は抽出したが、手スロットは 06 の当たり判定と絡んでいて抽出を見送っていた
+- **どう対処したか**: `src/shared/hand-slots.ts`（`HandSlots` クラス）と `src/shared/text-panel.ts` に抽出し、06-2 だけがこれを使う（05 / 06 の複製は残す）。抽出したことで 06-2 の main.ts は 06 より 300 行ほど短い
+- **SDK ならどう解決するか（案）**: `HandSlots` が `@mobile-mr/hands` の「トラッキング状態の保持」部分の原型。API は `apply(result, now, mapping)` / `update(now)` / `slots[].contactsWorld` / `contactsVel`。深度の解法（`solveHandPlacement`）とスロット管理を分けたのは正解で、SDK でもこの 2 層にする
+- **関連**: `src/shared/hand-slots.ts`、`demos/06-volleyball/main.ts`（抽出元）
