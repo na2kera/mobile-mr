@@ -18,7 +18,7 @@
 | [05. Hand Interaction](./demos/05-hand-interaction/) | MediaPipeで手を追跡し、押す・触る・指差す操作を試す | カメラを使えるスマートフォン |
 | [06. MR Volleyball](./demos/06-volleyball/) | マーカーを挟んで向かい合い、手で仮想ボールを打ち合う統合ゲーム（1台ならbotと練習、2台で対戦） | スマートフォン1〜2台、印刷したマーカー |
 
-Phase 1〜5は完了し、現在はPhase 6のMRバレーボール（これまでの技術の統合）を実装しています。将来はSurface Mapping、MRスプラトゥーン、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
+Phase 1〜6は完了し（MRバレーボールはiPhone実機とゴーグルで確認済み）、次はSurface Mapping、MRスプラトゥーン、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
 
 ## 技術構成
 

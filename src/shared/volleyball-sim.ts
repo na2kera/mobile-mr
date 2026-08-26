@@ -39,8 +39,10 @@ export type CourtConfig = {
 
 export const DEFAULT_COURT: CourtConfig = {
   netTop: 0.6,
-  netBottom: 0.15,
-  netHalfWidth: 0.6,
+  // 実機確認（2026-08-27）: 浮いたネットは違和感があったので地面（マーカー面）まで下ろす
+  netBottom: 0,
+  // 幅 1.8m（実機確認で 1.2m は小さく感じた）。?netW= で room 設定として変更できる
+  netHalfWidth: 0.9,
   ballR: 0.105,
   gravity: 4,
   baseFlightSec: 1.0,

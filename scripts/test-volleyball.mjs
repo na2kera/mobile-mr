@@ -549,6 +549,12 @@ try {
   check("gravity 不一致も入室拒否", !!(await waitForMsg(gravMismatch, (m) => m.type === "error")));
   const reachMismatch = await tryConnect(`${buildQuery("v1")}&reach=0.6`);
   check("reach 不一致も入室拒否", !!(await waitForMsg(reachMismatch, (m) => m.type === "error")));
+  const netWMismatch = await tryConnect(`${buildQuery("v1")}&netW=2.4`);
+  check("netW 不一致も入室拒否", !!(await waitForMsg(netWMismatch, (m) => m.type === "error")));
+  const netWRoom = await tryConnect(`${buildQuery("v-netw")}&netW=2.4`);
+  const netWWelcome = await waitForMsg(netWRoom, (m) => m.type === "welcome");
+  check("netW=2.4 は court.netHalfWidth=1.2 として配られる", near(netWWelcome?.court.netHalfWidth, 1.2, 1e-9));
+  netWRoom.ws.close();
   const badVersion = await tryConnect(buildQuery("v1", { v: 999 }));
   check("プロトコルバージョン不一致は拒否", !!(await waitForMsg(badVersion, (m) => m.type === "error")));
   const badNet = await tryConnect(buildQuery("v2", { netTop: "abc" }));

@@ -146,6 +146,14 @@ export type Passthrough = {
    * 映像サイズが未確定なら null
    */
   metricViewMapping(): ViewMapping | null;
+  /**
+   * 背景と幾何的に整合する仮想カメラの垂直 FOV [deg]。この値で描くと、実カメラの FOV で
+   * 距離を計算した仮想物（マーカー基準のコート等）が背景の実物にぴったり重なる。
+   * 映像の縦 FOV（camHFovDeg は長辺方向）× 背景の縦方向の表示割合（cover 切り抜きと zoom）。
+   * 映像サイズが未確定なら null（06 の実機で fov=135 だとマーカー基準の物が 0.44 倍に
+   * 縮んで見えた経緯は PAIN_POINTS「背景整合の FOV と距離感の FOV」参照）
+   */
+  backgroundFovDeg(): number | null;
 };
 
 /**
@@ -223,6 +231,15 @@ export async function startPassthrough(
         repeatX: 1,
         repeatY: 1,
       };
+    },
+    backgroundFovDeg() {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return null;
+      const tanHalfVideoV =
+        Math.tan(THREE.MathUtils.degToRad(camHFovDeg) / 2) * (vh / Math.max(vw, vh));
+      // 片目ビューポートの縦方向に映像の高さ × repeat.y ぶんが表示されている
+      return THREE.MathUtils.radToDeg(2 * Math.atan(tanHalfVideoV * texture.repeat.y));
     },
   };
 }

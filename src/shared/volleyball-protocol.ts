@@ -31,6 +31,8 @@ export type VolleyballRoomConfig = SpaceConfig & {
   gravity: number;
   flightSec: number;
   reach: number;
+  /** ネットの幅 [m]（CourtConfig.netHalfWidth × 2） */
+  netW: number;
 };
 
 /** court 座標系での自分のカメラ姿勢 + 手の 21 点（見えているときだけ） */

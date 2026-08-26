@@ -48,6 +48,7 @@ export function connectGame(
     gravity: String(config.gravity),
     flightSec: String(config.flightSec),
     reach: String(config.reach),
+    netW: String(config.netW),
   });
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${VOLLEYBALL_PATH}?${query}`;
   let ws: WebSocket | null = null;

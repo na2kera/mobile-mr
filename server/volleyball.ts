@@ -123,8 +123,9 @@ function parseRoomConfig(url: URL): VolleyballRoomConfig | null {
   const gravity = num("gravity", DEFAULT_COURT.gravity, 0.5, 20);
   const flightSec = num("flightSec", DEFAULT_COURT.baseFlightSec, 0.3, 3);
   const reach = num("reach", DEFAULT_COURT.reach, 0.1, 1.5);
-  if (gravity === null || flightSec === null || reach === null) return null;
-  return { markerId, markerMm, netTop, gravity, flightSec, reach };
+  const netW = num("netW", DEFAULT_COURT.netHalfWidth * 2, 0.4, 6);
+  if (gravity === null || flightSec === null || reach === null || netW === null) return null;
+  return { markerId, markerMm, netTop, gravity, flightSec, reach, netW };
 }
 
 function sameConfig(a: VolleyballRoomConfig, b: VolleyballRoomConfig): boolean {
@@ -134,12 +135,13 @@ function sameConfig(a: VolleyballRoomConfig, b: VolleyballRoomConfig): boolean {
     a.netTop === b.netTop &&
     a.gravity === b.gravity &&
     a.flightSec === b.flightSec &&
-    a.reach === b.reach
+    a.reach === b.reach &&
+    a.netW === b.netW
   );
 }
 
 function describeConfig(c: VolleyballRoomConfig): string {
-  return `markerId=${c.markerId} markerMm=${c.markerMm} netTop=${c.netTop} gravity=${c.gravity} flightSec=${c.flightSec} reach=${c.reach}`;
+  return `markerId=${c.markerId} markerMm=${c.markerMm} netTop=${c.netTop} gravity=${c.gravity} flightSec=${c.flightSec} reach=${c.reach} netW=${c.netW}`;
 }
 
 function attach(httpServer: HttpServer) {
@@ -203,6 +205,7 @@ function attach(httpServer: HttpServer) {
         baseFlightSec: config.flightSec,
         serveFlightSec: config.flightSec * SERVE_FLIGHT_FACTOR,
         reach: config.reach,
+        netHalfWidth: config.netW / 2,
       },
     });
     const room: Room = {
@@ -266,7 +269,7 @@ function attach(httpServer: HttpServer) {
       }
       const config = parseRoomConfig(url);
       if (!config) {
-        reject(ws, "Room 設定 (markerId / markerMm / netTop / gravity / flightSec / reach) が不正です");
+        reject(ws, "Room 設定 (markerId / markerMm / netTop / gravity / flightSec / reach / netW) が不正です");
         return;
       }
       let room = rooms.get(roomName);

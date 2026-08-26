@@ -164,15 +164,17 @@
         右手は青・左手は橙の骨格が背景の手に重なります。ボールの真下の影で高さが分かります。
       </p>
       <p>
-        調整: ?fov=135&amp;eyeSep=0.064&amp;camZoom=0.7 が既定（05 と同じゴーグル較正値）。
+        調整: ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7 が既定。fov は背景と幾何的に整合する値を
+        自動計算します（実機 + ゴーグルで ≈94°。<strong>05 の 135 をそのまま使うとマーカー基準の
+        コートが背景に対して半分以下に縮んで見えます</strong>。数値で固定も可）。
         ?handScale= は未指定だと 1（未較正）なので 05 で求めた値を付けてください。
         マーカーは ?markerMm=100&amp;camFov=106&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100
         （手と同居させるため検出は 10Hz に間引き。<strong>05 と違い detW / smooth / lostMs はマーカー用</strong>で、
         手用は handDetW / handSmooth / handLostMs）。
-        軌道は ?gravity=4&amp;flightSec=1&amp;reach=0.45（重力・滞空時間・狙いの距離）、ネットの高さは
-        ?netTop=auto（頭の高さから自動。数値 [m] で固定可）。これらは room 内で一致が必要です
+        軌道は ?gravity=4&amp;flightSec=1&amp;reach=0.45（重力・滞空時間・狙いの距離）、ネットは
+        ?netW=1.8（幅 [m]）と ?netTop=auto（上端の高さ。頭の高さから自動。数値 [m] で固定可）。これらは room 内で一致が必要です
         （違う値の端末は入室できません）。当たりの余裕は ?hitMarginXY=0.02&amp;hitMarginZ=0.08（奥行き方向を広めに）。
-        PC では ?fov=70&amp;camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1&amp;fakeMarkerPx=80&amp;fakeShiftY=190
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1&amp;fakeMarkerPx=80&amp;fakeShiftY=190
         で、合成の手がボールに触れて bot とラリーを続けるところまで見られます
         （fakeShiftY でマーカーを画面の下に寄せると自陣側に立つ幾何になります。2 つ目のウィンドウで
         &amp;fakeShiftY=-190 にすると反対側に立って対戦の経路。同じウィンドウの裏タブは描画が止まるので別ウィンドウで）

@@ -66,8 +66,14 @@ import { scriptedVolleyHand } from "./fake-volley-hand";
 // （02〜05 のデモ内の複製はそのまま残している）
 
 // ---- パラメータ ----
-// fov / camZoom の既定は 05 と同じ実機較正値（VR ゴーグル + iPhone）。PC では ?fov=70&camZoom=1
-const FOV = numParam("fov", 135, { min: 20, max: 170 });
+// fov の既定は "auto" = 背景（パススルー）と幾何的に整合する値を camFov / camZoom / 映像の縦横比から
+// 毎フレーム計算する（実機 + ゴーグルの環境で ≈ 94°）。05 の較正値 135 はカメラに付いた物の
+// 距離感で決めた値で、マーカー基準の物（コート・ボール）をそれで描くと背景に対して 0.44 倍に
+// 縮んで見えた（実機確認 2026-08-27。PAIN_POINTS 参照）。数値を指定すれば固定できる。
+// camZoom は 05 と同じ較正値。PC では ?camZoom=1 が見やすい
+const fovRaw = params.get("fov");
+const FOV_FIXED: number | null =
+  fovRaw === null || fovRaw === "auto" ? null : numParam("fov", 94, { min: 20, max: 170 });
 const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 const CAM_RES = resolutionParam("camRes", [1280, 720]);
@@ -126,6 +132,7 @@ const NET_TOP: number | "auto" =
 const GRAVITY = numParam("gravity", DEFAULT_COURT.gravity, { min: 0.5, max: 20 });
 const FLIGHT_SEC = numParam("flightSec", DEFAULT_COURT.baseFlightSec, { min: 0.3, max: 3 });
 const REACH = numParam("reach", DEFAULT_COURT.reach, { min: 0.1, max: 1.5 });
+const NET_W = numParam("netW", DEFAULT_COURT.netHalfWidth * 2, { min: 0.4, max: 6 });
 
 // 当たり判定
 /** 指先の当たり半径 [m]（05 と同じ） */
@@ -158,7 +165,7 @@ const FAKE_HANDS = params.has("fakehands");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a2233);
 
-const camera = new THREE.PerspectiveCamera(FOV, innerWidth / innerHeight, 0.05, 100);
+const camera = new THREE.PerspectiveCamera(FOV_FIXED ?? 94, innerWidth / innerHeight, 0.05, 100);
 camera.position.set(0, 1.6, 0);
 scene.add(camera); // 手の骨格をカメラの子にするため（05 と同じ）
 
@@ -278,6 +285,7 @@ let courtCfg: CourtConfig = {
   baseFlightSec: FLIGHT_SEC,
   serveFlightSec: FLIGHT_SEC * SERVE_FLIGHT_FACTOR,
   reach: REACH,
+  netHalfWidth: NET_W / 2,
 };
 let builtNetTop = NaN;
 
@@ -727,7 +735,7 @@ let fakeStartMs = -1;
 
 function updateFakeHands(now: number) {
   if (now - lastDetectAt < 33 || !passthrough) return;
-  const mapping = passthrough.displayViewMapping(FOV);
+  const mapping = passthrough.displayViewMapping(camera.fov);
   if (fakeStartMs < 0) fakeStartMs = now;
   lastDetectAt = now;
   // ボールのカメラ座標系での位置（アンカー未検出なら null = 定位置の手）
@@ -787,7 +795,7 @@ function updateContactsWorld(slot: HandSlot) {
 
 function applyHandResult(result: HandResultLike, now: number) {
   if (!passthrough) return;
-  const mapping = passthrough.displayViewMapping(FOV);
+  const mapping = passthrough.displayViewMapping(camera.fov);
   // 深度だけ実寸基準で解く（05 の depthMode=metric。合成の手は表示基準で作られているので display）
   const depthMapping: ViewMapping =
     FAKE_HANDS ? mapping : (passthrough.metricViewMapping() ?? mapping);
@@ -987,7 +995,7 @@ function connect() {
   if (ROOM === null) return;
   client = connectGame(
     ROOM,
-    { markerId: MARKER_ID, markerMm: MARKER_MM, netTop: NET_TOP, gravity: GRAVITY, flightSec: FLIGHT_SEC, reach: REACH },
+    { markerId: MARKER_ID, markerMm: MARKER_MM, netTop: NET_TOP, gravity: GRAVITY, flightSec: FLIGHT_SEC, reach: REACH, netW: NET_W },
     {
       onStatus: (status) => {
         netStatus = status;
@@ -1264,7 +1272,7 @@ function renderHud() {
     .map((x) => `${x.label}:${x.depth.toFixed(2)}m hand=${x.handCm.toFixed(1)}cm res=${x.residual.toFixed(3)}`)
     .join(" ");
   const text = [
-    hudState.base,
+    `${hudState.base} (fov now=${camera.fov.toFixed(1)})`,
     hudState.sensor && `sensor=${hudState.sensor}`,
     hudState.cam && `cam=${hudState.cam}`,
     hudState.fsResult && `fs=${hudState.fsResult}`,
@@ -1308,7 +1316,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} netTop=${NET_TOP} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} netTop=${NET_TOP} mode=${touch ? "gyro" : "orbit"}`;
   connect(); // 通信はジェスチャーに依存しない
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
@@ -1360,6 +1368,14 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(0.05, (now - lastFrameMs) / 1000);
   lastFrameMs = now;
   controls?.update();
+  // fov=auto: 背景と整合する FOV を毎フレーム反映する（映像の回転・resize で変わる）
+  if (FOV_FIXED === null && passthrough) {
+    const fov = passthrough.backgroundFovDeg();
+    if (fov !== null && Math.abs(fov - camera.fov) > 0.01) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+  }
   camera.updateMatrixWorld();
   markerAnchor?.update(now);
   if (markerAnchor?.everDetected && !anchor.visible) anchor.visible = true;
