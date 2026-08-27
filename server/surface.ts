@@ -30,8 +30,10 @@ import {
 const MAX_PAYLOAD_BYTES = 4 * 1024;
 /** 全員切断してから Room（ペイント）を捨てるまでの猶予。瞬断・bfcache・サーバー再起動以外で消えないように */
 const EMPTY_ROOM_TTL_MS = Number(process.env.SURFACE_ROOM_TTL_MS ?? "") || 10 * 60 * 1000;
-/** Room の人数上限（pose / paint を全員に配るので二乗で重くなる） */
+/** Room の人数上限（pose / paint を全員に配るので二乗で重くなる）。色の数（PLAYER_COLOR_COUNT）以下にする */
 const MAX_MEMBERS = 8;
+/** Room の総数上限（空 Room を猶予で保持するので、room 名を変えて作り続けられないように） */
+const MAX_ROOMS = Number(process.env.SURFACE_MAX_ROOMS ?? "") || 64;
 /** テスト用にストローク上限を小さくできる */
 const MAX_STROKES_OVERRIDE = Number(process.env.SURFACE_MAX_STROKES ?? "") || undefined;
 /** clear / pose の人ごとの上限 [回/秒]（paint の上限は PaintBoard が持つ） */
@@ -42,7 +44,6 @@ const POSE_RATE_PER_SEC = 90;
 type State = {
   board: PaintBoard;
   players: Map<string, PlayerInfo>;
-  nextColor: number;
   clearRate: RateLimiter;
   poseRate: RateLimiter;
 };
@@ -122,21 +123,21 @@ export function surfaceServer() {
     configErrorReason: "Room 設定 (markerId / markerMm / surfaceW / surfaceH) が不正です",
     emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
     maxMembers: MAX_MEMBERS,
+    maxRooms: MAX_ROOMS,
     parseMessage: parseClientMessage,
     createState: (_name, config) => ({
       board: new PaintBoard([makeSurface(config.markerId, config.surfaceW, config.surfaceH)], MAX_STROKES_OVERRIDE),
       players: new Map(),
-      nextColor: 0,
       clearRate: new RateLimiter(CLEAR_RATE_PER_SEC),
       poseRate: new RateLimiter(POSE_RATE_PER_SEC),
     }),
     onJoin(room: Ctx, id, url) {
       const { state } = room;
-      const player: PlayerInfo = {
-        id,
-        name: parseName(url, id, NAME_MAX_LENGTH),
-        color: state.nextColor++ % PLAYER_COLOR_COUNT,
-      };
+      // いま使われていない色のうち最小の番号（退出した人の色は再利用する）
+      const used = new Set([...state.players.values()].map((p) => p.color));
+      let color = 0;
+      while (used.has(color) && color < PLAYER_COLOR_COUNT - 1) color++;
+      const player: PlayerInfo = { id, name: parseName(url, id, NAME_MAX_LENGTH), color };
       state.players.set(id, player);
       room.send(id, {
         type: "welcome",

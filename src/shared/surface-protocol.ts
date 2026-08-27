@@ -14,8 +14,11 @@ export const SURFACE_PROTOCOL_VERSION = 1;
 /** 表示名の上限（文字数） */
 export const NAME_MAX_LENGTH = 12;
 
-/** プレイヤーの色の数（サーバーが割り当てる color は 0..この値-1。クライアントの palette と一致させる） */
-export const PLAYER_COLOR_COUNT = 6;
+/**
+ * プレイヤーの色の数（サーバーが割り当てる color は 0..この値-1。クライアントの palette と一致させる）。
+ * Room の人数上限（8）と同じにして、同時参加者の色が必ず異なるようにする
+ */
+export const PLAYER_COLOR_COUNT = 8;
 
 /**
  * Room の設定。マーカー（SpaceConfig）に加えて Surface の大きさも一致が必要

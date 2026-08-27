@@ -114,7 +114,7 @@ const PORT = 5184;
 // テスト用に「ストローク上限 3」「空 Room の猶予 600ms」で起動する
 const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], {
   stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, SURFACE_MAX_STROKES: "3", SURFACE_ROOM_TTL_MS: "600" },
+  env: { ...process.env, SURFACE_MAX_STROKES: "3", SURFACE_ROOM_TTL_MS: "600", SURFACE_MAX_ROOMS: "2" },
 });
 server.stderr.on("data", (d) => process.stderr.write(d));
 server.stdout.on("data", (d) => {
@@ -240,6 +240,11 @@ try {
   b.ws.close();
   const la = await a.waitFor((m) => m.type === "leave");
   check("leave が届く", la && la.id === "p2");
+  const f = connect(cfg, "Frank");
+  const wf = await f.waitFor((m) => m.type === "welcome");
+  check("退出した人の色（1）を次の入室者に再利用する（a=0, c=2 が在室）", wf && wf.players.find((p) => p.id === wf.id).color === 1);
+  f.ws.close();
+  await sleep(100);
 
   // 空 Room の猶予: 全員切断 → 猶予内に再入室すればペイントが残り、猶予を過ぎると消える
   a.send({ type: "paint", surfaceId: "wall-0", uv: [0.3, 0.3], radius: 0.03 });
@@ -263,6 +268,12 @@ try {
   const ninth = connect(cfg, "Ninth");
   const errFull = await ninth.waitFor((m) => m.type === "error");
   check("9 人目は満員で入室拒否", errFull && /満員/.test(errFull.reason));
+  const room2 = connect({ ...cfg, room: "second" });
+  await room2.waitFor((m) => m.type === "welcome");
+  const room3 = connect({ ...cfg, room: "third" });
+  const errRooms = await room3.waitFor((m) => m.type === "error");
+  check("room の総数上限（テストでは 2）を超える新規 room は拒否", errRooms && /上限/.test(errRooms.reason));
+  room2.ws.close();
   e.ws.close();
   for (const x of extra) x.ws.close();
   await sleep(200);

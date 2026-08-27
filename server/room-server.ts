@@ -62,7 +62,15 @@ export type RoomServerSpec<C, S, M> = {
   maxMembers?: number;
   /** maxMembers で断るときの理由 */
   fullReason?: string;
+  /** Room の総数上限（省略時は無制限）。emptyRoomTtlMs で空 Room を保持する spec は付けること */
+  maxRooms?: number;
 };
+
+/**
+ * 送信キューがこれを超えたクライアントは切る（遅い接続にメッセージが溜まり続けるのを防ぐ。
+ * 切られたクライアントは再接続して welcome の snapshot で追いつく）
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 /** 表示名。無ければ fallback。長さと制御文字だけ弾く */
 export function parseName(url: URL, fallback: string, maxLength: number): string {
@@ -114,6 +122,15 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
     console.log(`${spec.tag} room "${room.name}" destroyed`);
   }
 
+  function sendOrDrop(id: string, ws: WebSocket, data: string) {
+    if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      console.warn(`${spec.tag} ${id} is too slow (${ws.bufferedAmount} bytes queued); terminating`);
+      ws.terminate();
+      return;
+    }
+    ws.send(data);
+  }
+
   function reject(ws: WebSocket, reason: string) {
     console.warn(`${spec.tag} rejected: ${reason}`);
     // close 中に不正フレームが来ると 'error' が出る。リスナーが無いと EventEmitter が throw して dev サーバーごと落ちる
@@ -134,12 +151,12 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
       destroyTimer: null,
       send(id, msg) {
         const ws = membersMut.get(id);
-        if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+        if (ws && ws.readyState === ws.OPEN) sendOrDrop(id, ws, JSON.stringify(msg));
       },
       broadcast(msg, excludeId) {
         const data = JSON.stringify(msg);
         for (const [id, ws] of membersMut) {
-          if (id !== excludeId && ws.readyState === ws.OPEN) ws.send(data);
+          if (id !== excludeId && ws.readyState === ws.OPEN) sendOrDrop(id, ws, data);
         }
       },
     };
@@ -197,6 +214,10 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
       }
       if (room && spec.maxMembers !== undefined && room.membersMut.size >= spec.maxMembers) {
         reject(ws, spec.fullReason ?? `room "${roomName}" は満員です (${spec.maxMembers} 人まで)`);
+        return;
+      }
+      if (!room && spec.maxRooms !== undefined && rooms.size >= spec.maxRooms) {
+        reject(ws, `room の数が上限 (${spec.maxRooms}) に達しています。既存の room に入ってください`);
         return;
       }
       if (!room) room = createRoom(roomName, config);

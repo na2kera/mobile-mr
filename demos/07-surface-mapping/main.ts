@@ -479,6 +479,8 @@ let cameraError = "";
 let paintsSent = 0;
 let paintsAcked = 0;
 let strokesSeen = 0;
+/** 受け取った最大 seq（snapshot で自分の stroke を acked に数えるため） */
+let lastSeenSeq = 0;
 let lastClearBy = "";
 let flash: { text: string; untilMs: number } | null = null;
 
@@ -490,7 +492,19 @@ function playerName(id: string): string {
 function onPaint(stroke: PaintStroke) {
   strokesSeen++;
   if (stroke.by === selfId) paintsAcked++;
+  lastSeenSeq = Math.max(lastSeenSeq, stroke.seq);
   getSurfaceView(stroke.surfaceId)?.draw(stroke);
+}
+
+/** snapshot（welcome / 切り詰め）で全 Surface を置き換える。未受信だった自分の stroke は acked に数える */
+function applySnapshot(strokes: readonly PaintStroke[]) {
+  for (const view of surfaces.values()) view.replace(strokes);
+  for (const s of strokes) {
+    if (s.seq > lastSeenSeq && s.by === selfId) paintsAcked++;
+  }
+  lastSeenSeq = strokes.reduce((m, s) => Math.max(m, s.seq), lastSeenSeq);
+  strokesSeen = strokes.length;
+  lastPaintUv = null;
 }
 
 function connect() {
@@ -521,9 +535,10 @@ function connect() {
         }
         const me = players.get(id);
         if (me) myCursor.material.color.setHex(playerColorHex(me.color));
-        // snapshot で全 Surface を置き換える（再接続でも取りこぼしが無い）
-        for (const view of surfaces.values()) view.replace(snapshot.strokes);
-        strokesSeen = snapshot.strokes.length;
+        // snapshot で全 Surface を置き換える（再接続でも取りこぼしが無い）。id が変わるので acked は数えない
+        lastSeenSeq = Infinity;
+        applySnapshot(snapshot.strokes);
+        lastSeenSeq = snapshot.strokes.reduce((m, s) => Math.max(m, s.seq), 0);
         // サーバー側の Surface 定義が自分と違ったら（あり得ないが）ログに出す
         for (const s of snapshot.surfaces) {
           const mine = surfaces.get(s.id);
@@ -546,13 +561,14 @@ function connect() {
       onPeerPose,
       onPaint,
       onSnapshot: (snapshot) => {
-        for (const view of surfaces.values()) view.replace(snapshot.strokes);
-        strokesSeen = snapshot.strokes.length;
+        applySnapshot(snapshot.strokes);
         flash = { text: "上限に達したので古い部分を消しました", untilMs: performance.now() + 2500 };
         console.log(`[paint] trimmed snapshot: ${snapshot.strokes.length} strokes`);
       },
       onClear: (by) => {
         for (const view of surfaces.values()) view.clear();
+        strokesSeen = 0;
+        lastPaintUv = null;
         lastClearBy = by;
         flash = { text: `${playerName(by)} が全消去`, untilMs: performance.now() + 2000 };
         console.log(`[paint] cleared by ${by}`);
@@ -858,7 +874,17 @@ startButton.addEventListener("click", () => {
   });
 });
 
+// 押したまま画面を離れると release が来ないので、離れるときに必ず解除する
+function releaseHold() {
+  paintHeld = false;
+  lastPaintUv = null;
+}
+addEventListener("blur", releaseHold);
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") releaseHold();
+});
 addEventListener("pagehide", () => {
+  releaseHold();
   client?.dispose();
   joined = false;
   netStatus = "closed (pagehide)";

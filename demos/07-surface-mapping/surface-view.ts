@@ -6,7 +6,7 @@ import type { SurfaceDef } from "../../src/shared/surface";
 import type { PaintStroke } from "../../src/shared/surface-paint";
 import { PLAYER_COLOR_COUNT } from "../../src/shared/surface-protocol";
 
-export const PLAYER_COLORS = [0x8ab4f8, 0xffa657, 0x81c995, 0xf28b82, 0xfdd663, 0xc58af9];
+export const PLAYER_COLORS = [0x8ab4f8, 0xffa657, 0x81c995, 0xf28b82, 0xfdd663, 0xc58af9, 0x78d9ec, 0xff8bcb];
 if (PLAYER_COLORS.length !== PLAYER_COLOR_COUNT) {
   throw new Error(`PLAYER_COLORS (${PLAYER_COLORS.length}) と PLAYER_COLOR_COUNT (${PLAYER_COLOR_COUNT}) が一致していない`);
 }
