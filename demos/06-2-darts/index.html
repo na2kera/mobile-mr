@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>06-2. MR Darts — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜06 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #start-button {
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜05 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・手・通信・試合の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>06-2. MR Darts</h1>
+      <p>
+        <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
+        >して<strong>壁に天地を合わせて貼り</strong>、マーカーの中心が仮想ダーツボードの中心（ブル）になります。
+        ボードから 1.5〜2.4m ほど離れて立ち、<strong>顔の前に手を出して前へ速く振る</strong>と、
+        手の速さと向きのままダーツが飛びます（狙いの補正はありません。重力は現実と同じ 9.8。
+        届かなければ ?gravity= で軽くできます）。
+      </p>
+      <p>
+        参加した順に手番が回り、1 人 3 投ずつ × 3 ラウンドの合計点で競います。何台でも同じ URL を開くだけで
+        同じ room に入ります（既定 room: demo。分けたいときは ?room=名前。表示名は ?name=）。
+        自分の番のときは視界内に「あなたの番です」と出るので、投げる人が投げ位置に立ち、
+        他の人はその場から見ていてください（他人のダーツも自分の端末で飛んで刺さります）。
+        05 で較正した手の実寸（例: ?handScale=1.9）は毎回付けてください。
+      </p>
+      <p id="room-error" hidden></p>
+      <button id="start-button" type="button">開始</button>
+      <p>
+        確認の見方: 開始後、まず壁のマーカーを見ます（視界内の案内が変わり、ボードとスコアボードが出ます）。
+        骨格が背景の手に重なったら準備完了。ボードから目を離しても（投げる動作で下を向いても）ボードは
+        その場に残ります（ジャイロで追従。歩くとずれるのでその場で）。
+      </p>
+      <p>
+        調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7（06 の実機で合わせた値）。
+        マーカーは ?markerMm=100&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100（手用は handDetW / handSmooth / handLostMs）。
+        投げの検出は ?throwMinSpeed=1.5（振り始めとみなす速さ [m/s]）&amp;releaseRatio=0.5（ピークからこの割合まで落ちたら離した）
+        &amp;throwGain=1（手の速度に掛ける係数。トラッカーの速度の過小申告を補う較正用）。
+        ?gravity=9.8&amp;rounds=3 は room 内で一致が必要です（違う値の端末は入室できません）。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1&amp;fakeMarkerPx=80（小さいほど遠くに立つ幾何。既定）で、合成の手が自分の番に
+        ボードの中心へ届く速さで振り、投げ → 刺さる → 次の手番、が回るところまで見られます
+        （2 つ目のウィンドウでも同じ URL を開くと 2 人で交互に。同じウィンドウの裏タブは描画が止まるので別ウィンドウで）
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

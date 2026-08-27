@@ -11,6 +11,8 @@
     "test:hand": "node scripts/test-hand-math.mjs",
     "test:volley": "node scripts/test-volleyball.mjs",
     "check:volley": "node scripts/headless-volleyball.mjs",
+    "test:darts": "node scripts/test-darts.mjs",
+    "check:darts": "node scripts/headless-darts.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {
