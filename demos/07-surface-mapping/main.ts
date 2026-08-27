@@ -88,7 +88,8 @@ const MODEL_URLS = params.get("model")
 // Room / 通信
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
-const NAME = (params.get("name") ?? "").trim().slice(0, NAME_MAX_LENGTH);
+// サーバーと同じく code point 単位で切る（UTF-16 の slice だと絵文字が半分になる）
+const NAME = [...(params.get("name") ?? "").trim()].slice(0, NAME_MAX_LENGTH).join("");
 const SEND_INTERVAL_MS = 1000 / numParam("sendHz", 15, { min: 1, max: 60 });
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
@@ -116,6 +117,9 @@ const FAKE_HANDS = params.has("fakehands");
 /** 合成の手が Surface 上に描く円の半径（UV）と周期 [s] */
 const FAKE_UV_R = numParam("fakeUvR", 0.3, { min: 0, max: 0.5 });
 const FAKE_PERIOD_SEC = numParam("fakePeriodSec", 6, { min: 1, max: 60 });
+
+/** タッチ端末（実機）か。PC は OrbitControls + キーボード */
+const touch = isTouchDevice();
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -249,7 +253,7 @@ function onPeerPose(id: string, pose: PlayerPose) {
   }
   peer.lastPoseMs = now;
   const view = pose.cursor ? getSurfaceView(pose.cursor.surfaceId) : undefined;
-  if (view && pose.cursor) placeCursor(peer.cursor, pose.cursor.uv, view.def, PAINT_RADIUS);
+  if (view && pose.cursor) placeCursor(peer.cursor, pose.cursor.uv, view.def, pose.cursor.radius);
   else peer.cursor.visible = false;
 }
 
@@ -571,7 +575,7 @@ function sendPoseIfDue(now: number) {
     tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
   };
   if (currentHit?.inside) {
-    pose.cursor = { surfaceId: surfaceDef.id, uv: [round4(currentHit.uv[0]), round4(currentHit.uv[1])] };
+    pose.cursor = { surfaceId: surfaceDef.id, uv: [round4(currentHit.uv[0]), round4(currentHit.uv[1])], radius: PAINT_RADIUS };
   }
   client.sendPose(pose);
 }
@@ -644,23 +648,37 @@ function updatePointing(now: number) {
   const uv = currentHit!.uv;
   if (now - lastPaintMs < 1000 / PAINT_HZ) return;
   if (lastPaintUv && uvDistanceM(surfaceDef, lastPaintUv, uv) < PAINT_MIN_STEP_M) return;
+  // 送れなかった（CLOSING 中など）ときは数えず、位置も進めない（次のフレームで再送される）
+  if (!client.sendPaint(surfaceDef.id, [round4(uv[0]), round4(uv[1])], PAINT_RADIUS)) return;
   lastPaintMs = now;
   lastPaintUv = [uv[0], uv[1]];
   paintsSent++;
-  client.sendPaint(surfaceDef.id, [round4(uv[0]), round4(uv[1])], PAINT_RADIUS);
 }
 
-// 画面を押している間 = 視線ペイント（ゴーグル無しの手持ち確認・手が取れないときの保険）
+// 画面を押している間 = 視線ペイント（ゴーグル無しの手持ち確認・手が取れないときの保険）。
+// PC ではドラッグが OrbitControls の視線操作なので、代わりに Space キーの長押し
 const appEl = document.querySelector<HTMLDivElement>("#app")!;
-appEl.addEventListener("pointerdown", () => {
-  if (document.body.classList.contains("started")) paintHeld = true;
-});
-addEventListener("pointerup", () => {
-  paintHeld = false;
-});
-addEventListener("pointercancel", () => {
-  paintHeld = false;
-});
+if (touch) {
+  appEl.addEventListener("pointerdown", () => {
+    if (document.body.classList.contains("started")) paintHeld = true;
+  });
+  addEventListener("pointerup", () => {
+    paintHeld = false;
+  });
+  addEventListener("pointercancel", () => {
+    paintHeld = false;
+  });
+} else {
+  addEventListener("keydown", (e) => {
+    if (e.key === " " && document.body.classList.contains("started")) {
+      e.preventDefault();
+      paintHeld = true;
+    }
+  });
+  addEventListener("keyup", (e) => {
+    if (e.key === " ") paintHeld = false;
+  });
+}
 
 // ---- 視界内メッセージと名札 ----
 function updateMessages(now: number) {
@@ -709,7 +727,6 @@ function updateMessages(now: number) {
 // ---- 頭追従（02〜06 と同じ） ----
 type HeadControls = { update: () => void };
 let controls: HeadControls | null = null;
-const touch = isTouchDevice();
 
 function startControls() {
   if (touch) {
@@ -739,7 +756,7 @@ function renderHud() {
     `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(performance.now(), MARKER_LOST_MS) ? " (holding last pose)" : ""}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
-      `hands=${lastResultHands} ${handSlots.describe() || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
+      `hands=${lastResultHands} ${handSlots.describe() || "-"}${handSlots.slots.some((s) => s.view.visible && s.pointing) ? " point" : ""} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
     `room=${ROOM ?? "(不正)"} me=${selfId || "-"} players=${[...players.values()].map((p) => `${p.id}:c${p.color}`).join(",") || "-"} ws=${netStatus}`,
     `surface=${surfaceDef.id} ${SURFACE_W}x${SURFACE_H} hit=${currentHit ? `${currentHit.uv[0].toFixed(3)},${currentHit.uv[1].toFixed(3)}${currentHit.inside ? "" : " (out)"} ${hitByHand ? "hand" : "gaze"}` : "-"} pointing=${pointingNow ? "yes" : "no"} held=${paintHeld ? "yes" : "no"}`,
     `paint: strokes=${view.strokeCount} seen=${strokesSeen} sent=${paintsSent} acked=${paintsAcked} lastSeq=${view.lastSeq}${lastClearBy ? ` clearedBy=${lastClearBy}` : ""}`,

@@ -42,7 +42,11 @@ export type RoomServerSpec<C, S, M> = {
   /** tick の間隔 [ms]。省略時は tick しない */
   tickMs?: number;
   onTick?(room: RoomContext<C, S>, now: number): void;
-  /** 入室。welcome の送信と全員への join の通知は spec が行う（内容がデモごとに違うため） */
+  /**
+   * 入室。welcome の送信と全員への join の通知は spec が行う（内容がデモごとに違うため）。
+   * 呼ばれた時点で本人は既に members に入っているので、join を broadcast するときは excludeId=id を渡す
+   * （04/06/06-2 は members に入れる前に broadcast していたので、そこから写すときは注意）
+   */
   onJoin(room: RoomContext<C, S>, id: string, url: URL, now: number): void;
   onMessage(room: RoomContext<C, S>, id: string, msg: M, now: number): void;
   /** 退室（切断）。leave の通知は spec が行う。members からは既に消えている */
@@ -90,6 +94,8 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
 
   function reject(ws: WebSocket, reason: string) {
     console.warn(`${spec.tag} rejected: ${reason}`);
+    // close 中に不正フレームが来ると 'error' が出る。リスナーが無いと EventEmitter が throw して dev サーバーごと落ちる
+    ws.on("error", () => {});
     ws.send(JSON.stringify({ type: "error", reason }));
     ws.close();
   }

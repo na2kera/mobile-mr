@@ -30,7 +30,8 @@ export type PaintClientEvents = {
 
 export type PaintClient = {
   sendPose: (pose: PlayerPose) => void;
-  sendPaint: (surfaceId: string, uv: V2, radius: number) => void;
+  /** 送れたら true（未接続・CLOSING 中は false） */
+  sendPaint: (surfaceId: string, uv: V2, radius: number) => boolean;
   sendClear: () => void;
   dispose: () => void;
 };
@@ -104,9 +105,10 @@ export function connectPaint(
   }
   open();
 
-  const send = (msg: ClientMessage) => {
-    if (ws?.readyState !== WebSocket.OPEN) return;
+  const send = (msg: ClientMessage): boolean => {
+    if (ws?.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(msg));
+    return true;
   };
 
   return {
@@ -114,7 +116,7 @@ export function connectPaint(
       send({ type: "pose", ...pose });
     },
     sendPaint(surfaceId, uv, radius) {
-      send({ type: "paint", surfaceId, uv, radius });
+      return send({ type: "paint", surfaceId, uv, radius });
     },
     sendClear() {
       send({ type: "clear" });

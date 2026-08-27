@@ -53,7 +53,7 @@
 5. ~~Phase 5: MediaPipe で Hand Tracking~~ — 手の 3D 化とボール・ボタン・指差し操作（完了: `demos/05-hand-interaction/`。Body は Phase 9 で扱う）
 6. ~~Phase 6: MRバレーボール（統合ゲーム第1弾）~~ — サーバー権威の物理 + bot + 2台対戦（完了: `demos/06-volleyball/`。iPhone 実機 + ゴーグルで確認済み 2026-08-27）
    - Phase 6-2: MR ダーツ（統合ゲーム第2弾。`demos/06-2-darts/`）— 壁のマーカーにボード、手を振って投げる、何人でも参加順に 3 投ずつ。サーバー権威（`server/darts.ts`）。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**（PR #11 マージ済み 2026-08-27）
-7. ~~Phase 7: Surface Mapping~~ — 壁のマーカー座標系を Surface にし、指差しの視線で UV を指してペイント、サーバー権威で共有（完了: `demos/07-surface-mapping/`、`server/surface.ts` + 共通化した `server/room-server.ts`。PC で確認済み、**実機は未確認** 2026-08-28）
+7. Phase 7: Surface Mapping — 壁のマーカー座標系を Surface にし、指差しの視線で UV を指してペイント、サーバー権威で共有（`demos/07-surface-mapping/`、`server/surface.ts` + 共通化した `server/room-server.ts`。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**。PR #12、2026-08-28）
 8. **Phase 8: MRスプラトゥーン** ← 次
 8. Phase 9: 現実の人物と Player ID の対応（Body Tracking はここで扱う）
 9. Phase 10: SDK / ライブラリ化（`@mobile-mr/core` ほか。詳細は CONCEPT.md §6）

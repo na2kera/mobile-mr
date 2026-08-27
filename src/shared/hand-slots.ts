@@ -267,7 +267,7 @@ export class HandSlots {
   /** HUD 用の 1 行 */
   describe(): string {
     return this.visible()
-      .map((x) => `${x.label}:${x.depth.toFixed(2)}m hand=${x.handCm.toFixed(1)}cm res=${x.residual.toFixed(3)}${x.pointing ? " point" : ""}`)
+      .map((x) => `${x.label}:${x.depth.toFixed(2)}m hand=${x.handCm.toFixed(1)}cm res=${x.residual.toFixed(3)}`)
       .join(" ");
   }
 }

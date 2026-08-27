@@ -161,14 +161,15 @@ try {
   const pab = await a.waitFor((m) => m.type === "paint" && m.stroke.by === "p2");
   check("相手の paint が届く（seq=2・色 1）", pab && pab.stroke.seq === 2 && pab.stroke.color === 1);
 
-  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, cursor: { surfaceId: "wall-0", uv: [0.1, 0.2] } });
+  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, cursor: { surfaceId: "wall-0", uv: [0.1, 0.2], radius: 0.03 } });
   const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2");
-  check("pose が中継され quat は正規化・cursor 付き", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.cursor.uv[1] === 0.2);
-  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-0", uv: [0.1] } });
+  check("pose が中継され quat は正規化・cursor 付き（radius も）", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.cursor.uv[1] === 0.2 && pose.cursor.radius === 0.03);
+  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-0", uv: [0.1], radius: 0.03 } });
+  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-0", uv: [1.5, 0.2], radius: 0.03 } });
   await sleep(100);
-  check("cursor が不正な pose は捨てられる", a.msgs.filter((m) => m.type === "pose").length === 1);
+  check("cursor が不正（形・UV 範囲外）な pose は捨てられる", a.msgs.filter((m) => m.type === "pose").length === 1);
 
-  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-9", uv: [0.1, 0.2] } });
+  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-9", uv: [0.1, 0.2], radius: 0.03 } });
   const poseUnknown = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && !("cursor" in m));
   check("知らない Surface の cursor は落として中継", poseUnknown !== null);
 

@@ -14,13 +14,14 @@ import {
   type ServerMessage,
   type SurfaceRoomConfig,
 } from "../src/shared/surface-protocol.ts";
-import { PaintBoard, RateLimiter } from "../src/shared/surface-paint.ts";
+import { PAINT_RADIUS_MAX, PAINT_RADIUS_MIN, PaintBoard, RateLimiter } from "../src/shared/surface-paint.ts";
 import {
   DEFAULT_SURFACE_H,
   DEFAULT_SURFACE_W,
   SURFACE_SIZE_MAX,
   SURFACE_SIZE_MIN,
   makeSurface,
+  uvInside,
   type V2,
   type V3,
 } from "../src/shared/surface.ts";
@@ -65,8 +66,9 @@ function parseClientMessage(data: RawData): ClientMessage | null {
       const c = m.cursor as Record<string, unknown> | null;
       if (typeof c !== "object" || c === null) return null;
       if (typeof c.surfaceId !== "string" || c.surfaceId.length > 32 || !isVec(c.uv, 2)) return null;
-      if (c.uv.some((v) => Math.abs(v) > 10)) return null;
-      pose.cursor = { surfaceId: c.surfaceId, uv: c.uv as V2 };
+      if (!uvInside(c.uv as V2)) return null;
+      if (typeof c.radius !== "number" || !(c.radius >= PAINT_RADIUS_MIN && c.radius <= PAINT_RADIUS_MAX)) return null;
+      pose.cursor = { surfaceId: c.surfaceId, uv: c.uv as V2, radius: c.radius };
     }
     return { type: "pose", ...pose };
   }

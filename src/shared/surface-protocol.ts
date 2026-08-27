@@ -33,7 +33,8 @@ export type PlayerPose = {
   pos: V3;
   quat: [number, number, number, number];
   tracking: boolean;
-  cursor?: { surfaceId: string; uv: V2 };
+  /** いま指している場所。radius は相手の端末でカーソルの大きさを合わせるため（ペイントの半径と同じ） */
+  cursor?: { surfaceId: string; uv: V2; radius: number };
 };
 
 export type ClientMessage =
