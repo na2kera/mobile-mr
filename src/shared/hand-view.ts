@@ -2,8 +2,8 @@
 // 関節は InstancedMesh（球 21 個を 1 ドローコール）、骨は LineSegments。
 // 半透明にして、背景（パススルー）に映っている実際の手が透けて見えるようにする
 import * as THREE from "three";
-import { HAND_CONNECTIONS, LANDMARK_COUNT } from "./hand-math";
-import type { Vec3 } from "./hand-math";
+import { HAND_CONNECTIONS, LANDMARK_COUNT } from "./hand-math.ts";
+import type { Vec3 } from "./hand-math.ts";
 
 export class HandView {
   readonly group = new THREE.Group();

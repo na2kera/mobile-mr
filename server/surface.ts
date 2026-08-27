@@ -1,6 +1,7 @@
 // Phase 7 (07-surface-mapping) 用のサーバー。Surface 上のペイントの権威（検証・順序・保持）を持ち、
 // 姿勢（pose）は中継する。接続の受け付け等の共通部分は server/room-server.ts（今回抽出）で、
 // ここは「Room 設定」「メッセージ」「状態（PaintBoard）」の 3 点だけ
+import process from "node:process";
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -27,6 +28,12 @@ import {
 } from "../src/shared/surface.ts";
 
 const MAX_PAYLOAD_BYTES = 4 * 1024;
+/** 全員切断してから Room（ペイント）を捨てるまでの猶予。瞬断・bfcache・サーバー再起動以外で消えないように */
+const EMPTY_ROOM_TTL_MS = Number(process.env.SURFACE_ROOM_TTL_MS ?? "") || 10 * 60 * 1000;
+/** Room の人数上限（pose / paint を全員に配るので二乗で重くなる） */
+const MAX_MEMBERS = 8;
+/** テスト用にストローク上限を小さくできる */
+const MAX_STROKES_OVERRIDE = Number(process.env.SURFACE_MAX_STROKES ?? "") || undefined;
 /** clear / pose の人ごとの上限 [回/秒]（paint の上限は PaintBoard が持つ） */
 const CLEAR_RATE_PER_SEC = 1;
 /** クライアントの ?sendHz= の max 60 に余裕を持たせる（境界落ち防止） */
@@ -113,9 +120,11 @@ export function surfaceServer() {
     describeConfig: (c) =>
       `markerId=${c.markerId} markerMm=${c.markerMm} surfaceW=${c.surfaceW} surfaceH=${c.surfaceH}`,
     configErrorReason: "Room 設定 (markerId / markerMm / surfaceW / surfaceH) が不正です",
+    emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
+    maxMembers: MAX_MEMBERS,
     parseMessage: parseClientMessage,
     createState: (_name, config) => ({
-      board: new PaintBoard([makeSurface(config.markerId, config.surfaceW, config.surfaceH)]),
+      board: new PaintBoard([makeSurface(config.markerId, config.surfaceW, config.surfaceH)], MAX_STROKES_OVERRIDE),
       players: new Map(),
       nextColor: 0,
       clearRate: new RateLimiter(CLEAR_RATE_PER_SEC),
@@ -150,11 +159,13 @@ export function surfaceServer() {
         const player = state.players.get(id)!;
         const stroke = state.board.paint(id, player.color, msg, now);
         if (stroke) {
-          if (state.board.clearedByLimit) {
-            room.broadcast({ type: "clear", by: "server" } satisfies ServerMessage);
-            console.log(`[surface] room "${room.name}" reached the stroke limit; cleared`);
+          if (state.board.trimmed) {
+            // 古い分を切り詰めた。新しい stroke も含んだ snapshot で全員を揃える
+            room.broadcast({ type: "snapshot", snapshot: state.board.snapshot() } satisfies ServerMessage);
+            console.log(`[surface] room "${room.name}" reached the stroke limit; trimmed to ${state.board.strokes.length}`);
+          } else {
+            room.broadcast({ type: "paint", stroke } satisfies ServerMessage);
           }
-          room.broadcast({ type: "paint", stroke } satisfies ServerMessage);
         } else if (state.board.lastRejectReason !== "rate limited") {
           console.log(`[surface] ${id} paint rejected: ${state.board.lastRejectReason}`);
         }

@@ -350,3 +350,10 @@
 - **どう対処したか**: 写した（方針どおりデモ内複製は残す）。手スロットのように「3 本目で抽出」の候補だが、アバターの見た目はデモごとに変わるので、抽出するなら「pose の送受信 + 補間 + stale 判定」の層だけにする
 - **SDK ならどう解決するか（案）**: `@mobile-mr/room` client 側に `PeerTracker`（pose の受信 → 補間 → stale で非表示）と `LocalPoseSender`（anchor 座標系での姿勢を間引いて送る）を持たせ、見た目（アバター）は利用者がコールバックで足す。トラッカーの GPU → CPU フォールバックは `@mobile-mr/hands` の `createHandTracker` に内蔵する
 - **関連**: `demos/06-volleyball/main.ts`、`demos/06-2-darts/main.ts`、`demos/07-surface-mapping/main.ts`
+
+## [2026-08-28] Phase 7 / 07-surface-mapping: ストロークの列をそのまま権威状態にすると、上限と「消えない」の両立が難しい
+
+- **何が苦しかったか**: ペイントを「ストロークの列」で持つと、snapshot（入室時に全件）が肥大するので上限が要る。最初は上限で全消去にしたが、外部レビューで「15Hz で描き続けると 1 人 4 分半で作品が丸ごと消える」と指摘された。古い分だけ捨てると在室者と後から入った人の見た目がずれるので、切り詰め時に snapshot を配り直す形にした（4000 → 3000 件、約 300KB）。さらに「最後の 1 人が切断すると Room ごと消える」ので、Room サーバーに空 Room の猶予（10 分）を足した。どれも「サーバーが持つのは列か、塗った結果（ラスタ）か」の問題で、列は順序・検証が簡単だが有限にできない
+- **どう対処したか**: 上記（切り詰め + snapshot 再配信 + 空 Room の猶予 + 人数上限 8）。CanvasTexture は部分更新できないので、解像度を 512px/m に下げて毎フレームの転送量を抑えた（`?surfacePx=` で調整）
+- **SDK ならどう解決するか（案）**: `SurfaceState` は「ラスタ（塗った結果）を権威として持ち、差分（矩形 or ストローク）を配って一定間隔でラスタの key frame を送る」設計にする。Phase 8 のインク（陣取り = 塗られた面積の集計）はラスタでないと計算できないので、そこで移行する。テクスチャの部分更新（`copyTextureToTexture` / WebGPU の `writeTexture`）も SDK 側で隠す
+- **関連**: `src/shared/surface-paint.ts`（MAX_STROKES / TRIM_TO）、`server/room-server.ts`（emptyRoomTtlMs / maxMembers）、`demos/07-surface-mapping/surface-view.ts`

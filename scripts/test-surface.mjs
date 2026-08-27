@@ -15,6 +15,8 @@ import {
   surfaceIdFor,
 } from "../src/shared/surface.ts";
 import { PAINT_RATE_PER_SEC, PaintBoard } from "../src/shared/surface-paint.ts";
+import { HandSlots } from "../src/shared/hand-slots.ts";
+import { fakeHandResult, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SURFACE_PATH, SURFACE_PROTOCOL_VERSION } from "../src/shared/surface-protocol.ts";
 
 const results = [];
@@ -55,22 +57,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ================= 2. PaintBoard =================
 {
   const s = makeSurface(0, 1, 0.8);
-  const b = new PaintBoard([s], 5);
+  const b = new PaintBoard([s], 5, 3);
   const st = b.paint("p1", 0, { surfaceId: "wall-0", uv: [0.25, 0.75], radius: 0.03 }, 1000);
   check("paint: 受理され seq=1・色と by が付く", st && st.seq === 1 && st.color === 0 && st.by === "p1" && st.t === 1000);
   check("paint: 不明な surface は拒否", b.paint("p1", 0, { surfaceId: "wall-9", uv: [0.5, 0.5], radius: 0.03 }, 1001) === null && b.lastRejectReason.startsWith("unknown"));
   check("paint: uv の範囲外は拒否", b.paint("p1", 0, { surfaceId: "wall-0", uv: [1.2, 0.5], radius: 0.03 }, 1002) === null);
   check("paint: 半径の範囲外は拒否", b.paint("p1", 0, { surfaceId: "wall-0", uv: [0.5, 0.5], radius: 5 }, 1003) === null && b.paint("p1", 0, { surfaceId: "wall-0", uv: [0.5, 0.5], radius: 0 }, 1003) === null);
   for (let i = 0; i < 4; i++) b.paint("p2", 1, { surfaceId: "wall-0", uv: [0.1 * i, 0.5], radius: 0.03 }, 1100 + i);
-  check("上限（5 件）までは保持し clearedByLimit=false", b.strokes.length === 5 && !b.clearedByLimit);
+  check("上限（5 件）までは保持し trimmed=false", b.strokes.length === 5 && !b.trimmed);
   const sixth = b.paint("p2", 1, { surfaceId: "wall-0", uv: [0.9, 0.5], radius: 0.03 }, 1200);
-  check("上限を超えたら全消去して新しい 1 件だけ残し clearedByLimit=true", sixth && b.strokes.length === 1 && b.strokes[0].seq === 6 && b.clearedByLimit);
+  check("上限を超えたら古い分を trimTo（3）件まで切り詰め trimmed=true（新しい stroke は残る）", sixth && b.strokes.length === 3 && b.strokes[2].seq === 6 && b.strokes[0].seq === 4 && b.trimmed);
   b.paint("p2", 1, { surfaceId: "wall-0", uv: [0.9, 0.6], radius: 0.03 }, 1201);
-  check("次の paint では clearedByLimit が戻る", b.strokes.length === 2 && !b.clearedByLimit);
+  check("次の paint では trimmed が戻る", b.strokes.length === 4 && !b.trimmed);
   const seqs = b.strokes.map((x) => x.seq);
   check("seq は単調増加", seqs.every((v, i) => i === 0 || v > seqs[i - 1]));
   const snap = b.snapshot();
-  check("snapshot: surfaces と strokes と seq", snap.surfaces.length === 1 && snap.strokes.length === 2 && snap.seq === 7);
+  check("snapshot: surfaces と strokes と seq", snap.surfaces.length === 1 && snap.strokes.length === 4 && snap.seq === 7);
   // レート制限: 1 秒に PAINT_RATE_PER_SEC まで
   const rb = new PaintBoard([s]);
   let ok = 0;
@@ -84,9 +86,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("clear で空", rb.strokes.length === 0);
 }
 
+// ================= 2b. HandSlots の指差しヒステリシス =================
+{
+  // three.js の Camera は Node でも生成できる（DOM 不要）
+  const THREE = await import("three");
+  const camera = new THREE.PerspectiveCamera(70, 16 / 9, 0.05, 100);
+  const slots = new HandSlots({ camera, numHands: 1, smooth: 1, lostMs: 300, maxDepthM: 3, handScale: 1, matchDistM: 0.2, matchSpeedMps: 2, swapHands: false });
+  const m = { tanHalfFov: Math.tan((70 / 2) * Math.PI / 180), eyeAspect: 16 / 9, repeatX: 1, repeatY: 1 };
+  const feed = (pose, t) => slots.apply(fakeHandResult(syntheticHandShape(pose), { x: 0, y: 0, z: -0.5 }, m), t, m, m);
+  feed("point", 0);
+  feed("point", 30);
+  check("指差し: 2 フレームではまだ pointing=false", slots.slots[0].pointing === false);
+  feed("point", 60);
+  check("指差し: 3 フレーム連続で pointing=true", slots.slots[0].pointing === true);
+  feed("open", 90);
+  feed("open", 120);
+  check("指差し: 開いた手 2 フレームではまだ true（ヒステリシス）", slots.slots[0].pointing === true);
+  feed("open", 150);
+  check("指差し: 3 フレーム連続で false", slots.slots[0].pointing === false);
+  feed("point", 180); feed("point", 210); feed("point", 240);
+  slots.update(1000);
+  check("指差し: ロストで false にリセット", slots.slots[0].pointing === false && slots.slots[0].pointingStreak === 0);
+}
+
 // ================= 3. server =================
 const PORT = 5184;
-const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
+// テスト用に「ストローク上限 3」「空 Room の猶予 600ms」で起動する
+const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], {
+  stdio: ["ignore", "pipe", "pipe"],
+  env: { ...process.env, SURFACE_MAX_STROKES: "3", SURFACE_ROOM_TTL_MS: "600" },
+});
 server.stderr.on("data", (d) => process.stderr.write(d));
 server.stdout.on("data", (d) => {
   for (const line of d.toString().split("\n")) if (line.startsWith("[surface]")) console.log(line);
@@ -148,9 +177,9 @@ try {
   check("paint: 送信者にも配信される（seq・色・by 付き）", pa && pa.stroke.seq === 1 && pa.stroke.by === "p1" && pa.stroke.color === 0 && pa.stroke.uv[0] === 0.25);
   a.send({ type: "paint", surfaceId: "wall-0", uv: [1.5, 0.5], radius: 0.03 });
   a.send({ type: "paint", surfaceId: "wall-0", uv: "x", radius: 0.03 });
-  a.send("not json");
+  a.ws.send("not json");
   await sleep(200);
-  check("不正な paint は捨てられる（配信されない）", a.msgs.filter((m) => m.type === "paint").length === 1);
+  check("不正な paint / JSON でない文字列は捨てられる（配信されない・切断されない）", a.msgs.filter((m) => m.type === "paint").length === 1 && !a.closed);
 
   const b = connect(cfg, "Bob");
   const wb = await b.waitFor((m) => m.type === "welcome");
@@ -172,6 +201,21 @@ try {
   b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, cursor: { surfaceId: "wall-9", uv: [0.1, 0.2], radius: 0.03 } });
   const poseUnknown = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && !("cursor" in m));
   check("知らない Surface の cursor は落として中継", poseUnknown !== null);
+
+  // 上限（3）到達: 3 件目までは paint、4 件目で snapshot（切り詰め後の全件）が配られる
+  b.send({ type: "paint", surfaceId: "wall-0", uv: [0.5, 0.5], radius: 0.03 });
+  await a.waitFor((m) => m.type === "paint" && m.stroke.seq === 3);
+  b.send({ type: "paint", surfaceId: "wall-0", uv: [0.6, 0.5], radius: 0.03 });
+  const snapMsg = await a.waitFor((m) => m.type === "snapshot");
+  check("上限到達で snapshot が全員に配られ、新しい stroke を含み古い分が切り詰められている", snapMsg && snapMsg.snapshot.strokes.length === 3 && snapMsg.snapshot.strokes[2].seq === 4 && snapMsg.snapshot.strokes[0].seq === 2);
+  check("上限到達の回は paint（差分）は配られない", !a.msgs.some((m) => m.type === "paint" && m.stroke.seq === 4));
+
+  // pose のレート制限（90/s）: 200 件を一気に送っても中継は 90 件まで
+  const before = a.msgs.filter((m) => m.type === "pose").length;
+  for (let i = 0; i < 200; i++) b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 1], tracking: true });
+  await sleep(300);
+  const relayed = a.msgs.filter((m) => m.type === "pose").length - before;
+  check("pose は 1 人 90/s までしか中継しない", relayed > 0 && relayed <= 90, `${relayed} relayed`);
 
   b.send({ type: "clear" });
   const ca = await a.waitFor((m) => m.type === "clear");
@@ -196,8 +240,31 @@ try {
   b.ws.close();
   const la = await a.waitFor((m) => m.type === "leave");
   check("leave が届く", la && la.id === "p2");
+
+  // 空 Room の猶予: 全員切断 → 猶予内に再入室すればペイントが残り、猶予を過ぎると消える
+  a.send({ type: "paint", surfaceId: "wall-0", uv: [0.3, 0.3], radius: 0.03 });
+  await a.waitFor((m) => m.type === "paint" && m.stroke.uv[0] === 0.3);
   a.ws.close();
   c.ws.close();
+  await sleep(200);
+  const d = connect(cfg, "Dave");
+  const wd = await d.waitFor((m) => m.type === "welcome");
+  check("全員切断しても猶予内の再入室ではペイントが残る（瞬断・bfcache 対策）", wd && wd.snapshot.strokes.length === 1 && wd.players.length === 1);
+  d.ws.close();
+  await sleep(900);
+  const e = connect(cfg, "Eve");
+  const we = await e.waitFor((m) => m.type === "welcome");
+  check("猶予を過ぎたら Room は捨てられ、空の snapshot になる", we && we.snapshot.strokes.length === 0);
+
+  // 人数上限（8）
+  const extra = [];
+  for (let i = 0; i < 7; i++) extra.push(connect(cfg, `X${i}`));
+  await Promise.all(extra.map((x) => x.waitFor((m) => m.type === "welcome")));
+  const ninth = connect(cfg, "Ninth");
+  const errFull = await ninth.waitFor((m) => m.type === "error");
+  check("9 人目は満員で入室拒否", errFull && /満員/.test(errFull.reason));
+  e.ws.close();
+  for (const x of extra) x.ws.close();
   await sleep(200);
 
   const failed = results.filter(([, ok]) => !ok);

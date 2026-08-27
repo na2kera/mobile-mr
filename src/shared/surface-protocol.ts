@@ -53,6 +53,8 @@ export type ServerMessage =
   | { type: "leave"; id: string }
   | ({ type: "pose"; id: string } & PlayerPose)
   | { type: "paint"; stroke: PaintStroke }
+  /** 上限到達で古いストロークを切り詰めた。受信側は全 Surface をこれで置き換える */
+  | { type: "snapshot"; snapshot: PaintSnapshot }
   | { type: "clear"; by: string }
   | { type: "error"; reason: string };
 

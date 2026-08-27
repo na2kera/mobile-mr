@@ -53,6 +53,15 @@ export type RoomServerSpec<C, S, M> = {
   onLeave(room: RoomContext<C, S>, id: string, now: number): void;
   /** メンバーが 0 になり Room を捨てるとき */
   destroyState?(state: S): void;
+  /**
+   * メンバーが 0 になってから Room を捨てるまでの猶予 [ms]（省略時 0 = 即捨てる）。
+   * 状態を持つ Room（07 のペイント）は、1 人利用中の Wi-Fi 瞬断・bfcache で全部消えないようにここを長くする
+   */
+  emptyRoomTtlMs?: number;
+  /** Room の人数上限（省略時は無制限）。全員に fan-out するので人数の二乗で重くなる */
+  maxMembers?: number;
+  /** maxMembers で断るときの理由 */
+  fullReason?: string;
 };
 
 /** 表示名。無ければ fallback。長さと制御文字だけ弾く */
@@ -71,6 +80,8 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
   type Room = RoomContext<C, S> & {
     membersMut: Map<string, LiveWebSocket>;
     timer: ReturnType<typeof setInterval> | null;
+    /** メンバー 0 で捨てる予約（猶予中に誰か入れば取り消す） */
+    destroyTimer: ReturnType<typeof setTimeout> | null;
   };
   const rooms = new Map<string, Room>();
   let nextPlayerNumber = 1;
@@ -89,8 +100,19 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
   }, HEARTBEAT_INTERVAL_MS);
   httpServer.on("close", () => {
     clearInterval(heartbeat);
-    for (const room of rooms.values()) if (room.timer) clearInterval(room.timer);
+    for (const room of rooms.values()) {
+      if (room.timer) clearInterval(room.timer);
+      if (room.destroyTimer) clearTimeout(room.destroyTimer);
+    }
   });
+
+  function destroyRoom(room: Room) {
+    if (room.timer) clearInterval(room.timer);
+    if (room.destroyTimer) clearTimeout(room.destroyTimer);
+    spec.destroyState?.(room.state);
+    rooms.delete(room.name);
+    console.log(`${spec.tag} room "${room.name}" destroyed`);
+  }
 
   function reject(ws: WebSocket, reason: string) {
     console.warn(`${spec.tag} rejected: ${reason}`);
@@ -109,6 +131,7 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
       members: membersMut,
       membersMut,
       timer: null,
+      destroyTimer: null,
       send(id, msg) {
         const ws = membersMut.get(id);
         if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -172,8 +195,16 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
         );
         return;
       }
+      if (room && spec.maxMembers !== undefined && room.membersMut.size >= spec.maxMembers) {
+        reject(ws, spec.fullReason ?? `room "${roomName}" は満員です (${spec.maxMembers} 人まで)`);
+        return;
+      }
       if (!room) room = createRoom(roomName, config);
       const r = room;
+      if (r.destroyTimer) {
+        clearTimeout(r.destroyTimer);
+        r.destroyTimer = null;
+      }
       const id = `p${nextPlayerNumber++}`;
       ws.isAlive = true;
       ws.on("pong", () => {
@@ -195,9 +226,12 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
         const now = performance.now();
         spec.onLeave(r, id, now);
         if (r.membersMut.size === 0) {
-          if (r.timer) clearInterval(r.timer);
-          spec.destroyState?.(r.state);
-          rooms.delete(roomName);
+          const ttl = spec.emptyRoomTtlMs ?? 0;
+          if (ttl > 0) {
+            r.destroyTimer = setTimeout(() => destroyRoom(r), ttl);
+          } else {
+            destroyRoom(r);
+          }
         }
         console.log(`${spec.tag} ${id} left room "${roomName}" (${r.membersMut.size} members)`);
       };

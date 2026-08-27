@@ -24,6 +24,8 @@ export type PaintClientEvents = {
   onPeerLeave: (id: string) => void;
   onPeerPose: (id: string, pose: PlayerPose) => void;
   onPaint: (stroke: PaintStroke) => void;
+  /** 上限到達で切り詰められた。全 Surface を置き換える */
+  onSnapshot: (snapshot: PaintSnapshot) => void;
   onClear: (by: string) => void;
   onError: (reason: string) => void;
 };
@@ -77,6 +79,9 @@ export function connectPaint(
         break;
       case "paint":
         events.onPaint(msg.stroke);
+        break;
+      case "snapshot":
+        events.onSnapshot(msg.snapshot);
         break;
       case "clear":
         events.onClear(msg.by);

@@ -101,10 +101,12 @@ const SURFACE_H = numParam("surfaceH", DEFAULT_SURFACE_H, { min: SURFACE_SIZE_MI
 // ペイント
 /** 1 ストロークの半径 [m] */
 const PAINT_RADIUS = numParam("paintRadius", 0.03, { min: PAINT_RADIUS_MIN, max: PAINT_RADIUS_MAX });
-/** 送信の上限 [回/秒]（サーバーの上限 30 より下に） */
+/** 送信の上限 [回/秒]（サーバーの上限 PAINT_RATE_PER_SEC=45 より下に） */
 const PAINT_HZ = numParam("paintHz", 15, { min: 1, max: 30 });
 /** 前回の送信位置からこの距離 [m] 未満なら送らない（同じ場所を塗り重ねない） */
 const PAINT_MIN_STEP_M = numParam("paintStep", PAINT_RADIUS * 0.4, { min: 0, max: 1 });
+/** ペイント層の解像度 [px/m]。上げると綺麗だが毎フレームの GPU 転送が増える（surface-view.ts 参照） */
+const SURFACE_PX_PER_M = numParam("surfacePx", 512, { min: 64, max: 2048 });
 /** 視線（画面中央）ペイントを常時 ON（手を使わない確認用）。既定は画面を押している間だけ */
 const GAZE_ALWAYS = params.has("gaze");
 
@@ -154,7 +156,7 @@ function getSurfaceView(id: string): SurfaceView | undefined {
   return surfaces.get(id);
 }
 {
-  const view = new SurfaceView(surfaceDef);
+  const view = new SurfaceView(surfaceDef, SURFACE_PX_PER_M);
   anchor.add(view.group);
   surfaces.set(surfaceDef.id, view);
 }
@@ -481,7 +483,6 @@ let lastClearBy = "";
 let flash: { text: string; untilMs: number } | null = null;
 
 function playerName(id: string): string {
-  if (id === "server") return "サーバー（上限到達）";
   const base = players.get(id)?.name ?? id;
   return id === selfId ? `${base}（あなた）` : base;
 }
@@ -544,6 +545,12 @@ function connect() {
       },
       onPeerPose,
       onPaint,
+      onSnapshot: (snapshot) => {
+        for (const view of surfaces.values()) view.replace(snapshot.strokes);
+        strokesSeen = snapshot.strokes.length;
+        flash = { text: "上限に達したので古い部分を消しました", untilMs: performance.now() + 2500 };
+        console.log(`[paint] trimmed snapshot: ${snapshot.strokes.length} strokes`);
+      },
       onClear: (by) => {
         for (const view of surfaces.values()) view.clear();
         lastClearBy = by;
@@ -783,13 +790,34 @@ const tryEnterFullscreen = setupFullscreen({
   isStarted: () => document.body.classList.contains("started"),
 });
 
+// 全消去は room の全員に効くので、2 秒以内にもう一度で確定（ゴーグル装着時の誤操作防止。確認ダイアログは
+// 全画面 + ゴーグルでは扱えない）
 const clearButton = document.querySelector<HTMLButtonElement>("#clear-button")!;
+const CLEAR_CONFIRM_MS = 2000;
+let clearArmedUntil = -Infinity;
+let clearArmTimer: ReturnType<typeof setTimeout> | null = null;
+function requestClear() {
+  const now = performance.now();
+  if (now < clearArmedUntil) {
+    clearArmedUntil = -Infinity;
+    clearButton.textContent = "全消去";
+    client?.sendClear();
+    return;
+  }
+  clearArmedUntil = now + CLEAR_CONFIRM_MS;
+  clearButton.textContent = "もう一度で全消去";
+  flash = { text: "もう一度押すと全員の絵を消します", untilMs: now + CLEAR_CONFIRM_MS };
+  if (clearArmTimer) clearTimeout(clearArmTimer);
+  clearArmTimer = setTimeout(() => {
+    clearButton.textContent = "全消去";
+  }, CLEAR_CONFIRM_MS);
+}
 clearButton.addEventListener("click", (e) => {
   e.stopPropagation();
-  client?.sendClear();
+  requestClear();
 });
 addEventListener("keydown", (e) => {
-  if (e.key === "c" && !e.repeat) client?.sendClear();
+  if (e.key === "c" && !e.repeat) requestClear();
 });
 
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;

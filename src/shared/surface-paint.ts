@@ -22,11 +22,14 @@ export type PaintInput = { surfaceId: string; uv: V2; radius: number };
 export const PAINT_RADIUS_MIN = 0.005;
 export const PAINT_RADIUS_MAX = 0.5;
 /**
- * 1 Room に保持するストロークの上限（snapshot が肥大しないように）。超えたら全消去する。
- * 「古いものから捨てる」だと在室者には消えた通知が無く、後から入った人と見た目がずれるため、
- * 全員に同じ clear を配れる全消去にした（サーバーは paint の前に clear を broadcast する）
+ * 1 Room に保持するストロークの上限（snapshot が肥大しないように）。到達したら古いものから
+ * TRIM_TO 件まで切り詰め、サーバーは全員に snapshot を配り直す（在室者と後から入った人の
+ * 見た目を揃えるため。「黙って古いのを捨てる」だと在室者にだけ古い絵が残る）。
+ * 既定 15Hz で描き続けると 1 人で約 4 分半で到達する。Phase 8 ではストロークの列ではなく
+ * ラスタ（塗った結果）をサーバーが持つ方が良い（PAIN_POINTS 参照）
  */
 export const MAX_STROKES = 4000;
+export const TRIM_TO = 3000;
 /**
  * 1 人あたりの受け付け上限 [回/秒]。クライアントの上限（?paintHz= の max 30）に対して余裕を持たせる
  * （sliding window なので上限ちょうどだと rAF のジッタで境界落ちする）
@@ -66,12 +69,14 @@ export class PaintBoard {
   private seq = 0;
   private readonly rate = new RateLimiter(PAINT_RATE_PER_SEC);
   lastRejectReason = "";
-  /** 直前の paint() で上限に達して全消去したか（サーバーはこれを見て clear を配る） */
-  clearedByLimit = false;
+  /** 直前の paint() で上限に達して切り詰めたか（サーバーはこれを見て snapshot を配り直す） */
+  trimmed = false;
+  private readonly trimTo: number;
   private readonly maxStrokes: number;
 
-  constructor(surfaces: SurfaceDef[], maxStrokes = MAX_STROKES) {
+  constructor(surfaces: SurfaceDef[], maxStrokes = MAX_STROKES, trimTo = Math.min(TRIM_TO, maxStrokes)) {
     this.maxStrokes = maxStrokes;
+    this.trimTo = Math.max(1, Math.min(trimTo, maxStrokes));
     for (const s of surfaces) this.surfaces.set(s.id, s);
   }
 
@@ -93,7 +98,7 @@ export class PaintBoard {
       this.lastRejectReason = "rate limited";
       return null;
     }
-    this.clearedByLimit = false;
+    this.trimmed = false;
     const stroke: PaintStroke = {
       seq: ++this.seq,
       surfaceId: input.surfaceId,
@@ -103,11 +108,11 @@ export class PaintBoard {
       by,
       t: now,
     };
-    if (this.strokes.length >= this.maxStrokes) {
-      this.strokes = [];
-      this.clearedByLimit = true;
-    }
     this.strokes.push(stroke);
+    if (this.strokes.length > this.maxStrokes) {
+      this.strokes = this.strokes.slice(this.strokes.length - this.trimTo);
+      this.trimmed = true;
+    }
     return stroke;
   }
 

@@ -3,7 +3,7 @@
 // 06-2 で抽出した（05 / 06 のデモ内の複製はそのまま残す）。
 // スロットは「同じ手の続き」を手首位置の近さで判断し、手ごとの EMA・速度を持つ
 import * as THREE from "three";
-import { HandView } from "./hand-view";
+import { HandView } from "./hand-view.ts";
 import {
   FINGER_TIPS,
   LANDMARK_COUNT,
@@ -11,8 +11,8 @@ import {
   isPointingPose,
   placeLandmarks,
   solveHandPlacement,
-} from "./hand-math";
-import type { Vec3, ViewMapping } from "./hand-math";
+} from "./hand-math.ts";
+import type { Vec3, ViewMapping } from "./hand-math.ts";
 
 export const HAND_COLORS = { R: 0x8ab4f8, L: 0xffa657, "-": 0xe8eaed } as const;
 export type HandLabel = keyof typeof HAND_COLORS;

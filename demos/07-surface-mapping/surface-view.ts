@@ -15,9 +15,14 @@ export function playerColorHex(color: number): number {
   return PLAYER_COLORS[((color % PLAYER_COLORS.length) + PLAYER_COLORS.length) % PLAYER_COLORS.length];
 }
 
-/** 1m あたりの px。1m × 0.8m で 1024 × 819。広い Surface は上限で粗くなる */
-const PX_PER_M = 1024;
-const MAX_PX = 2048;
+/**
+ * 1m あたりの px。1m × 0.8m で 512 × 410（RGBA 約 0.8MB）。半径 3cm のストロークが 15px。
+ * ストロークのある毎フレーム全面を GPU へ送り直す（three.js の CanvasTexture は部分更新できない）ので、
+ * モバイルの帯域を考えて控えめにしている。広い Surface は MAX_PX の上限で粗くなる。
+ * 実機で粗ければ ?surfacePx= で上げる（main.ts）
+ */
+const DEFAULT_PX_PER_M = 512;
+const MAX_PX = 1024;
 
 export class SurfaceView {
   readonly group = new THREE.Group();
@@ -32,9 +37,9 @@ export class SurfaceView {
   /** 描いたストロークの最大 seq（HUD 用） */
   lastSeq = 0;
 
-  constructor(def: SurfaceDef) {
+  constructor(def: SurfaceDef, pxPerM = DEFAULT_PX_PER_M) {
     this.def = def;
-    const scale = Math.min(PX_PER_M, MAX_PX / Math.max(def.widthM, def.heightM));
+    const scale = Math.min(pxPerM, MAX_PX / Math.max(def.widthM, def.heightM));
     this.pxPerM = scale;
     this.canvas.width = Math.max(8, Math.round(def.widthM * scale));
     this.canvas.height = Math.max(8, Math.round(def.heightM * scale));
@@ -42,6 +47,9 @@ export class SurfaceView {
     this.clear();
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
+    // 更新のたびに mipmap を作り直さない（アップロード 1 回分で済ませる）
+    this.texture.generateMipmaps = false;
+    this.texture.minFilter = THREE.LinearFilter;
     // ペイント層（壁面のわずかに手前。マーカーの枠と Z-fighting しないように）
     this.paintMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(def.widthM, def.heightM),
