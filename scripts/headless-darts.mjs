@@ -42,8 +42,15 @@ const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 server.stderr.on("data", (d) => process.stderr.write(d));
+/** サーバーが決めた着弾（"[darts] p1 throw #1: 17 (17) end=(0.01,-0.04,0.00) ..."）*/
+const landings = [];
 server.stdout.on("data", (d) => {
-  for (const line of d.toString().split("\n")) if (line.startsWith("[darts]")) console.log(line);
+  for (const line of d.toString().split("\n")) {
+    if (!line.startsWith("[darts]")) continue;
+    console.log(line);
+    const m = line.match(/^\[darts\] (p\d+) throw #\d+: (\S+) \((\d+)\) end=\(([-\d.]+),([-\d.]+),/);
+    if (m) landings.push({ by: m[1], label: m[2], points: Number(m[3]), r: Math.hypot(Number(m[4]), Number(m[5])) });
+  }
 });
 let serverExited = false;
 server.on("exit", () => {
@@ -188,6 +195,11 @@ try {
   check("ウィンドウ 2 でも throw が受理されている（手番が交代した）", hud2.accepted >= 1, `${hud2.sent}/${hud2.accepted}`);
   check("両方が得点している（board 座標変換と速度の向きが合っている）", (hud1.players[hud1.me] ?? 0) > 0 && (hud2.players[hud2.me] ?? 0) > 0, JSON.stringify(hud1.players));
   check("両方の HUD で同じ得点が見えている（権威状態の配信）", JSON.stringify(hud1.players) === JSON.stringify(hud2.players));
+  // 合成の手はブル（中心）を狙う速度で振る。手のひらは手の中心より数 cm 下、EMA の遅れも
+  // あるので厳密にブルにはならないが、着弾は中心から 8cm 以内（シングルの内側）に収まるはず
+  const LANDING_R_MAX = 0.08;
+  const far = landings.filter((l) => l.r > LANDING_R_MAX);
+  check(`全投の着弾が中心から ${LANDING_R_MAX * 100}cm 以内（座標変換と速度の精度）`, landings.length >= 6 && far.length === 0, `${landings.length} throws, r=${landings.map((l) => l.r.toFixed(3)).join("/")}`);
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions].slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[game] throw sent")).slice(0, 3)) console.log(`window1 log: ${l}`);
   if (process.env.FAKE_DEBUG) {

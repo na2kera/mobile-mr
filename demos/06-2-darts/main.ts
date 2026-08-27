@@ -19,6 +19,8 @@ import { LANDMARK_COUNT } from "../../src/shared/hand-math";
 import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
 import type { HandResultLike, HandSlot } from "../../src/shared/hand-slots";
+import { ThrowDetector } from "../../src/shared/throw-detector";
+import type { Release } from "../../src/shared/throw-detector";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import markerSvgUrl from "../../src/shared/marker-0.svg";
@@ -391,7 +393,7 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
     // 自分が投げている最中（振り〜着地）にボードが飛ぶと投げた位置がずれるので lerp だけ
-    canSnap: () => !(isMyTurn() && (swing !== null || auth?.state.phase === "flight")),
+    canSnap: () => !(isMyTurn() && (swinging() || auth?.state.phase === "flight")),
   });
 }
 
@@ -682,26 +684,32 @@ function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
 }
 
-// ---- 投げの検出: 手のひらの速度のピークと、その後の減速（= 離した）を見る ----
-type Swing = {
-  slot: HandSlot;
-  startMs: number;
-  peakSpeed: number;
-  peakVel: V3;
-  /** 直近のサンプルの手のひらの位置（board 座標系）= 離す位置 */
-  lastPos: V3;
-};
-let swing: Swing | null = null;
+// ---- 投げの検出（src/shared/throw-detector.ts）。手ごとに 1 つ。board 座標系のサンプルを渡す ----
+const detectors = new WeakMap<HandSlot, ThrowDetector>();
 const lastSampleMs = new WeakMap<HandSlot, number>();
 let lastSwingInfo = "";
+/** 投げを受け付けられる状態（自分の手番の aim 中）。false の間は振りを始めず、進行中の振りも捨てる */
+function canThrow(): boolean {
+  return isMyTurn() && auth?.state.phase === "aim";
+}
+function swinging(): boolean {
+  return handSlots.slots.some((slot) => !!detectors.get(slot)?.swing);
+}
 
 function updateThrowDetection(now: number) {
   if (!anchor.visible) return;
   board.getWorldQuaternion(tmpQuat).invert();
+  const allowed = canThrow();
   for (const slot of handSlots.slots) {
+    let det = detectors.get(slot);
+    if (!det) {
+      det = new ThrowDetector({ minSpeed: THROW_MIN_SPEED, releaseRatio: RELEASE_RATIO, maxSwingMs: SWING_MAX_MS });
+      detectors.set(slot, det);
+    }
     const visible = slot.view.visible && slot.snapContacts !== null;
     if (!visible) {
-      if (swing?.slot === slot) release(now, "lost");
+      const r = det.lost();
+      if (r) onRelease(now, r);
       continue;
     }
     const sampleMs = slot.snapMs;
@@ -711,51 +719,31 @@ function updateThrowDetection(now: number) {
     tmpVec.copy(slot.contactsWorld[PALM_CONTACT]);
     board.worldToLocal(tmpVec);
     tmpVec2.copy(slot.contactsVel[PALM_CONTACT]).applyQuaternion(tmpQuat);
-    const speed = tmpVec2.length();
-    if (!swing || swing.slot !== slot) {
-      if (swing) continue; // 別の手が振っている
-      if (speed >= THROW_MIN_SPEED && tmpVec2.z < 0) {
-        swing = {
-          slot,
-          startMs: now,
-          peakSpeed: speed,
-          peakVel: [tmpVec2.x, tmpVec2.y, tmpVec2.z],
-          lastPos: [tmpVec.x, tmpVec.y, tmpVec.z],
-        };
-      }
-      continue;
-    }
-    // 離す位置は「今の手の位置」（ピーク時の位置は平滑化の遅れで手前に出る。ピークの後も
-    // 手は進行方向へ進むので、減速を検出した時点の位置の方が実際の離す位置に近い）
-    swing.lastPos = [tmpVec.x, tmpVec.y, tmpVec.z];
-    if (speed > swing.peakSpeed) {
-      swing.peakSpeed = speed;
-      swing.peakVel = [tmpVec2.x, tmpVec2.y, tmpVec2.z];
-    } else if (speed < swing.peakSpeed * RELEASE_RATIO || tmpVec2.z >= 0) {
-      release(now, "slowed");
-    } else if (now - swing.startMs > SWING_MAX_MS) {
-      release(now, "timeout");
+    const r = det.sample(now, [tmpVec.x, tmpVec.y, tmpVec.z], [tmpVec2.x, tmpVec2.y, tmpVec2.z], allowed);
+    if (r) {
+      onRelease(now, r);
+      // 同時に 2 本投げない（もう片方の手の振りは捨てる）
+      for (const other of handSlots.slots) if (other !== slot) detectors.get(other)?.reset();
+      return;
     }
   }
 }
 
-function release(now: number, why: string) {
-  const s = swing!;
-  swing = null;
-  const vel: V3 = [s.peakVel[0] * THROW_GAIN, s.peakVel[1] * THROW_GAIN, s.peakVel[2] * THROW_GAIN];
-  lastSwingInfo = `${why} peak=${s.peakSpeed.toFixed(2)}m/s pos=(${s.lastPos.map((v) => v.toFixed(2)).join(",")})`;
-  if (!client || !auth || !isMyTurn() || auth.state.phase !== "aim") return;
+function onRelease(now: number, r: Release) {
+  const vel: V3 = [r.vel[0] * THROW_GAIN, r.vel[1] * THROW_GAIN, r.vel[2] * THROW_GAIN];
+  lastSwingInfo = `${r.why} peak=${r.peakSpeed.toFixed(2)}m/s pos=(${r.pos.map((v) => v.toFixed(2)).join(",")})`;
+  if (!client || !auth || !canThrow()) return;
   if (now - lastLocalThrowMs < LOCAL_THROW_COOLDOWN_MS) return;
   lastLocalThrowMs = now;
   localThrows++;
   predicted = {
-    launch: { pos: s.lastPos, vel },
+    launch: { pos: r.pos, vel },
     sinceMs: now,
     index: auth.state.turn!.index,
     round: auth.state.round,
   };
-  client.sendThrow(s.lastPos, vel);
-  console.log(`[game] throw sent (${why}) speed=${(s.peakSpeed * THROW_GAIN).toFixed(2)}m/s pos=(${s.lastPos.map((v) => v.toFixed(2)).join(",")}) vel=(${vel.map((v) => v.toFixed(2)).join(",")})`);
+  client.sendThrow(r.pos, vel);
+  console.log(`[game] throw sent (${r.why}) speed=${(r.peakSpeed * THROW_GAIN).toFixed(2)}m/s pos=(${r.pos.map((v) => v.toFixed(2)).join(",")}) vel=(${vel.map((v) => v.toFixed(2)).join(",")})`);
 }
 
 // ---- ダーツの描画（権威状態の launch から同じ式で飛行を進める） ----
@@ -924,7 +912,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} swing=${swing ? "yes" : "no"} last=${lastSwingInfo || "-"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} swing=${swinging() ? "yes" : "no"} last=${lastSwingInfo || "-"}`,
     s &&
       `game: phase=${s.phase} round=${s.round} turn=${s.turn?.playerId ?? "-"}#${s.turn?.index ?? "-"} players=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} darts=${s.darts.length} throws=${localThrows}/${acceptedThrows} seq=${s.seq}`,
   ]

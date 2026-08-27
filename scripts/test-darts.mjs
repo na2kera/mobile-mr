@@ -1,12 +1,14 @@
 // Phase 6-2 (06-2-darts) の回帰テスト。`npm run test:darts` で実行する。
 //   1. src/shared/darts-sim.ts — 飛行と採点（純粋関数）
 //   2. src/shared/darts-game.ts — ルール（参加順の手番・3 投・ラウンド・結果・タイムアウト・離脱）
-//   3. server/darts.ts — WebSocket の受け付け・中継・権威状態の配信（Vite dev サーバーを起動して叩く）
+//   3. src/shared/throw-detector.ts — 手のひらの速度から「離した」を検出する状態機械（手番境界を含む）
+//   4. server/darts.ts — WebSocket の受け付け・中継・権威状態の配信（Vite dev サーバーを起動して叩く）
 // テストフレームワークは使わない（04〜06 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import { BOARD, DEFAULT_DARTS, SEGMENTS, dartAt, scoreAt, simulateDart } from "../src/shared/darts-sim.ts";
 import { DartsGame } from "../src/shared/darts-game.ts";
+import { ThrowDetector } from "../src/shared/throw-detector.ts";
 import { launchVelocity } from "../src/shared/volleyball-sim.ts";
 
 const results = [];
@@ -125,6 +127,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("3 人: 手番の b が抜けたら c へ（先頭の a に戻らない）", trio.state.turn?.playerId === "c" && trio.state.round === 0, `turn=${trio.state.turn?.playerId} round=${trio.state.round}`);
   trio.leave("c", 20000);
   check("3 人: 最後の c が抜けたら次のラウンドの a へ", trio.state.turn?.playerId === "a" && trio.state.round === 1, `turn=${trio.state.turn?.playerId} round=${trio.state.round}`);
+  // 結果表示中に勝者が抜けたら winners を決め直す
+  const duo = new DartsGame({ config: { ...DEFAULT_DARTS, rounds: 1 }, settleMs: 0, turnEndMs: 0 });
+  duo.join("a", "A", 0);
+  duo.join("b", "B", 0);
+  for (let i = 0; i < 3; i++) {
+    duo.throw("a", [0, 0, 2], v, 0);
+    duo.tick(1000);
+  }
+  for (let i = 0; i < 3; i++) {
+    duo.throw("b", [0, 0, 2], [0, 0, -0.5], 1000);
+    duo.tick(5000);
+  }
+  check("2 人: result で勝者は a", duo.state.phase === "result" && duo.state.winners?.join() === "a", `phase=${duo.state.phase} winners=${duo.state.winners}`);
+  duo.leave("a", 5000);
+  check("2 人: 結果表示中に勝者 a が抜けたら winners は b", duo.state.phase === "result" && duo.state.winners?.join() === "b", `winners=${duo.state.winners}`);
   // 1 人だけで最後まで
   const solo = new DartsGame({ config: { ...DEFAULT_DARTS, rounds: 1 }, settleMs: 0, turnEndMs: 0 });
   solo.join("s", "Solo", 0);
@@ -135,7 +152,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("1 人でも結果まで進む", solo.state.phase === "result" && solo.state.winners?.join() === "s");
 }
 
-// ================= 3. server =================
+// ================= 3. throw-detector =================
+{
+  const mk = () => new ThrowDetector({ minSpeed: 1.5, releaseRatio: 0.5, maxSwingMs: 800 });
+  const fwd = (k) => [0, 0.5 * k, -2 * k]; // 壁方向（-Z）+ 少し上
+  // 通常の投げ: 加速 → ピーク → 減速で release。速度はピーク、位置は減速検出時
+  let d = mk();
+  check("detector: 遅い動きでは振りにならない", d.sample(0, [0, 0, 2], fwd(0.5), true) === null && d.swing === null);
+  check("detector: 閾値を超えた壁方向の動きで振り開始", d.sample(33, [0, 0, 1.9], fwd(1), true) === null && d.swing !== null);
+  d.sample(66, [0, 0.1, 1.8], fwd(2), true);
+  const r = d.sample(99, [0, 0.2, 1.7], fwd(0.5), true);
+  check("detector: ピークの半分に減速したら release（速度 = ピーク、位置 = 減速検出時）", !!r && r.why === "slowed" && r.vel[2] === -4 && r.pos[1] === 0.2, JSON.stringify(r));
+  check("detector: release 後は振りが消える", d.swing === null);
+  // 壁と反対向きに動いたら backward
+  d = mk();
+  d.sample(0, [0, 0, 2], fwd(1), true);
+  check("detector: 壁から遠ざかったら release（backward）", d.sample(33, [0, 0, 2], [0, 0, 2], true)?.why === "backward");
+  // 長すぎる振りは timeout
+  d = mk();
+  d.sample(0, [0, 0, 2], fwd(1), true);
+  for (let t = 33; t < 800; t += 33) d.sample(t, [0, 0, 2], fwd(1), true);
+  check("detector: 長すぎる振りは timeout で release", d.sample(850, [0, 0, 2], fwd(1), true)?.why === "timeout");
+  // 手を見失ったら lost
+  d = mk();
+  d.sample(0, [0, 0, 2], fwd(1), true);
+  check("detector: 手を見失ったら release（lost）", d.lost()?.why === "lost" && d.lost() === null);
+  // 手番境界: 手番外（allowed=false）に始めた振りは、手番に切り替わっても投げにならない
+  d = mk();
+  check("detector: 手番外では振りを始めない", d.sample(0, [0, 0, 2], fwd(2), false) === null && d.swing === null);
+  check("detector: 手番に切り替わった直後の減速は release にならない（開始前の動作を消費しない）", d.sample(33, [0, 0, 2], fwd(0.5), true) === null && d.swing === null);
+  // 手番中に始めた振りの途中で手番外になったら捨てる
+  d = mk();
+  d.sample(0, [0, 0, 2], fwd(2), true);
+  check("detector: 振りの途中で手番外になったら捨てる", d.sample(33, [0, 0, 2], fwd(0.5), false) === null && d.swing === null);
+  // 新たに手番中に始めた振りは普通に release
+  check("detector: その後の手番中の振りは普通に投げになる", d.sample(66, [0, 0, 2], fwd(2), true) === null && d.sample(99, [0, 0, 2], fwd(0.5), true)?.why === "slowed");
+}
+
+// ================= 4. server =================
 const PORT = 5182;
 const URL_BASE = `wss://localhost:${PORT}/api/darts`;
 const PAGE_ORIGIN = `https://localhost:${PORT}`;

@@ -157,6 +157,8 @@ export class DartsGame {
       this.state.darts = [];
       this.advanceTurn(now, undefined, idx);
     } else {
+      // 結果表示中に勝者が抜けたら、残った人の中で勝者を決め直す（抜けた id が勝者に残らないように）
+      if (this.state.phase === "result") this.state.winners = this.computeWinners();
       this.bump();
     }
   }
@@ -258,14 +260,19 @@ export class DartsGame {
     if (round >= this.config.rounds) {
       s.phase = "result";
       s.turn = null;
-      const best = Math.max(...s.players.map((p) => s.scores[p.id] ?? 0));
-      s.winners = s.players.filter((p) => (s.scores[p.id] ?? 0) === best).map((p) => p.id);
+      s.winners = this.computeWinners();
       this.nextAtMs = now + this.opts.resultMs;
       this.bump(event ?? { kind: "result" });
       return;
     }
     s.round = round;
     this.startTurn(s.players[nextIdx].id, now, event);
+  }
+
+  private computeWinners(): string[] {
+    const s = this.state;
+    const best = Math.max(...s.players.map((p) => s.scores[p.id] ?? 0));
+    return s.players.filter((p) => (s.scores[p.id] ?? 0) === best).map((p) => p.id);
   }
 
   private reset(phase: Phase) {
