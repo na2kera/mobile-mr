@@ -8,6 +8,7 @@ import {
   FINGER_TIPS,
   LANDMARK_COUNT,
   WRIST,
+  isPointingPose,
   placeLandmarks,
   solveHandPlacement,
 } from "./hand-math";
@@ -31,6 +32,8 @@ export type HandResultLike = {
 export type DetectedHand = {
   label: HandLabel;
   points: Vec3[];
+  /** 指差しポーズか（実寸の worldLandmarks で判定。05 の isPointingPose） */
+  pointing: boolean;
   depth: number;
   residual: number;
   handCm: number;
@@ -55,6 +58,12 @@ export type HandSlot = {
   contactsVel: THREE.Vector3[];
   snapContacts: THREE.Vector3[] | null;
   snapMs: number;
+  /**
+   * 指差しポーズ（ヒステリシス付き。3 回連続で判定が揃ったら切り替える。05 と同じ）。
+   * 07 の Surface ペイントが使う
+   */
+  pointing: boolean;
+  pointingStreak: number;
 };
 
 export type HandSlotsOptions = {
@@ -96,6 +105,8 @@ export class HandSlots {
         contactsVel: Array.from({ length: CONTACT_COUNT }, () => new THREE.Vector3()),
         snapContacts: null,
         snapMs: 0,
+        pointing: false,
+        pointingStreak: 0,
       });
     }
   }
@@ -112,6 +123,8 @@ export class HandSlots {
         slot.view.hide();
         slot.ema = null;
         slot.snapContacts = null;
+        slot.pointing = false;
+        slot.pointingStreak = 0;
       }
     }
     for (const slot of this.slots) {
@@ -158,6 +171,7 @@ export class HandSlots {
       detected.push({
         label,
         points: placeLandmarks(landmarks, world, placement, mapping),
+        pointing: isPointingPose(world),
         depth: placement.depth,
         residual: placement.residual,
         handCm: Math.hypot(w12.x - w0.x, w12.y - w0.y, w12.z - w0.z) * 100,
@@ -218,7 +232,14 @@ export class HandSlots {
     } else {
       slot.ema = hand.points;
       slot.snapContacts = null;
+      slot.pointing = false;
+      slot.pointingStreak = 0;
     }
+    slot.pointingStreak = hand.pointing
+      ? Math.max(1, slot.pointingStreak + 1)
+      : Math.min(-1, slot.pointingStreak - 1);
+    if (slot.pointingStreak >= 3) slot.pointing = true;
+    if (slot.pointingStreak <= -3) slot.pointing = false;
     if (slot.label !== hand.label) {
       slot.label = hand.label;
       slot.view.setColor(HAND_COLORS[hand.label]);
@@ -246,7 +267,7 @@ export class HandSlots {
   /** HUD 用の 1 行 */
   describe(): string {
     return this.visible()
-      .map((x) => `${x.label}:${x.depth.toFixed(2)}m hand=${x.handCm.toFixed(1)}cm res=${x.residual.toFixed(3)}`)
+      .map((x) => `${x.label}:${x.depth.toFixed(2)}m hand=${x.handCm.toFixed(1)}cm res=${x.residual.toFixed(3)}${x.pointing ? " point" : ""}`)
       .join(" ");
   }
 }

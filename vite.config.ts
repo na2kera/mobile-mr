@@ -6,6 +6,7 @@ import basicSsl from "@vitejs/plugin-basic-ssl";
 import { sharedRoomServer } from "./server/shared-room.ts";
 import { volleyballServer } from "./server/volleyball.ts";
 import { dartsServer } from "./server/darts.ts";
+import { surfaceServer } from "./server/surface.ts";
 
 // js-aruco2（demos/03 で使用）は top-level this へ代入する古い CJS 形式で、
 // Vite(rolldown) が exports を静的検出できず named import が組めない。
@@ -56,7 +57,7 @@ function jsAruco2Esm(): Plugin {
 // iOS Safari はセンサー/カメラ API が HTTPS 必須のため、dev サーバーを
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
-  plugins: [basicSsl(), jsAruco2Esm(), sharedRoomServer(), volleyballServer(), dartsServer()],
+  plugins: [basicSsl(), jsAruco2Esm(), sharedRoomServer(), volleyballServer(), dartsServer(), surfaceServer()],
   server: {
     host: true,
   },
@@ -95,6 +96,9 @@ export default defineConfig({
         ),
         "demo-06-2-darts": fileURLToPath(
           new URL("./demos/06-2-darts/index.html", import.meta.url),
+        ),
+        "demo-07-surface-mapping": fileURLToPath(
+          new URL("./demos/07-surface-mapping/index.html", import.meta.url),
         ),
       },
     },

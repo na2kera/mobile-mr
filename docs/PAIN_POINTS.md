@@ -322,3 +322,31 @@
 - **どう対処したか**: `src/shared/hand-slots.ts`（`HandSlots` クラス）と `src/shared/text-panel.ts` に抽出し、06-2 だけがこれを使う（05 / 06 の複製は残す）。抽出したことで 06-2 の main.ts は 06 より 300 行ほど短い
 - **SDK ならどう解決するか（案）**: `HandSlots` が `@mobile-mr/hands` の「トラッキング状態の保持」部分の原型。API は `apply(result, now, mapping)` / `update(now)` / `slots[].contactsWorld` / `contactsVel`。深度の解法（`solveHandPlacement`）とスロット管理を分けたのは正解で、SDK でもこの 2 層にする
 - **関連**: `src/shared/hand-slots.ts`、`demos/06-volleyball/main.ts`（抽出元）
+
+## [2026-08-28] Phase 7 / 07-surface-mapping: Room サーバーの共通部分を 4 本目で抽出した（`server/room-server.ts`）
+
+- **何が苦しかったか**: 06-2 で「3 本目」と記録した接続の受け付け（Origin 検証・プロトコルバージョン・Room 設定の一致検証・heartbeat・メンバー 0 の後始末・join / leave）を、07 でまた写すところだった。3 本の差分が「Room 設定のスキーマ」「メッセージのスキーマ」「状態と tick」の 3 点に収まることは 06-2 で確認済みだったので、その 3 点を spec として受け取る `roomServerPlugin(name, spec)` に畳んだ。抽出自体は 1 時間程度で済んだが、04 / 06 / 06-2 のサーバーは「過去のデモ」として残すので、共通部分のバグ修正はしばらく 4 か所に分かれたまま
+- **どう対処したか**: 07 だけが `room-server.ts` を使う。welcome / join / leave の**内容**（何を載せるか）はデモごとに違うので spec 側の責務にし、共通側は接続の生死と Room の生成・破棄だけを持つ。クライアント側（`paint-client.ts`）はまだ 4 本目の写しで未抽出
+- **SDK ならどう解決するか（案）**: `@mobile-mr/room` の server 側はこの spec（config schema / message schema / state factory / handlers）がそのまま原型。client 側は `connectRoom({ path, config, handlers })` に畳む（再接続時に id が変わる・welcome で全状態を置き換える、という規約も込みで）
+- **関連**: `server/room-server.ts`、`server/surface.ts`、`server/darts.ts`（抽出元）
+
+## [2026-08-28] Phase 7 / 07-surface-mapping: 「現実の壁」を Surface にする手段がマーカーしか無く、Surface の範囲は人間が申告するしかない
+
+- **何が苦しかったか**: CONCEPT の Surface Mapping は「現実の壁・床を仮想的な Surface として扱う」だが、WebXR 抜きのスマホブラウザには平面検出が無い（ARKit の plane detection はブラウザに露出しない）。結局「マーカーの座標系 = Surface 座標系」「大きさは `?surfaceW=` × `?surfaceH=` を人間が申告」という A 案になった。壁の実際の端は分からないので Surface の枠は現実の壁と一致しないし、マーカー 1 枚 = Surface 1 枚なので、部屋の 4 面を Surface にするならマーカーを 4 枚貼って 4 枚を追跡する必要がある（`marker-anchor.ts` は 1 マーカー用なので複数枚は未対応）
+- **どう対処したか**: データ構造（`SurfaceDef` / `surfaceId` / UV / `PaintBoard`）は複数 Surface 前提にし、検出だけ 1 マーカーに限定した。UV は Surface 固有なので「端末ごとにマーカーの見え方が違っても同じ場所を指す」ことはヘッドレス 2 ウィンドウで確認できた（`check:surface`）
+- **SDK ならどう解決するか（案）**: `SurfaceProvider` interface（`surfaces(): SurfaceDef[]` + `hitTest(ray)`）を切り、実装を「マーカー由来（今回）」「WebXR plane detection 由来（Quest 等）」「手動キャリブレーション（指差しで 4 隅を指定）」で差し替える。Phase 8 のインクはこの interface だけに依存させる。マルチマーカー追跡は検出 1 回で全 ID を拾って anchor を ID ごとに持てば良く、`marker-detector.ts` は既に全マーカーを返しているので `marker-anchor.ts` 側の拡張で済む
+- **関連**: `src/shared/surface.ts`、`demos/07-surface-mapping/main.ts`（hitSurface）、`src/shared/marker-anchor.ts`
+
+## [2026-08-28] Phase 7 / 07-surface-mapping: 指差しの「視線」は目の位置に依存するが、カメラの位置を目の位置として使っている
+
+- **何が苦しかったか**: 05 と同じく「カメラ（≒目）→ 人差し指の先」の視線で Surface を指す。スマホゴーグルではカメラは顔の中央・目より数 cm 前、片目から見ると数 cm 横にある。指先が Surface から 1m 離れていれば、この視差は Surface 上で数 cm のずれになる（指先が近いほど拡大される）。単眼パススルーでは「指先で隠した場所」が左右の目で違うので、そもそも 1 点に定まらない。PC の合成の手では誤差ゼロ（`check:surface` で目標の円に r=0.300 で乗る）なので、実害は実機でしか分からない
+- **どう対処したか**: 05 と同じ割り切り（カメラ位置を目とする）。ペイントの半径 3cm で吸収できる範囲かは実機で確認する
+- **SDK ならどう解決するか（案）**: `HeadTracker` が「カメラ姿勢」とは別に「利き目の姿勢」（カメラからのオフセットは端末 + ゴーグルのプロファイル）を返し、指差しレイは利き目から張る。利き目の設定は SDK のキャリブレーション項目にする
+- **関連**: `demos/07-surface-mapping/main.ts`（updatePointing）、PAIN_POINTS「単眼パススルーの奥行き矛盾」（Phase 5）
+
+## [2026-08-28] Phase 7 / 07-surface-mapping: ピアアバター + 姿勢送信 + トラッカー初期化が 3 本目になった
+
+- **何が苦しかったか**: `createPeer / removePeer`（頭 + 鼻のアバターと補間）、`sendPoseIfDue`（anchor 逆行列 × カメラ行列を分解して送る）、`pagehide / pageshow` の再接続、`initTracker / onTrackerFailure` の GPU → CPU 再試行が 06 → 06-2 → 07 で 3 本目。差分は「アバターに何を付けるか（手・カーソル）」と「pose に何を載せるか」だけ。クライアント側の `*-client.ts`（再接続 + メッセージ振り分け）も 4 本目
+- **どう対処したか**: 写した（方針どおりデモ内複製は残す）。手スロットのように「3 本目で抽出」の候補だが、アバターの見た目はデモごとに変わるので、抽出するなら「pose の送受信 + 補間 + stale 判定」の層だけにする
+- **SDK ならどう解決するか（案）**: `@mobile-mr/room` client 側に `PeerTracker`（pose の受信 → 補間 → stale で非表示）と `LocalPoseSender`（anchor 座標系での姿勢を間引いて送る）を持たせ、見た目（アバター）は利用者がコールバックで足す。トラッカーの GPU → CPU フォールバックは `@mobile-mr/hands` の `createHandTracker` に内蔵する
+- **関連**: `demos/06-volleyball/main.ts`、`demos/06-2-darts/main.ts`、`demos/07-surface-mapping/main.ts`

@@ -18,8 +18,9 @@
 | [05. Hand Interaction](./demos/05-hand-interaction/) | MediaPipeで手を追跡し、押す・触る・指差す操作を試す | カメラを使えるスマートフォン |
 | [06. MR Volleyball](./demos/06-volleyball/) | マーカーを挟んで向かい合い、手で仮想ボールを打ち合う統合ゲーム（1台ならbotと練習、2台で対戦） | スマートフォン1〜2台、印刷したマーカー |
 | [06-2. MR Darts](./demos/06-2-darts/) | 壁のマーカーに仮想ダーツボードを置き、手を振って投げる。何人でも参加順に3投ずつ、手番・得点・刺さったダーツを共有 | スマートフォン1台以上、壁に貼ったマーカー |
+| [07. Surface Mapping](./demos/07-surface-mapping/) | 壁のマーカーを原点に「Surface」を定義し、指差しでUV座標を指してペイント。Surface ID + UVで全員が同じ場所を見る | スマートフォン1台以上、壁に貼ったマーカー |
 
-Phase 1〜6は完了し（MRバレーボールはiPhone実機とゴーグルで確認済み）、Phase 6-2のMRダーツはPC確認まで済んでいます（実機は未確認）。次はSurface Mapping、MRスプラトゥーン、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
+Phase 1〜6は完了し（MRバレーボールはiPhone実機とゴーグルで確認済み）、Phase 6-2のMRダーツとPhase 7のSurface MappingはPC確認まで済んでいます（実機は未確認）。次はMRスプラトゥーン、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
 
 ## 技術構成
 
@@ -69,7 +70,7 @@ Viteが表示したURLをブラウザで開きます。
 
 ## デモ別の追加準備
 
-### マーカーを使うデモ（03 / 04 / 06 / 06-2）
+### マーカーを使うデモ（03 / 04 / 06 / 06-2 / 07）
 
 1. 開発サーバーを起動します。
 2. `https://localhost:5173/demos/03-marker-anchor/marker.html` を開き、マーカーを倍率100%で印刷します。
@@ -78,7 +79,7 @@ Viteが表示したURLをブラウザで開きます。
 
 04で同じRoomに入る端末は、同じURLを開いてください。既定のRoom名は `demo` です。別のRoomを使う場合は、両端末に同じクエリ（例: `?room=my-room`）を指定します。中継用WebSocketサーバーはViteと同じプロセスで起動するため、別途サーバーを立ち上げる必要はありません。
 
-### Hand Interaction（05）/ MR Volleyball（06）/ MR Darts（06-2）
+### Hand Interaction（05）/ MR Volleyball（06）/ MR Darts（06-2）/ Surface Mapping（07）
 
 MediaPipeのWasmは依存パッケージから配信されます。手の検出モデルは未取得でも公式URLへフォールバックしますが、次のコマンドでローカルへ取得しておくと、実機から外部サイトへアクセスせずに試せます。
 
@@ -107,6 +108,15 @@ npm run fetch:models
 
 手番・採点・ダーツの着地はViteに同居するサーバー（`server/darts.ts`）が決めます。重力（`?gravity=`、既定9.8）とラウンド数はroom内で一致している必要があります。手の速度はトラッカーが過小に出やすいので、届かないときは `?throwGain=` か `?gravity=` で調整してください（実機での較正値は未取得）。
 
+### Surface Mapping（07）
+
+1. マーカーを壁に天地を合わせて貼ります。マーカーを中心にした壁の範囲（既定 1.0m × 0.8m、`?surfaceW=` / `?surfaceH=`）が「Surface」（ID は `wall-<markerId>`）になり、その上の位置は UV（左上 0,0 〜 右下 1,1）で表します。
+2. 参加する全員が同じURLを開いて開始し、まず壁のマーカーを見ます（表示名は `?name=`、05で求めた `?handScale=` も付けてください）。Surfaceの枠と名札が出ます。
+3. 人差し指だけ立てて壁を指すと、視線（目→指先）の先にカーソルが出て、指差しの間その場所に自分の色で描けます（半径 `?paintRadius=`、既定3cm）。描いた点は Surface ID + UV でサーバーに保存され、同じroomの全員に同じ場所で見えます（相手の頭とカーソルも表示）。右上の「全消去」（PCは `c` キー）でroom全員の絵を消します。
+4. 手が取れないときは、画面を押している間だけ視界の中央に描けます（ゴーグル無しの手持ち確認用。`?gaze=1` で常時）。
+
+ペイントの検証・順序・保持はViteに同居するサーバー（`server/surface.ts`。接続の共通部分は今回抽出した `server/room-server.ts`）が持ちます。マーカーとSurfaceの大きさはroom内で一致している必要があります。
+
 ## コマンド
 
 | コマンド | 内容 |
@@ -120,6 +130,8 @@ npm run fetch:models
 | `npm run check:volley` | MR Volleyballのブラウザ経路（マーカー→コート変換・当たり判定・予測・2ウィンドウ対戦）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
 | `npm run test:darts` | MR Dartsの飛行・採点・ルール・サーバーの回帰テスト |
 | `npm run check:darts` | MR Dartsのブラウザ経路（マーカー→ボード変換・振りからの投げ検出・手番の交代・2ウィンドウ）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
+| `npm run test:surface` | Surface MappingのUV変換・視線とSurfaceの交点・ペイントの検証・サーバーの回帰テスト |
+| `npm run check:surface` | Surface Mappingのブラウザ経路（マーカー→Surface変換・指差しの交点・paintの配信・2ウィンドウで同じ絵）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
 | `npm run fetch:models` | Hand Landmarkerモデルをローカルへ取得 |
 
 ## ディレクトリ構成
@@ -127,8 +139,8 @@ npm run fetch:models
 ```text
 mobile-mr/
 ├── demos/                  # フェーズごとの独立したデモページ
-├── src/shared/             # デモ間で共有する処理（マーカー、手トラッキング、パススルー、開始フロー、通信プロトコル、バレーボール／ダーツの物理・ルール）
-├── server/                 # Viteに同居するWebSocketサーバー（04の中継、06/06-2の対戦サーバー）
+├── src/shared/             # デモ間で共有する処理（マーカー、手トラッキング、パススルー、開始フロー、通信プロトコル、バレーボール／ダーツの物理・ルール、Surface/ペイント）
+├── server/                 # Viteに同居するWebSocketサーバー（04の中継、06/06-2の対戦サーバー、07のペイントサーバー、共通部分の room-server）
 ├── scripts/                # 回帰テスト、モデル取得
 ├── public/                 # 静的アセット
 ├── docs/CONCEPT.md         # 構想、技術方針、ロードマップ
