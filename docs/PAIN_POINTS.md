@@ -357,3 +357,17 @@
 - **どう対処したか**: 上記（切り詰め + snapshot 再配信 + 空 Room の猶予 + 人数上限 8）。CanvasTexture は部分更新できないので、解像度を 512px/m に下げて毎フレームの転送量を抑えた（`?surfacePx=` で調整）
 - **SDK ならどう解決するか（案）**: `SurfaceState` は「ラスタ（塗った結果）を権威として持ち、差分（矩形 or ストローク）を配って一定間隔でラスタの key frame を送る」設計にする。Phase 8 のインク（陣取り = 塗られた面積の集計）はラスタでないと計算できないので、そこで移行する。テクスチャの部分更新（`copyTextureToTexture` / WebGPU の `writeTexture`）も SDK 側で隠す
 - **関連**: `src/shared/surface-paint.ts`（MAX_STROKES / TRIM_TO）、`server/room-server.ts`（emptyRoomTtlMs / maxMembers）、`demos/07-surface-mapping/surface-view.ts`
+
+## [2026-08-29] Phase 8 / 08-splatoon: 「壁面 Z=0」前提の Surface を床へ広げるのに、07 の SurfaceDef では足りなかった
+
+- **何が苦しかったか**: 07 の `SurfaceDef` は「マーカー座標系の Z=0 面」を暗黙の前提にしていて（`raySurfaceHit` も z で解く）、床（Y=-floorDrop の水平面）を足すには向き（origin / xAxis / yAxis / normal）を持つ `SurfaceFrame` を別に作る必要があった。UV の規約（左上 0,0 → 右下 1,1）は共通にしたが、床の「上」をどちらにするか（壁際 = v=0 にした）は人が決めるしかない
+- **どう対処したか**: `splatoon-sim.ts` に `SurfaceFrame` と一般の面の交点 / 放物線の着弾を書いた。07 の `surface.ts` はそのまま（過去のデモ）。着弾は面ごとの 2 次方程式で解析的に解き、表側から入る根だけ採用する
+- **SDK ならどう解決するか（案）**: 最初から `SurfaceFrame`（向き付き）を Surface の定義にし、「壁面 Z=0」は特殊ケースとして扱う。Surface の集合（フィールド）とレイ / 放物線のヒットテストを SDK の `surfaces` 層に置く
+- **関連**: `src/shared/splatoon-sim.ts`（fieldSurfaces / rayFrameHit / simulateInk）、`src/shared/surface.ts`
+
+## [2026-08-29] Phase 8 / 08-splatoon: 手の形（グー / パー）の切り替えを「イベント」にするには、ヒステリシスと時刻が要る
+
+- **何が苦しかったか**: MediaPipe は毎フレームの形しか返さない。「グーになった時刻からチャージ、パーに変わった瞬間に発射」には (1) 形の判定が 1 フレーム揺れても発射しないヒステリシス（3 フレーム連続）、(2) 形が変わった時刻（`shapeSinceMs`）の保持、(3) 手を見失ったときの中止、の 3 つを `HandSlots` に足す必要があった。06-2 の「離した」（速度）と同じく、トラッカーの出力を時系列で見て初めてジェスチャになる。3 フレーム = 約 100ms の遅れは発射位置のずれとして出る
+- **どう対処したか**: `HandSlot.shape / shapeSinceMs` を追加（`handShape()` は `hand-math.ts`）。合成の手（`fake-hands.ts` の "fist" / "open"）で Node テストとヘッドレスの両方を回した。グーが実機で安定して取れるかは未確認
+- **SDK ならどう解決するか（案）**: `@mobile-mr/hands` にジェスチャ層（`onShape(shape, since)` / `onRelease` / `onSwing`）を持たせ、ヒステリシスと時刻をそこで扱う。06 の hit・06-2 の throw・07 の point・08 の fist → open がすべてこの層に載る
+- **関連**: `src/shared/hand-slots.ts`、`src/shared/hand-math.ts`（isFistPose / isOpenPose / handShape）、`demos/08-splatoon/main.ts`（updateCharge）

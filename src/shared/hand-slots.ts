@@ -8,11 +8,12 @@ import {
   FINGER_TIPS,
   LANDMARK_COUNT,
   WRIST,
+  handShape,
   isPointingPose,
   placeLandmarks,
   solveHandPlacement,
 } from "./hand-math.ts";
-import type { Vec3, ViewMapping } from "./hand-math.ts";
+import type { HandShape, Vec3, ViewMapping } from "./hand-math.ts";
 
 export const HAND_COLORS = { R: 0x8ab4f8, L: 0xffa657, "-": 0xe8eaed } as const;
 export type HandLabel = keyof typeof HAND_COLORS;
@@ -34,6 +35,8 @@ export type DetectedHand = {
   points: Vec3[];
   /** 指差しポーズか（実寸の worldLandmarks で判定。05 の isPointingPose） */
   pointing: boolean;
+  /** 手の形（グー / パー / 指差し / その他。08 が使う） */
+  shape: HandShape;
   depth: number;
   residual: number;
   handCm: number;
@@ -64,6 +67,12 @@ export type HandSlot = {
    */
   pointing: boolean;
   pointingStreak: number;
+  /** 手の形（3 回連続で同じ判定になったら切り替える。08 のチャージ → 発射が使う） */
+  shape: HandShape;
+  shapeCandidate: HandShape;
+  shapeStreak: number;
+  /** shape がいまの値になった時刻 [ms]（チャージ時間の計測用） */
+  shapeSinceMs: number;
 };
 
 export type HandSlotsOptions = {
@@ -107,6 +116,10 @@ export class HandSlots {
         snapMs: 0,
         pointing: false,
         pointingStreak: 0,
+        shape: "other",
+        shapeCandidate: "other",
+        shapeStreak: 0,
+        shapeSinceMs: 0,
       });
     }
   }
@@ -125,6 +138,9 @@ export class HandSlots {
         slot.snapContacts = null;
         slot.pointing = false;
         slot.pointingStreak = 0;
+        slot.shape = "other";
+        slot.shapeCandidate = "other";
+        slot.shapeStreak = 0;
       }
     }
     for (const slot of this.slots) {
@@ -172,6 +188,7 @@ export class HandSlots {
         label,
         points: placeLandmarks(landmarks, world, placement, mapping),
         pointing: isPointingPose(world),
+        shape: handShape(world),
         depth: placement.depth,
         residual: placement.residual,
         handCm: Math.hypot(w12.x - w0.x, w12.y - w0.y, w12.z - w0.z) * 100,
@@ -234,6 +251,20 @@ export class HandSlots {
       slot.snapContacts = null;
       slot.pointing = false;
       slot.pointingStreak = 0;
+      slot.shape = "other";
+      slot.shapeCandidate = "other";
+      slot.shapeStreak = 0;
+      slot.shapeSinceMs = now;
+    }
+    if (hand.shape === slot.shapeCandidate) {
+      slot.shapeStreak++;
+    } else {
+      slot.shapeCandidate = hand.shape;
+      slot.shapeStreak = 1;
+    }
+    if (slot.shapeStreak >= 3 && slot.shape !== slot.shapeCandidate) {
+      slot.shape = slot.shapeCandidate;
+      slot.shapeSinceMs = now;
     }
     slot.pointingStreak = hand.pointing
       ? Math.max(1, slot.pointingStreak + 1)

@@ -497,7 +497,7 @@ Multi-user MR
 
 ## 9. 現在地
 
-Phase 6（MRバレーボール）まで完了。Phase 6-2（MR ダーツ）と Phase 7（Surface Mapping）は PC 確認まで。次は Phase 8（MRスプラトゥーン）。技術スタックは Vite / TypeScript / Three.js。
+Phase 7（Surface Mapping）まで完了。Phase 6-2（MR ダーツ）と Phase 8（MRスプラトゥーン）は PC 確認まで。次は Phase 9（人物対応）。技術スタックは Vite / TypeScript / Three.js。
 
 - Phase 1 完了（2026-08-13, `demos/01-stereo-box/`）: 左右2眼レンダリング + ジャイロ頭追従 + 全画面化。iPhone 実機 + ゴーグルで確認済み
 - Phase 2 完了（2026-08-14, `demos/02-passthrough/`）: 背面超広角カメラの映像を `VideoTexture` → `scene.background` で両眼の背景に表示。縦横比補正・回転追従・解像度指定込み。iPhone 実機で確認済み
@@ -523,7 +523,10 @@ Phase 6（MRバレーボール）まで完了。Phase 6-2（MR ダーツ）と P
 
 - Phase 7 PC 確認まで（2026-08-28, `demos/07-surface-mapping/`、**実機未確認**）: 壁のマーカー座標系をそのまま Surface（`wall-<markerId>`、面 Z=0、`?surfaceW=`×`?surfaceH=` の矩形）にし、UV（左上 0,0 〜 右下 1,1）で位置を表す（`src/shared/surface.ts`）。05 の指差し（目 → 指先の視線）と面の交点でカーソル・ペイント。サーバー権威（`server/surface.ts`）で `paint { surfaceId, uv, radius }` を検証・配信し、入室時に全ストロークの snapshot を渡す。Room サーバーの共通部分（Origin 検証・バージョン / 設定の一致・heartbeat・join/leave）は 4 本目でようやく `server/room-server.ts` に抽出した（04/06/06-2 のサーバーはそのまま）。手が使えないときの保険として画面長押しで視線の先にペイント。複数マーカー → 複数 Surface はデータ構造上は対応済みだが、検出は 1 マーカー（次に必要になったときに）
 
-残りは Phase 8 以降（MRスプラトゥーン → 人物対応 → SDK 化）の順番で進める。
+- Phase 7 実機確認済み（2026-08-29, iPhone）: パススルー・マーカー・指差しペイントが動作
+- Phase 8 PC 確認まで（2026-08-29, `demos/08-splatoon/`、**実機未確認**）: 壁マーカー 1 枚で壁（Z=0）と床（Y=-floorDrop）の 2 枚の Surface（向き付きの `SurfaceFrame`、`src/shared/splatoon-sim.ts`）。グー（4 指曲がり）でチャージ、パー（4 指伸び）で発射。向きは「目 → 手のひら」の視線（06-2 の教訓）。放物線と面の交点を解析的に解いて着弾を決め、サーバーが 2cm セルの格子（`InkGrid`）でチームの塗りと得点を持つ（07 の痛点「ストロークの列ではなくラスタを権威に」をここで実現）。参加順に 2 チーム交互、90 秒で塗り面積を競う。手が使えないときは画面長押し → 視線の先へ発射
+
+残りは Phase 9 以降（人物対応 → SDK 化）の順番で進める。
 
 ## 10. 開発環境の決定事項（2026-08-11）
 
