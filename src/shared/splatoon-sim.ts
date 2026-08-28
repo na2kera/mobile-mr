@@ -158,11 +158,14 @@ export type InkLanding = {
   point: V3;
   /** 着弾時刻 [s] */
   hitT: number;
+  /** 矩形の中に当たった（塗る）か。false は面の延長（現実の壁・床）に当たって消えるだけ */
+  hit: boolean;
 };
 
 /**
- * 発射位置 pos・速度 vel のインクが最初に当たる Surface（表側から、矩形の中）。
- * 面の方程式 n·x = n·o に放物線を代入した 2 次式を解く。当たらなければ null（maxFlightSec で打ち切り）
+ * 発射位置 pos・速度 vel のインクが最初に当たる Surface（表側から）。矩形の中なら hit=true（塗る）、
+ * 外なら hit=false（現実の壁・床の延長に当たって消える。突き抜けて飛び続けないため）。
+ * 面の方程式 n·x = n·o に放物線を代入した 2 次式を解く。どの面にも届かなければ null（maxFlightSec で打ち切り）
  */
 export function simulateInk(pos: V3, vel: V3, surfaces: readonly SurfaceFrame[], cfg: FieldConfig): InkLanding | null {
   let best: InkLanding | null = null;
@@ -189,8 +192,7 @@ export function simulateInk(pos: V3, vel: V3, surfaces: readonly SurfaceFrame[],
       if (!(dot(vt, n) < 0)) continue;
       const point = inkAt(pos, vel, t, cfg.gravity);
       const uv = framePointToUv(s, point);
-      if (!uvInside(uv)) continue;
-      if (!best || t < best.hitT) best = { surfaceId: s.id, uv, point, hitT: t };
+      if (!best || t < best.hitT) best = { surfaceId: s.id, uv, point, hitT: t, hit: uvInside(uv) };
       break;
     }
   }

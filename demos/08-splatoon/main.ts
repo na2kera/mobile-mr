@@ -534,7 +534,7 @@ function onState(state: GameSnapshot) {
   if (state.grids) {
     for (const [id, enc] of Object.entries(state.grids)) inkViews.get(id)?.redrawFromGrid(enc, fieldCfg.cellM);
     // 格子で描き直したので、着弾済みの玉の再描画は要らない
-    for (const s of state.shots) if (s.landing) splatted.add(s.seq);
+    for (const s of state.shots) if (s.landing?.hit) splatted.add(s.seq);
   }
   // 発射一覧の同期（再接続直後の取りこぼし用。既知の seq は無視）
   for (const s of state.shots) {
@@ -593,11 +593,14 @@ function connect() {
       onPeerPose,
       onShot: (shot, serverT) => {
         const now = performance.now();
+        let launchLocalMs: number | undefined;
         if (shot.by === selfId) {
           shotsAccepted++;
+          // 自分の玉は予測の発射時刻を引き継ぐ（RTT ぶん後退しないように）
+          launchLocalMs = predicted?.sinceMs;
           clearPredicted();
         }
-        addShot(shot, serverT, now);
+        addShot(shot, serverT, now, launchLocalMs);
       },
       onRejected: (reason) => {
         lastRejectReason = reason;
@@ -654,8 +657,12 @@ function round3(v: number): number {
 // ---- チャージ → 発射 ----
 // グー（slot.shape === "fist"）になった時刻から数えてチャージ、パー（"open"）に変わった瞬間に発射。
 // 手が取れないときは画面 / Space の長押しで同じことを視線（画面中央）で行う
-type Charging = { slot: HandSlot | null; sinceMs: number };
+type Charging = { slot: HandSlot | null; sinceMs: number; lastPalm: THREE.Vector3; lostSinceMs: number };
 let charging: Charging | null = null;
+/** チャージ中に手を見失ってからこの時間 [ms] は待つ（パーに開く動きで一瞬落ちることがある） */
+const CHARGE_LOST_GRACE_MS = 400;
+/** 見失ったままでもチャージがこれ以上なら「開いて見失った」とみなして発射 */
+const CHARGE_FIRE_ON_LOST = 0.3;
 let lastShotMs = -Infinity;
 let holdPressed = false;
 let lastShapeInfo = "";
@@ -694,31 +701,49 @@ function fire(originWorld: THREE.Vector3, charge: number, now: number, how: stri
   shotsSent++;
   clearPredicted();
   predicted = { pos, vel, radius, sinceMs: now, landing: simulateInk(pos, vel, surfaces, fieldCfg), mesh: null };
-  console.log(`[game] shot sent (${how}) charge=${charge.toFixed(2)} speed=${speed.toFixed(2)} r=${radius.toFixed(2)} pos=(${pos.join(",")}) vel=(${vel.join(",")}) land=${predicted.landing ? `${predicted.landing.surfaceId} ${predicted.landing.uv.map((v) => v.toFixed(2)).join(",")}` : "miss"}`);
+  console.log(`[game] shot sent (${how}) charge=${charge.toFixed(2)} speed=${speed.toFixed(2)} r=${radius.toFixed(2)} pos=(${pos.join(",")}) vel=(${vel.join(",")}) land=${predicted.landing?.hit ? `${predicted.landing.surfaceId} ${predicted.landing.uv.map((v) => v.toFixed(2)).join(",")}` : "miss"}`);
 }
 
 function updateCharge(now: number) {
-  // 1) 手の形。チャージ中の手が消えたら中止
+  // 1) 手の形。チャージ中の手を見失ったら少し待ち、戻らなければチャージ量に応じて発射か中止
   if (charging?.slot) {
     const slot = charging.slot;
-    if (!slot.view.visible || !slot.ema) {
-      charging = null;
-    } else if (slot.shape === "open") {
-      const c = currentCharge(now) ?? 0;
-      charging = null;
-      fire(slot.contactsWorld[PALM_CONTACT], c, now, "hand");
+    const visible = slot.view.visible && !!slot.ema;
+    if (visible) {
+      charging.lostSinceMs = -1;
+      charging.lastPalm.copy(slot.contactsWorld[PALM_CONTACT]);
+      if (slot.shape === "open") {
+        const c = currentCharge(now) ?? 0;
+        charging = null;
+        fire(slot.contactsWorld[PALM_CONTACT], c, now, "hand");
+      }
+    } else {
+      if (charging.lostSinceMs < 0) charging.lostSinceMs = now;
+      if (now - charging.lostSinceMs > CHARGE_LOST_GRACE_MS) {
+        const c = currentCharge(now) ?? 0;
+        const palm = charging.lastPalm;
+        charging = null;
+        if (c >= CHARGE_FIRE_ON_LOST) {
+          fire(palm, c, now, "hand-lost");
+        } else {
+          flash = { text: "手を見失いました", untilMs: now + 1200 };
+        }
+      }
     }
   }
   if (!charging) {
     for (const slot of handSlots.slots) {
       if (slot.view.visible && slot.ema && slot.shape === "fist" && canShoot()) {
-        charging = { slot, sinceMs: slot.shapeSinceMs };
+        // 発射できる状態になってからのグーだけ数える（マーカー検出前から握っていても満タンにしない）
+        charging = { slot, sinceMs: now, lastPalm: slot.contactsWorld[PALM_CONTACT].clone(), lostSinceMs: -1 };
         break;
       }
     }
   }
-  // 2) 長押し（視線）。手のチャージ中は無視
-  if (!charging && holdPressed && canShoot()) charging = { slot: null, sinceMs: now };
+  // 2) 長押し（視線）。手のチャージ中・発射直後は無視
+  if (!charging && holdPressed && canShoot() && now - lastShotMs >= LOCAL_SHOT_COOLDOWN_MS) {
+    charging = { slot: null, sinceMs: now, lastPalm: new THREE.Vector3(), lostSinceMs: -1 };
+  }
   if (charging && charging.slot === null && !holdPressed) {
     const c = currentCharge(now) ?? 0;
     charging = null;
@@ -775,9 +800,9 @@ function clearPredicted() {
   predicted = null;
 }
 
-function addShot(shot: Shot, serverT: number, recvMs: number) {
+function addShot(shot: Shot, serverT: number, recvMs: number, launchLocalMs?: number) {
   const mesh = createInkMesh(shot.team, shot.radius);
-  shots.set(shot.seq, { shot, launchLocalMs: localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
+  shots.set(shot.seq, { shot, launchLocalMs: launchLocalMs ?? localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
 }
 
 function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null): boolean {
@@ -797,13 +822,14 @@ function updateShots(now: number) {
     const { shot } = live;
     const elapsed = (now - live.launchLocalMs) / 1000;
     const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing);
-    if (landed && shot.landing && !splatted.has(seq)) {
+    if (landed && shot.landing?.hit && !splatted.has(seq)) {
       splatted.add(seq);
       inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.team);
     }
     if (elapsed > fieldCfg.maxFlightSec + 1) {
       live.mesh.removeFromParent();
       shots.delete(seq);
+      splatted.delete(seq);
     }
   }
   if (predicted) {

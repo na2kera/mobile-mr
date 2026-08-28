@@ -62,7 +62,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("山なりで床へ", l3 && l3.surfaceId === FLOOR_ID && l3.hitT > 1);
   // 範囲外（壁の横）は当たらず、床の範囲も外れれば null
   const l4 = simulateInk([3, 0, 0.5], [0, 0, -5], [wall, floor], cfg);
-  check("範囲外は null", l4 === null);
+  check("矩形の外で面を横切ると hit=false の着弾（突き抜けない）", l4 && l4.hit === false && l4.surfaceId === WALL_ID && near(l4.hitT, 0.1));
+  const l4b = simulateInk([0, 3, 2], [0, 5, 0], [wall, floor], cfg);
+  check("どの面にも届かなければ null", l4b === null);
   // 壁の裏（z<0）から +Z へ撃っても壁には当たらない（表側からだけ）
   const l5 = simulateInk([0, 0, -1], [0, 0, 5], [wall, floor], cfg);
   check("壁の裏側からは当たらない", l5 === null || l5.surfaceId !== WALL_ID);
@@ -103,10 +105,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 3. game =================
 {
-  const g = new SplatoonGame({ matchSec: 10, resultSec: 2, wallW: 2, wallH: 1 });
+  const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1 });
   check("開始前は tick しても何も起きない", g.tick(0).length === 0);
   const e1 = g.join("p1", "A", 1000);
-  check("最初の入室で試合開始（A チーム）", e1[0]?.kind === "start" && g.players.get("p1").team === 1 && g.phase === "play" && g.phaseEndsAt === 11000);
+  check("最初の入室で試合開始（A チーム）", e1[0]?.kind === "start" && g.players.get("p1").team === 1 && g.phase === "play" && g.phaseEndsAt === 31000);
   g.join("p2", "B", 1100);
   g.join("p3", "C", 1200);
   check("参加順に交互（B → A）", g.players.get("p2").team === 2 && g.players.get("p3").team === 1);
@@ -115,25 +117,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("少ない方のチームへ（A が抜けたので A）", g.players.get("p4").team === 1);
 
   const max = chargeToShot(1, g.config);
-  const shot = g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.1, 2000);
+  // レート制限（4/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
+  let tm = 2000;
+  const next = () => (tm += 1100);
+  check("発射: pose が届く前は拒否", g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.1, next()) === null && g.lastRejectReason === "no pose yet");
+  g.updatePose("p2", [0, 0.1, 2.3]);
+  g.updatePose("p3", [0, 0, 2.3]);
+  g.updatePose("p4", [1.5, 0, 0.8]);
+  check("発射: 頭から 1.2m 以上離れた位置からは拒否", g.shoot("p2", [0, 0, 0.3], [0, 0, -5], 0.1, next()) === null && g.lastRejectReason === "too far from head");
+  const shot = g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.1, next());
   check("発射: 受理され着弾（壁）と格子への塗りが起きる", shot && shot.team === 2 && shot.landing?.surfaceId === WALL_ID && g.scores()[1] > 0);
-  check("発射: 速すぎる", g.shoot("p2", [0, 0, 2], [0, 0, -(max.speed * 1.5)], 0.1, 2001) === null && g.lastRejectReason === "bad velocity/radius");
-  check("発射: 半径が大きすぎる", g.shoot("p2", [0, 0, 2], [0, 0, -3], max.radius * 2, 2002) === null);
-  check("発射: 壁の裏（z<0）から", g.shoot("p2", [0, 0, -1], [0, 0, 3], 0.1, 2003) === null && g.lastRejectReason === "bad position");
-  check("発射: 知らないプレイヤー", g.shoot("zz", [0, 0, 2], [0, 0, -3], 0.1, 2004) === null);
+  check("発射: 速すぎる", g.shoot("p2", [0, 0, 2], [0, 0, -(max.speed * 1.5)], 0.1, next()) === null && g.lastRejectReason === "bad velocity/radius");
+  check("発射: 半径が大きすぎる", g.shoot("p2", [0, 0, 2], [0, 0, -3], max.radius * 2, next()) === null && g.lastRejectReason === "bad velocity/radius");
+  g.updatePose("p2", [0, 0, -0.5]);
+  check("発射: 壁の裏（z<0）から", g.shoot("p2", [0, 0, -1], [0, 0, 3], 0.1, next()) === null && g.lastRejectReason === "bad position");
+  g.updatePose("p2", [0, 0.1, 2.3]);
+  check("発射: 知らないプレイヤー", g.shoot("zz", [0, 0, 2], [0, 0, -3], 0.1, next()) === null);
   let ok = 0;
-  for (let i = 0; i < SHOT_RATE_PER_SEC + 3; i++) if (g.shoot("p3", [0, 0, 2], [0, 0, -3], 0.1, 3000 + i)) ok++;
+  const t0 = next();
+  for (let i = 0; i < SHOT_RATE_PER_SEC + 3; i++) if (g.shoot("p3", [0, 0, 2], [0, 0, -3], 0.1, t0 + i)) ok++;
   check(`発射: 1 人 ${SHOT_RATE_PER_SEC}/s まで`, ok === SHOT_RATE_PER_SEC && g.lastRejectReason === "rate limited");
-  const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.1, 5000);
-  check("外れた発射も受理される（landing=null、塗らない）", miss && miss.landing === null);
+  const scoreBefore = g.scores().join();
+  const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.1, next());
+  check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && g.scores().join() === scoreBefore);
 
   const before = g.scores();
-  const ev = g.tick(11000);
+  check("ここまでの発射は試合時間内", tm < 31000, `${tm}`);
+  const ev = g.tick(31000);
   check("時間切れで result（勝者は多い方）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winner === (before[0] > before[1] ? 1 : 2));
-  check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.1, 11500) === null && g.lastRejectReason === "not playing");
-  const ev2 = g.tick(13000);
+  check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.1, 31500) === null && g.lastRejectReason === "not playing");
+  const ev2 = g.tick(33000);
   check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && g.scores()[0] === 0 && g.scores()[1] === 0);
-  const snap = g.snapshot(13000, true);
+  const snap = g.snapshot(33000, true);
   check("snapshot: grids は壁と床、totalCells は両方の和", Object.keys(snap.grids).length === 2 && snap.totalCells === snap.grids.wall.length + snap.grids.floor.length);
 }
 
@@ -198,16 +213,24 @@ try {
   check("入室で state が配られる", stA !== null);
 
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.1 });
+  const rejNoPose = await b.waitFor((m) => m.type === "rejected");
+  check("pose を送る前の shot は拒否（発射位置の検証に頭の位置が要る）", rejNoPose && /pose/.test(rejNoPose.reason));
+  b.send({ type: "pose", pos: [0, 0.1, 2.3], quat: [0, 0, 0, 1], tracking: true });
+  await sleep(50);
+  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.1 });
   const sa = await a.waitFor((m) => m.type === "shot");
   check("shot が全員に配られ、着弾（壁）とチームが付く", sa && sa.shot.by === "p2" && sa.shot.team === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.1 });
-  const rej = await b.waitFor((m) => m.type === "rejected");
-  check("不正な shot は本人に rejected", rej && /velocity/.test(rej.reason));
+  const rej = await b.waitFor((m) => m.type === "rejected" && /velocity/.test(m.reason));
+  check("不正な shot は本人に rejected", rej !== null);
+  const bigField = connect({ ...cfg, room: "big", wallW: "20", wallH: "20", floorDepth: "20" });
+  const errBig = await bigField.waitFor((m) => m.type === "error");
+  check("格子が大きすぎるフィールドは拒否", errBig && /不正/.test(errBig.reason));
   const st = await a.waitFor((m) => m.type === "state" && m.state.scores[1] > 0, 2500);
   check("state に得点が反映される（B が塗った）", st !== null && st.state.scores[0] === 0);
 
   b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, charge: 0.5 });
-  const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2");
+  const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.charge !== undefined);
   check("pose が中継され quat は正規化・charge 付き", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.charge === 0.5);
 
   const bad = connect({ ...cfg, gravity: "9.8" });

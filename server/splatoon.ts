@@ -14,14 +14,21 @@ import {
 } from "../src/shared/splatoon-protocol.ts";
 import { SplatoonGame } from "../src/shared/splatoon-game.ts";
 import { DEFAULT_FIELD, type V3 } from "../src/shared/splatoon-sim.ts";
+import { RateLimiter } from "../src/shared/surface-paint.ts";
 
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const TICK_MS = 100;
 const IDLE_BROADCAST_MS = 1000;
 const MAX_MEMBERS = 8;
 const MAX_ROOMS = 64;
+/** クライアントの ?sendHz= の max 60 に余裕を持たせる */
+const POSE_RATE_PER_SEC = 90;
+/** 全員切断してから Room を捨てるまでの猶予（1 人プレイ中の瞬断・bfcache で試合が消えないように） */
+const EMPTY_ROOM_TTL_MS = 60 * 1000;
+/** 格子のセル数の上限（壁 + 床）。超える大きさは拒否（scores の走査と encode の転送量のため） */
+const MAX_CELLS = 250_000;
 
-type State = { game: SplatoonGame; lastBroadcastMs: number };
+type State = { game: SplatoonGame; lastBroadcastMs: number; poseRate: RateLimiter };
 type Ctx = RoomContext<SplatoonRoomConfig, State>;
 
 function parseClientMessage(data: RawData): ClientMessage | null {
@@ -90,6 +97,8 @@ function parseRoomConfig(url: URL): SplatoonRoomConfig | null {
   const gravity = num("gravity", DEFAULT_FIELD.gravity, 0, 30);
   const matchSec = num("matchSec", DEFAULT_FIELD.matchSec, 10, 600);
   if (wallW === null || wallH === null || floorDrop === null || floorDepth === null || gravity === null || matchSec === null) return null;
+  const cells = (wallW * wallH + wallW * floorDepth) / (DEFAULT_FIELD.cellM * DEFAULT_FIELD.cellM);
+  if (cells > MAX_CELLS) return null;
   return { markerId, markerMm, wallW, wallH, floorDrop, floorDepth, gravity, matchSec };
 }
 
@@ -111,10 +120,11 @@ export function splatoonServer() {
     parseConfig: parseRoomConfig,
     sameConfig: (a, b) => describeConfig(a) === describeConfig(b),
     describeConfig,
-    configErrorReason: "Room 設定 (markerId / markerMm / wallW / wallH / floorDrop / floorDepth / gravity / matchSec) が不正です",
+    configErrorReason: "Room 設定 (markerId / markerMm / wallW / wallH / floorDrop / floorDepth / gravity / matchSec) が不正です（フィールドが大きすぎる場合も）",
     parseMessage: parseClientMessage,
     maxMembers: MAX_MEMBERS,
     maxRooms: MAX_ROOMS,
+    emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
     createState: (_name, c) => ({
       game: new SplatoonGame({
         wallW: c.wallW,
@@ -125,6 +135,7 @@ export function splatoonServer() {
         matchSec: c.matchSec,
       }),
       lastBroadcastMs: -Infinity,
+      poseRate: new RateLimiter(POSE_RATE_PER_SEC),
     }),
     tickMs: TICK_MS,
     onTick(room: Ctx, now) {
@@ -155,6 +166,8 @@ export function splatoonServer() {
     onMessage(room: Ctx, id, msg, now) {
       const { game } = room.state;
       if (msg.type === "pose") {
+        if (!room.state.poseRate.allow(id, now)) return;
+        game.updatePose(id, msg.pos);
         const { type: _type, ...pose } = msg;
         room.broadcast({ type: "pose", id, ...pose } satisfies ServerMessage, id);
       } else if (msg.type === "shot") {
@@ -163,7 +176,7 @@ export function splatoonServer() {
           room.broadcast({ type: "shot", shot, t: now } satisfies ServerMessage);
           const l = shot.landing;
           console.log(
-            `[splatoon] ${id} shot #${shot.seq}: ${l ? `${l.surfaceId} uv=(${l.uv.map((v) => v.toFixed(2)).join(",")}) t=${l.hitT.toFixed(2)}` : "miss"} r=${shot.radius.toFixed(2)} from=(${msg.pos.map((v) => v.toFixed(2)).join(",")}) vel=(${msg.vel.map((v) => v.toFixed(2)).join(",")})`,
+            `[splatoon] ${id} shot #${shot.seq}: ${l?.hit ? `${l.surfaceId} uv=(${l.uv.map((v) => v.toFixed(2)).join(",")}) t=${l.hitT.toFixed(2)}` : "miss"} r=${shot.radius.toFixed(2)} from=(${msg.pos.map((v) => v.toFixed(2)).join(",")}) vel=(${msg.vel.map((v) => v.toFixed(2)).join(",")})`,
           );
         } else if (game.lastRejectReason !== "rate limited") {
           console.log(`[splatoon] ${id} shot rejected: ${game.lastRejectReason}`);
@@ -173,6 +186,7 @@ export function splatoonServer() {
     },
     onLeave(room: Ctx, id, now) {
       room.state.game.leave(id);
+      room.state.poseRate.forget(id);
       room.broadcast({ type: "leave", id } satisfies ServerMessage);
       broadcastState(room, now, false);
     },

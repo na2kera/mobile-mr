@@ -61,6 +61,8 @@ export type GameSnapshot = {
 export const SHOT_RATE_PER_SEC = 4;
 /** 発射位置がこの距離 [m] を超えて壁から離れていたら不正 */
 export const MAX_SHOT_DIST_M = 6;
+/** 発射位置は直近の頭の位置からこの距離 [m] 以内（腕の長さ + 手トラッキングの誤差） */
+export const MAX_SHOT_FROM_HEAD_M = 1.2;
 
 export class SplatoonGame {
   readonly config: FieldConfig;
@@ -72,6 +74,8 @@ export class SplatoonGame {
   private seq = 0;
   private shots: Shot[] = [];
   private readonly shotTimes = new Map<string, number[]>();
+  /** 直近の頭の位置（発射位置の検証用） */
+  private readonly headPos = new Map<string, V3>();
   private started = false;
   winner: Team | 0 | null = null;
   lastRejectReason = "";
@@ -119,6 +123,11 @@ export class SplatoonGame {
   leave(id: string) {
     this.players.delete(id);
     this.shotTimes.delete(id);
+    this.headPos.delete(id);
+  }
+
+  updatePose(id: string, pos: V3) {
+    if (this.players.has(id)) this.headPos.set(id, pos);
   }
 
   private startMatch(now: number): GameEvent[] {
@@ -164,16 +173,7 @@ export class SplatoonGame {
       this.lastRejectReason = "not playing";
       return null;
     }
-    const cfg = this.config;
-    if (!(norm(pos) <= MAX_SHOT_DIST_M) || !(pos[2] > 0)) {
-      this.lastRejectReason = "bad position";
-      return null;
-    }
-    const max = chargeToShot(1, cfg);
-    if (!(norm(vel) <= max.speed * 1.05) || !(radius >= cfg.radiusMin * 0.95 && radius <= max.radius * 1.05)) {
-      this.lastRejectReason = "bad velocity/radius";
-      return null;
-    }
+    // レート制限を検証より先に（不正な発射の連投でログと返信が無制限に出ないように）
     const times = this.shotTimes.get(id) ?? [];
     while (times.length > 0 && now - times[0] > 1000) times.shift();
     if (times.length >= SHOT_RATE_PER_SEC) {
@@ -182,8 +182,27 @@ export class SplatoonGame {
     }
     times.push(now);
     this.shotTimes.set(id, times);
+    const cfg = this.config;
+    if (!(norm(pos) <= MAX_SHOT_DIST_M) || !(pos[2] > 0)) {
+      this.lastRejectReason = "bad position";
+      return null;
+    }
+    const head = this.headPos.get(id);
+    if (!head) {
+      this.lastRejectReason = "no pose yet";
+      return null;
+    }
+    if (!(norm([pos[0] - head[0], pos[1] - head[1], pos[2] - head[2]]) <= MAX_SHOT_FROM_HEAD_M)) {
+      this.lastRejectReason = "too far from head";
+      return null;
+    }
+    const max = chargeToShot(1, cfg);
+    if (!(norm(vel) <= max.speed * 1.05) || !(radius >= cfg.radiusMin * 0.95 && radius <= max.radius * 1.05)) {
+      this.lastRejectReason = "bad velocity/radius";
+      return null;
+    }
     const landing = simulateInk(pos, vel, this.surfaces, cfg);
-    if (landing) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.team);
+    if (landing?.hit) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.team);
     const shot: Shot = { seq: ++this.seq, by: id, team: p.team, pos, vel, radius, launchedAt: now, landing };
     this.shots.push(shot);
     return shot;
