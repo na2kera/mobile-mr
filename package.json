@@ -13,6 +13,8 @@
     "check:volley": "node scripts/headless-volleyball.mjs",
     "test:darts": "node scripts/test-darts.mjs",
     "check:darts": "node scripts/headless-darts.mjs",
+    "test:surface": "node scripts/test-surface.mjs",
+    "check:surface": "node scripts/headless-surface.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {

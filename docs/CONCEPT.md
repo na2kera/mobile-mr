@@ -497,7 +497,7 @@ Multi-user MR
 
 ## 9. 現在地
 
-Phase 6（MRバレーボール）まで完了。Phase 6-2（MR ダーツ）は PC 確認まで。次は Phase 7（Surface Mapping）。技術スタックは Vite / TypeScript / Three.js。
+Phase 6（MRバレーボール）まで完了。Phase 6-2（MR ダーツ）と Phase 7（Surface Mapping）は PC 確認まで。次は Phase 8（MRスプラトゥーン）。技術スタックは Vite / TypeScript / Three.js。
 
 - Phase 1 完了（2026-08-13, `demos/01-stereo-box/`）: 左右2眼レンダリング + ジャイロ頭追従 + 全画面化。iPhone 実機 + ゴーグルで確認済み
 - Phase 2 完了（2026-08-14, `demos/02-passthrough/`）: 背面超広角カメラの映像を `VideoTexture` → `scene.background` で両眼の背景に表示。縦横比補正・回転追従・解像度指定込み。iPhone 実機で確認済み
@@ -521,7 +521,9 @@ Phase 6（MRバレーボール）まで完了。Phase 6-2（MR ダーツ）は P
   - 既定の重力は現実と同じ 9.8。手トラッカーの速度は過小に出やすい（05 の実寸申告が半分だったのと同根）ので、届かなければ `?throwGain=` / `?gravity=` で較正する想定。値は実機で決める
   - PC 検証: `?fakecam=1&autostart=1&fakehands=1`（合成の手が自分の手番にボードの中心へ届く速度で振る）で、2 ウィンドウが交互に投げて得点し手番が回るところまでヘッドレス Chrome で確認済み
 
-残りは Phase 7 以降（Surface Mapping → MRスプラトゥーン → 人物対応 → SDK 化）の順番で進める。
+- Phase 7 PC 確認まで（2026-08-28, `demos/07-surface-mapping/`、**実機未確認**）: 壁のマーカー座標系をそのまま Surface（`wall-<markerId>`、面 Z=0、`?surfaceW=`×`?surfaceH=` の矩形）にし、UV（左上 0,0 〜 右下 1,1）で位置を表す（`src/shared/surface.ts`）。05 の指差し（目 → 指先の視線）と面の交点でカーソル・ペイント。サーバー権威（`server/surface.ts`）で `paint { surfaceId, uv, radius }` を検証・配信し、入室時に全ストロークの snapshot を渡す。Room サーバーの共通部分（Origin 検証・バージョン / 設定の一致・heartbeat・join/leave）は 4 本目でようやく `server/room-server.ts` に抽出した（04/06/06-2 のサーバーはそのまま）。手が使えないときの保険として画面長押しで視線の先にペイント。複数マーカー → 複数 Surface はデータ構造上は対応済みだが、検出は 1 マーカー（次に必要になったときに）
+
+残りは Phase 8 以降（MRスプラトゥーン → 人物対応 → SDK 化）の順番で進める。
 
 ## 10. 開発環境の決定事項（2026-08-11）
 

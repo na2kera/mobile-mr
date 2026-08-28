@@ -3,15 +3,16 @@
 // 06-2 で抽出した（05 / 06 のデモ内の複製はそのまま残す）。
 // スロットは「同じ手の続き」を手首位置の近さで判断し、手ごとの EMA・速度を持つ
 import * as THREE from "three";
-import { HandView } from "./hand-view";
+import { HandView } from "./hand-view.ts";
 import {
   FINGER_TIPS,
   LANDMARK_COUNT,
   WRIST,
+  isPointingPose,
   placeLandmarks,
   solveHandPlacement,
-} from "./hand-math";
-import type { Vec3, ViewMapping } from "./hand-math";
+} from "./hand-math.ts";
+import type { Vec3, ViewMapping } from "./hand-math.ts";
 
 export const HAND_COLORS = { R: 0x8ab4f8, L: 0xffa657, "-": 0xe8eaed } as const;
 export type HandLabel = keyof typeof HAND_COLORS;
@@ -31,6 +32,8 @@ export type HandResultLike = {
 export type DetectedHand = {
   label: HandLabel;
   points: Vec3[];
+  /** 指差しポーズか（実寸の worldLandmarks で判定。05 の isPointingPose） */
+  pointing: boolean;
   depth: number;
   residual: number;
   handCm: number;
@@ -55,6 +58,12 @@ export type HandSlot = {
   contactsVel: THREE.Vector3[];
   snapContacts: THREE.Vector3[] | null;
   snapMs: number;
+  /**
+   * 指差しポーズ（ヒステリシス付き。3 回連続で判定が揃ったら切り替える。05 と同じ）。
+   * 07 の Surface ペイントが使う
+   */
+  pointing: boolean;
+  pointingStreak: number;
 };
 
 export type HandSlotsOptions = {
@@ -96,6 +105,8 @@ export class HandSlots {
         contactsVel: Array.from({ length: CONTACT_COUNT }, () => new THREE.Vector3()),
         snapContacts: null,
         snapMs: 0,
+        pointing: false,
+        pointingStreak: 0,
       });
     }
   }
@@ -112,6 +123,8 @@ export class HandSlots {
         slot.view.hide();
         slot.ema = null;
         slot.snapContacts = null;
+        slot.pointing = false;
+        slot.pointingStreak = 0;
       }
     }
     for (const slot of this.slots) {
@@ -158,6 +171,7 @@ export class HandSlots {
       detected.push({
         label,
         points: placeLandmarks(landmarks, world, placement, mapping),
+        pointing: isPointingPose(world),
         depth: placement.depth,
         residual: placement.residual,
         handCm: Math.hypot(w12.x - w0.x, w12.y - w0.y, w12.z - w0.z) * 100,
@@ -218,7 +232,14 @@ export class HandSlots {
     } else {
       slot.ema = hand.points;
       slot.snapContacts = null;
+      slot.pointing = false;
+      slot.pointingStreak = 0;
     }
+    slot.pointingStreak = hand.pointing
+      ? Math.max(1, slot.pointingStreak + 1)
+      : Math.min(-1, slot.pointingStreak - 1);
+    if (slot.pointingStreak >= 3) slot.pointing = true;
+    if (slot.pointingStreak <= -3) slot.pointing = false;
     if (slot.label !== hand.label) {
       slot.label = hand.label;
       slot.view.setColor(HAND_COLORS[hand.label]);
