@@ -42,14 +42,17 @@ export type FieldConfig = {
   matchSec: number;
   /** 結果表示の長さ [s] */
   resultSec: number;
-  /** インクの半径 [m]（チャージ 0 → 1） */
-  radiusMin: number;
-  radiusMax: number;
-  /** 発射の速さ [m/s]（チャージ 0 → 1） */
-  speedMin: number;
-  speedMax: number;
-  /** チャージが満タンになるまで [s] */
-  chargeSec: number;
+  /** 1 発の速さ [m/s] と半径 [m]（連射なので固定） */
+  shotSpeed: number;
+  shotRadius: number;
+  /** インクタンク満タンで撃てる発数 */
+  tankShots: number;
+  /** 連射の速さ [発/s] */
+  fireRatePerSec: number;
+  /** 自分の色の床の上にいるとき、満タンまでの回復時間 [s] */
+  inkFullOwnInkSec: number;
+  /** それ以外のときの自然回復で満タンまで [s] */
+  inkFullStandSec: number;
   /** 格子の 1 セル [m] */
   cellM: number;
 };
@@ -63,11 +66,12 @@ export const DEFAULT_FIELD: FieldConfig = {
   maxFlightSec: 3,
   matchSec: 90,
   resultSec: 8,
-  radiusMin: 0.05,
-  radiusMax: 0.15,
-  speedMin: 2.5,
-  speedMax: 6,
-  chargeSec: 1.5,
+  shotSpeed: 5,
+  shotRadius: 0.06,
+  tankShots: 15,
+  fireRatePerSec: 4,
+  inkFullOwnInkSec: 3,
+  inkFullStandSec: 20,
   cellM: 0.02,
 };
 
@@ -199,13 +203,9 @@ export function simulateInk(pos: V3, vel: V3, surfaces: readonly SurfaceFrame[],
   return best;
 }
 
-/** チャージ量（0..1）→ 速さ・半径 */
-export function chargeToShot(charge: number, cfg: FieldConfig): { speed: number; radius: number } {
-  const c = Math.min(1, Math.max(0, charge));
-  return {
-    speed: cfg.speedMin + (cfg.speedMax - cfg.speedMin) * c,
-    radius: cfg.radiusMin + (cfg.radiusMax - cfg.radiusMin) * c,
-  };
+/** 1 発で減るインク（タンク = 1） */
+export function inkPerShot(cfg: FieldConfig): number {
+  return 1 / cfg.tankShots;
 }
 
 // ---- 塗りの格子（サーバーの権威状態。ストロークの列ではなく「塗った結果」を持つ。07 の痛点への回答） ----

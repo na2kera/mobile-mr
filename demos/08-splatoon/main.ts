@@ -18,16 +18,20 @@ import { HandView } from "../../src/shared/hand-view";
 import { LANDMARK_COUNT } from "../../src/shared/hand-math";
 import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
-import type { HandResultLike, HandSlot } from "../../src/shared/hand-slots";
+import type { HandResultLike } from "../../src/shared/hand-slots";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import markerSvgUrl from "../../src/shared/marker-0.svg";
 import {
   DEFAULT_FIELD,
-  chargeToShot,
+  FLOOR_ID,
+  InkGrid,
   fieldSurfaces,
+  framePointToUv,
   inkAt,
+  inkPerShot,
   simulateInk,
+  uvInside,
 } from "../../src/shared/splatoon-sim";
 import type { FieldConfig, InkLanding, SurfaceFrame, Team, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
@@ -41,11 +45,12 @@ import { scriptedSplatHand } from "./fake-splat-hand";
 // Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
 // 「チームと陣取り」を足した統合ゲーム第 3 弾。
 //   - フィールド: 壁のマーカー 1 枚で壁（Z=0）と床（Y=-floorDrop）の 2 枚の Surface を定義（splatoon-sim.ts）
-//   - 操作: グーを握るとチャージ、パーに開くと手からインクが飛ぶ。向きは「目 → 手のひら」の視線
-//     （06-2 で 3DoF + 手のブレでは手の速度方向を狙えないと分かったので、07 の指差しと同じ視線方式）
+//   - 操作: パーの間、手のひらから連射（1 発 = タンクの 1/tankShots。空になると撃てない）。
+//     自分の色の床の上にいるとゲージが速く回復する（それ以外は遅い自然回復）。残量はサーバー権威。
+//     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
-//   - 手が取れないときの保険: 画面（PC は Space）を押している間チャージ、離すと視界の中央へ発射
+//   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
 
 // ---- パラメータ（06-2 / 07 と同じもの。根拠は 06 の main.ts 参照） ----
 const fovRaw = params.get("fov");
@@ -100,8 +105,6 @@ const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 6
 const SURFACE_PX_PER_M = numParam("surfacePx", 384, { min: 64, max: 2048 });
 /** 発射後、サーバーの確認が来るまで予測を出す上限 [ms] */
 const PREDICT_MAX_MS = 1500;
-/** 連射の最小間隔 [ms]（サーバーの上限 4/s より緩く） */
-const LOCAL_SHOT_COOLDOWN_MS = 300;
 
 // デバッグ
 const FAKE_CAM = params.has("fakecam");
@@ -152,11 +155,15 @@ let fieldCfg: FieldConfig = {
 };
 const surfaces: SurfaceFrame[] = fieldSurfaces(fieldCfg);
 const inkViews = new Map<string, InkView>();
+/** 表示用とは別に、格子そのものの写し（「自分の色の床の上か」の判定用。着弾と snapshot で更新） */
+const clientGrids = new Map<string, InkGrid>();
 for (const s of surfaces) {
   const view = new InkView(s, SURFACE_PX_PER_M);
   field.add(view.group);
   inkViews.set(s.id, view);
+  clientGrids.set(s.id, new InkGrid(s, fieldCfg.cellM));
 }
+const floorFrame = surfaces.find((s) => s.id === FLOOR_ID)!;
 
 // スコアボード: 壁の上。視界内メッセージ: カメラの子
 const scorePanel = new TextPanel(1.0, 0.22);
@@ -165,6 +172,10 @@ field.add(scorePanel.mesh);
 const message = new TextPanel(0.9, 0.24);
 message.mesh.position.set(0, -0.28, -1.2);
 camera.add(message.mesh);
+// インクゲージ（視界の下・常時）
+const inkPanel = new TextPanel(0.52, 0.09, 512);
+inkPanel.mesh.position.set(0, -0.45, -1.2);
+camera.add(inkPanel.mesh);
 
 // ---- インクの玉（飛行中）----
 const inkGeometry = new THREE.SphereGeometry(1, 16, 12);
@@ -187,7 +198,6 @@ type Peer = {
   targetQuat: THREE.Quaternion;
   lastPoseMs: number;
   tracking: boolean;
-  charge: number;
   hands: HandView[];
   handTargets: (Vec3[] | null)[];
   handCurrent: (Vec3[] | null)[];
@@ -217,7 +227,6 @@ function createPeer(id: string): Peer {
     targetQuat: new THREE.Quaternion(),
     lastPoseMs: -Infinity,
     tracking: false,
-    charge: 0,
     hands,
     handTargets: [null, null],
     handCurrent: [null, null],
@@ -240,7 +249,6 @@ function onPeerPose(id: string, pose: PlayerPose) {
   peer.targetPos.set(...pose.pos);
   peer.targetQuat.set(...pose.quat);
   peer.tracking = pose.tracking;
-  peer.charge = pose.charge ?? 0;
   const now = performance.now();
   if (now - peer.lastPoseMs > PEER_STALE_MS) {
     peer.group.position.copy(peer.targetPos);
@@ -297,8 +305,7 @@ function updatePeers(now: number) {
           cur[k].z += (target[k].z - cur[k].z) * alpha;
         }
       }
-      // チャージ中は白く光らせる
-      view.setColor(peer.charge > 0 ? 0xffffff : color);
+      view.setColor(color);
       view.update(cur);
     }
   }
@@ -381,8 +388,8 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     camHFovDeg: () => pt.camHFovDeg,
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
-    // チャージ中にフィールドが飛ぶと発射の向きがずれるので lerp だけ
-    canSnap: () => charging === null,
+    // 連射中にフィールドが飛ぶと発射の向きがずれるので lerp だけ
+    canSnap: () => performance.now() - lastShotMs > 500,
   });
 }
 
@@ -474,10 +481,10 @@ function updateHands(now: number) {
     }
   }
   handSlots.update(now);
-  // 自分の手はチーム色（チャージ中は白）
+  // 自分の手はチーム色
   for (const slot of handSlots.slots) {
     if (!slot.view.visible) continue;
-    slot.view.setColor(charging?.slot === slot ? 0xffffff : myTeam ? TEAM_COLORS[myTeam] : 0xe8eaed);
+    slot.view.setColor(myTeam ? TEAM_COLORS[myTeam] : 0xe8eaed);
   }
 }
 
@@ -520,6 +527,9 @@ function onState(state: GameSnapshot) {
   const now = performance.now();
   auth = { state, recvMs: now };
   myTeam = teamOf(selfId);
+  // インク残量はサーバーが権威。受信のたびローカルの予測を上書きする（間はローカルで進める）
+  const serverInk = state.ink?.[selfId];
+  if (serverInk !== undefined) inkLocal = serverInk;
   const ev = state.event;
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
@@ -532,7 +542,10 @@ function onState(state: GameSnapshot) {
     console.log(`[game] event ${ev?.kind} phase=${state.phase} scores=${state.scores.join("/")} players=${state.players.length}`);
   }
   if (state.grids) {
-    for (const [id, enc] of Object.entries(state.grids)) inkViews.get(id)?.redrawFromGrid(enc, fieldCfg.cellM);
+    for (const [id, enc] of Object.entries(state.grids)) {
+      inkViews.get(id)?.redrawFromGrid(enc, fieldCfg.cellM);
+      clientGrids.get(id)?.decode(enc);
+    }
     // 格子で描き直したので、着弾済みの玉の再描画は要らない
     for (const s of state.shots) if (s.landing?.hit) splatted.add(s.seq);
   }
@@ -645,8 +658,6 @@ function sendPoseIfDue(now: number) {
     tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
   };
   if (hands.length > 0) pose.hands = hands;
-  const c = currentCharge(now);
-  if (c !== null) pose.charge = Math.round(c * 100) / 100;
   client.sendPose(pose);
 }
 
@@ -654,36 +665,44 @@ function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
 }
 
-// ---- チャージ → 発射 ----
-// グー（slot.shape === "fist"）になった時刻から数えてチャージ、パー（"open"）に変わった瞬間に発射。
-// 手が取れないときは画面 / Space の長押しで同じことを視線（画面中央）で行う
-type Charging = { slot: HandSlot | null; sinceMs: number; lastPalm: THREE.Vector3; lostSinceMs: number };
-let charging: Charging | null = null;
-/** チャージ中に手を見失ってからこの時間 [ms] は待つ（パーに開く動きで一瞬落ちることがある） */
-const CHARGE_LOST_GRACE_MS = 400;
-/** 見失ったままでもチャージがこれ以上なら「開いて見失った」とみなして発射 */
-const CHARGE_FIRE_ON_LOST = 0.3;
+// ---- 連射とインクタンク ----
+// パー（"open"）の間、手のひらから fireRatePerSec で連射。1 発 = タンクの 1/tankShots。
+// 自分の色の床の上にいるとゲージが速く回復する（サーバーが頭の真下の床セルで判定。ジェスチャ不要）。
+// 残量の権威はサーバー（state.ink）。ローカルは同じ式で予測し、state が来るたび上書きされる。
+// 手が取れないときは画面 / Space の長押しで視界の中央へ連射
 let lastShotMs = -Infinity;
 let holdPressed = false;
 let lastShapeInfo = "";
-
-function currentCharge(now: number): number | null {
-  if (!charging) return null;
-  return Math.min(1, (now - charging.sinceMs) / (fieldCfg.chargeSec * 1000));
-}
+/** インク残量 0..1 のローカル予測（表示用。権威は state.ink） */
+let inkLocal = 1;
+let lastInkUpdateMs = performance.now();
+let lastNoInkFlashMs = -Infinity;
 
 function canShoot(): boolean {
   return joined && auth?.state.phase === "play" && anchor.visible && myTeam !== null;
+}
+
+/** 頭の真下の床のセルが自分の色か（サーバーの onOwnFloorInk と同じ式。表示と予測用） */
+const headField = new THREE.Vector3();
+function onOwnFloorInkNow(): boolean {
+  if (!anchor.visible || myTeam === null) return false;
+  camera.getWorldPosition(headField);
+  field.worldToLocal(headField);
+  const uv = framePointToUv(floorFrame, [headField.x, headField.y, headField.z]);
+  if (!uvInside(uv)) return false;
+  const g = clientGrids.get(FLOOR_ID)!;
+  const x = Math.min(g.cols - 1, Math.max(0, Math.floor(uv[0] * g.cols)));
+  const y = Math.min(g.rows - 1, Math.max(0, Math.floor(uv[1] * g.rows)));
+  return g.cells[y * g.cols + x] === myTeam;
 }
 
 const camWorldPos = new THREE.Vector3();
 const shotOrigin = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
 
-/** 発射: origin（ワールド）から、目（カメラ）→ origin の向きへ */
-function fire(originWorld: THREE.Vector3, charge: number, now: number, how: string) {
+/** 発射: origin（ワールド）から、目（カメラ）→ origin の向きへ 1 発 */
+function fire(originWorld: THREE.Vector3, now: number, how: string) {
   if (!client || !canShoot()) return;
-  if (now - lastShotMs < LOCAL_SHOT_COOLDOWN_MS) return;
   camera.getWorldPosition(camWorldPos);
   shotDir.subVectors(originWorld, camWorldPos);
   if (shotDir.lengthSq() < 1e-6) shotDir.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(tmpQuat));
@@ -693,66 +712,46 @@ function fire(originWorld: THREE.Vector3, charge: number, now: number, how: stri
   field.worldToLocal(shotOrigin);
   field.getWorldQuaternion(tmpQuat).invert();
   shotDir.applyQuaternion(tmpQuat);
-  const { speed, radius } = chargeToShot(charge, fieldCfg);
+  const speed = fieldCfg.shotSpeed;
+  const radius = fieldCfg.shotRadius;
   const pos: V3 = [round3(shotOrigin.x), round3(shotOrigin.y), round3(shotOrigin.z)];
   const vel: V3 = [round3(shotDir.x * speed), round3(shotDir.y * speed), round3(shotDir.z * speed)];
   if (!client.sendShot(pos, vel, radius)) return;
   lastShotMs = now;
   shotsSent++;
+  inkLocal = Math.max(0, inkLocal - inkPerShot(fieldCfg));
   clearPredicted();
   predicted = { pos, vel, radius, sinceMs: now, landing: simulateInk(pos, vel, surfaces, fieldCfg), mesh: null };
-  console.log(`[game] shot sent (${how}) charge=${charge.toFixed(2)} speed=${speed.toFixed(2)} r=${radius.toFixed(2)} pos=(${pos.join(",")}) vel=(${vel.join(",")}) land=${predicted.landing?.hit ? `${predicted.landing.surfaceId} ${predicted.landing.uv.map((v) => v.toFixed(2)).join(",")}` : "miss"}`);
+  console.log(`[game] shot sent (${how}) ink=${inkLocal.toFixed(2)} pos=(${pos.join(",")}) vel=(${vel.join(",")}) land=${predicted.landing?.hit ? `${predicted.landing.surfaceId} ${predicted.landing.uv.map((v) => v.toFixed(2)).join(",")}` : "miss"}`);
 }
 
-function updateCharge(now: number) {
-  // 1) 手の形。チャージ中の手を見失ったら少し待ち、戻らなければチャージ量に応じて発射か中止
-  if (charging?.slot) {
-    const slot = charging.slot;
-    const visible = slot.view.visible && !!slot.ema;
-    if (visible) {
-      charging.lostSinceMs = -1;
-      charging.lastPalm.copy(slot.contactsWorld[PALM_CONTACT]);
-      if (slot.shape === "open") {
-        const c = currentCharge(now) ?? 0;
-        charging = null;
-        fire(slot.contactsWorld[PALM_CONTACT], c, now, "hand");
+function updateFire(now: number) {
+  // ローカルのインク予測（サーバーと同じ式。state が来たら上書きされる）
+  const dt = Math.min(1, Math.max(0, (now - lastInkUpdateMs) / 1000));
+  lastInkUpdateMs = now;
+  const fullSec = onOwnFloorInkNow() ? fieldCfg.inkFullOwnInkSec : fieldCfg.inkFullStandSec;
+  inkLocal = Math.min(1, inkLocal + dt / fullSec);
+
+  const openSlot = handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open");
+
+  const interval = 1000 / fieldCfg.fireRatePerSec;
+  const wantHand = openSlot && canShoot();
+  const wantGaze = !openSlot && holdPressed && canShoot();
+  if ((wantHand || wantGaze) && now - lastShotMs >= interval) {
+    if (inkLocal + 1e-9 < inkPerShot(fieldCfg)) {
+      if (now - lastNoInkFlashMs > 2000) {
+        lastNoInkFlashMs = now;
+        flash = { text: "インク切れ！\n自分の色の床の上にいると回復", untilMs: now + 1800 };
       }
+    } else if (wantHand) {
+      fire(openSlot!.contactsWorld[PALM_CONTACT], now, "hand");
     } else {
-      if (charging.lostSinceMs < 0) charging.lostSinceMs = now;
-      if (now - charging.lostSinceMs > CHARGE_LOST_GRACE_MS) {
-        const c = currentCharge(now) ?? 0;
-        const palm = charging.lastPalm;
-        charging = null;
-        if (c >= CHARGE_FIRE_ON_LOST) {
-          fire(palm, c, now, "hand-lost");
-        } else {
-          flash = { text: "手を見失いました", untilMs: now + 1200 };
-        }
-      }
+      // 視界の中央、目の 30cm 先から
+      tmpVec2.set(0, 0, -0.3);
+      camera.localToWorld(tmpVec2);
+      fire(tmpVec2, now, "gaze");
     }
   }
-  if (!charging) {
-    for (const slot of handSlots.slots) {
-      if (slot.view.visible && slot.ema && slot.shape === "fist" && canShoot()) {
-        // 発射できる状態になってからのグーだけ数える（マーカー検出前から握っていても満タンにしない）
-        charging = { slot, sinceMs: now, lastPalm: slot.contactsWorld[PALM_CONTACT].clone(), lostSinceMs: -1 };
-        break;
-      }
-    }
-  }
-  // 2) 長押し（視線）。手のチャージ中・発射直後は無視
-  if (!charging && holdPressed && canShoot() && now - lastShotMs >= LOCAL_SHOT_COOLDOWN_MS) {
-    charging = { slot: null, sinceMs: now, lastPalm: new THREE.Vector3(), lostSinceMs: -1 };
-  }
-  if (charging && charging.slot === null && !holdPressed) {
-    const c = currentCharge(now) ?? 0;
-    charging = null;
-    // 視界の中央、目の 30cm 先から
-    tmpVec2.set(0, 0, -0.3);
-    camera.localToWorld(tmpVec2);
-    fire(tmpVec2, c, now, "gaze");
-  }
-  if (charging && !canShoot()) charging = null;
   const shapes = handSlots.slots.filter((s) => s.view.visible).map((s) => s.shape);
   lastShapeInfo = shapes.join(",") || "-";
 }
@@ -781,7 +780,6 @@ if (touch) {
 }
 function releaseHold() {
   holdPressed = false;
-  if (charging?.slot === null) charging = null;
 }
 addEventListener("blur", releaseHold);
 addEventListener("visibilitychange", () => {
@@ -825,6 +823,7 @@ function updateShots(now: number) {
     if (landed && shot.landing?.hit && !splatted.has(seq)) {
       splatted.add(seq);
       inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.team);
+      clientGrids.get(shot.landing.surfaceId)?.stamp(shot.landing.uv, shot.radius, shot.team);
     }
     if (elapsed > fieldCfg.maxFlightSec + 1) {
       live.mesh.removeFromParent();
@@ -849,8 +848,8 @@ function remainingSec(now: number): number {
 }
 
 function gauge(c: number): string {
-  const n = Math.round(c * 10);
-  return "█".repeat(n) + "░".repeat(10 - n);
+  const n = Math.round(Math.min(1, Math.max(0, c)) * 10);
+  return "■".repeat(n) + "□".repeat(10 - n);
 }
 
 function updateMessages(now: number) {
@@ -890,20 +889,26 @@ function updateMessages(now: number) {
     color = "#fdd663";
   } else if (flash && now < flash.untilMs) {
     text = flash.text;
-    color = "#81c995";
+    color = flash.text.startsWith("インク切れ") ? "#fdd663" : "#81c995";
   } else if (auth.state.phase === "result") {
     const w = auth.state.winner ?? 0;
     text = w === 0 ? "引き分け" : `${TEAM_NAMES[w]} の勝ち${w === myTeam ? "！" : ""}`;
     color = w === myTeam ? "#81c995" : "#e8eaed";
-  } else if (charging) {
-    const c = currentCharge(now) ?? 0;
-    text = `チャージ ${gauge(c)}\nパーで発射`;
+  } else if (inkLocal < 0.999 && onOwnFloorInkNow()) {
+    text = "回復中…（自分の色の床の上）";
     color = "#ffffff";
   } else {
-    text = `あなたは ${myTeam ? TEAM_NAMES[myTeam] : "-"}\nグーでチャージ → パーで発射`;
+    text = `あなたは ${myTeam ? TEAM_NAMES[myTeam] : "-"}\nパーで連射（自分の色の床の上で回復）`;
     color = myTeam ? `#${TEAM_COLORS[myTeam].toString(16).padStart(6, "0")}` : "#e8eaed";
   }
   message.set(text, color);
+  // インクゲージ（入室後は常時）
+  if (joined && myTeam) {
+    const hex = `#${TEAM_COLORS[myTeam].toString(16).padStart(6, "0")}`;
+    inkPanel.set(`インク ${gauge(inkLocal)}`, inkLocal < inkPerShot(fieldCfg) ? "#fdd663" : hex);
+  } else {
+    inkPanel.set("");
+  }
 }
 
 // ---- 頭追従（02〜07 と同じ） ----
@@ -940,7 +945,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} charge=${currentCharge(now)?.toFixed(2) ?? "-"} held=${holdPressed ? "yes" : "no"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} ink=${inkLocal.toFixed(2)} own=${onOwnFloorInkNow() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
       `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s team=${myTeam ?? "-"} players=${s.players.map((p) => `${p.id}:${p.team}`).join(",")} scores=${s.scores.join("/")}/${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
@@ -1040,7 +1045,7 @@ renderer.setAnimationLoop(() => {
   for (const v of inkViews.values()) v.setFrameColor(tracking ? 0x8ab4f8 : 0xf28b82);
   anchor.updateMatrixWorld(true);
   updateHands(now);
-  updateCharge(now);
+  updateFire(now);
   updatePeers(now);
   updateShots(now);
   sendPoseIfDue(now);

@@ -64,10 +64,6 @@ function parseClientMessage(data: RawData): ClientMessage | null {
       tracking: m.tracking,
     };
     if (hands) pose.hands = hands;
-    if (m.charge !== undefined) {
-      if (typeof m.charge !== "number" || !(m.charge >= 0 && m.charge <= 1)) return null;
-      pose.charge = m.charge;
-    }
     return { type: "pose", ...pose };
   }
   if (m.type === "shot") {
@@ -167,7 +163,7 @@ export function splatoonServer() {
       const { game } = room.state;
       if (msg.type === "pose") {
         if (!room.state.poseRate.allow(id, now)) return;
-        game.updatePose(id, msg.pos);
+        game.updatePose(id, msg.pos, now);
         const { type: _type, ...pose } = msg;
         room.broadcast({ type: "pose", id, ...pose } satisfies ServerMessage, id);
       } else if (msg.type === "shot") {

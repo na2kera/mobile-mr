@@ -8,7 +8,7 @@ import type { GameSnapshot, Shot } from "./splatoon-game.ts";
 export const SPLATOON_PATH = "/api/splatoon";
 
 /** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否） */
-export const SPLATOON_PROTOCOL_VERSION = 1;
+export const SPLATOON_PROTOCOL_VERSION = 2;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -25,14 +25,12 @@ export type SplatoonRoomConfig = SpaceConfig & {
   matchSec: number;
 };
 
-/** field 座標系での自分のカメラ姿勢 + 手の 21 点（06-2 と同じ形）+ チャージ中なら量 */
+/** field 座標系での自分のカメラ姿勢 + 手の 21 点（06-2 と同じ形） */
 export type PlayerPose = {
   pos: V3;
   quat: [number, number, number, number];
   tracking: boolean;
   hands?: number[][];
-  /** チャージ中の量 0..1（相手の端末で手の色に出す） */
-  charge?: number;
 };
 
 export const HAND_FLAT_LENGTH = 63;

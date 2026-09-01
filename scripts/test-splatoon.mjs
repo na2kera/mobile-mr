@@ -11,8 +11,8 @@ import {
   FLOOR_ID,
   InkGrid,
   WALL_ID,
-  chargeToShot,
   fieldSurfaces,
+  inkPerShot,
   framePointToUv,
   frameUvToPoint,
   inkAt,
@@ -71,10 +71,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const p = inkAt([0, 0, 2], [0, 0, -5], 0.4, 4);
   check("inkAt の放物線", near(p[1], -0.32) && near(p[2], 0));
 
-  const s0 = chargeToShot(0, cfg);
-  const s1 = chargeToShot(1, cfg);
-  const s2 = chargeToShot(5, cfg);
-  check("chargeToShot: 0 → min, 1 → max, 1 超はクランプ", s0.speed === cfg.speedMin && s1.radius === cfg.radiusMax && s2.speed === cfg.speedMax);
+  check("inkPerShot: タンク = tankShots 発", near(inkPerShot(cfg) * cfg.tankShots, 1));
 
   // 格子
   const g = new InkGrid(wall, 0.1);
@@ -116,40 +113,71 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   g.join("p4", "D", 1300);
   check("少ない方のチームへ（A が抜けたので A）", g.players.get("p4").team === 1);
 
-  const max = chargeToShot(1, g.config);
-  // レート制限（4/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
+  // レート制限（6/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
   let tm = 2000;
   const next = () => (tm += 1100);
-  check("発射: pose が届く前は拒否", g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.1, next()) === null && g.lastRejectReason === "no pose yet");
-  g.updatePose("p2", [0, 0.1, 2.3]);
-  g.updatePose("p3", [0, 0, 2.3]);
-  g.updatePose("p4", [1.5, 0, 0.8]);
-  check("発射: 頭から 1.2m 以上離れた位置からは拒否", g.shoot("p2", [0, 0, 0.3], [0, 0, -5], 0.1, next()) === null && g.lastRejectReason === "too far from head");
-  const shot = g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.1, next());
+  check("発射: pose が届く前は拒否", g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.06, next()) === null && g.lastRejectReason === "no pose yet");
+  g.updatePose("p2", [0, 0.1, 2.3], 1500);
+  g.updatePose("p3", [0, 0, 2.3], 1500);
+  g.updatePose("p4", [1.5, 0, 0.8], 1500);
+  check("発射: 頭から 1.2m 以上離れた位置からは拒否", g.shoot("p2", [0, 0, 0.3], [0, 0, -5], 0.06, next()) === null && g.lastRejectReason === "too far from head");
+  const shot = g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.06, next());
   check("発射: 受理され着弾（壁）と格子への塗りが起きる", shot && shot.team === 2 && shot.landing?.surfaceId === WALL_ID && g.scores()[1] > 0);
-  check("発射: 速すぎる", g.shoot("p2", [0, 0, 2], [0, 0, -(max.speed * 1.5)], 0.1, next()) === null && g.lastRejectReason === "bad velocity/radius");
-  check("発射: 半径が大きすぎる", g.shoot("p2", [0, 0, 2], [0, 0, -3], max.radius * 2, next()) === null && g.lastRejectReason === "bad velocity/radius");
-  g.updatePose("p2", [0, 0, -0.5]);
-  check("発射: 壁の裏（z<0）から", g.shoot("p2", [0, 0, -1], [0, 0, 3], 0.1, next()) === null && g.lastRejectReason === "bad position");
-  g.updatePose("p2", [0, 0.1, 2.3]);
-  check("発射: 知らないプレイヤー", g.shoot("zz", [0, 0, 2], [0, 0, -3], 0.1, next()) === null);
+  check("発射: 速すぎる", g.shoot("p2", [0, 0, 2], [0, 0, -(g.config.shotSpeed * 1.5)], 0.06, next()) === null && g.lastRejectReason === "bad velocity/radius");
+  check("発射: 半径が違う", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.2, next()) === null && g.lastRejectReason === "bad velocity/radius");
+  g.updatePose("p2", [0, 0, -0.5], 1500);
+  check("発射: 壁の裏（z<0）から", g.shoot("p2", [0, 0, -1], [0, 0, 3], 0.06, next()) === null && g.lastRejectReason === "bad position");
+  g.updatePose("p2", [0, 0.1, 2.3], 1500);
+  check("発射: 知らないプレイヤー", g.shoot("zz", [0, 0, 2], [0, 0, -3], 0.06, next()) === null);
   let ok = 0;
   const t0 = next();
-  for (let i = 0; i < SHOT_RATE_PER_SEC + 3; i++) if (g.shoot("p3", [0, 0, 2], [0, 0, -3], 0.1, t0 + i)) ok++;
+  for (let i = 0; i < SHOT_RATE_PER_SEC + 3; i++) if (g.shoot("p3", [0, 0, 2], [0, 0, -3], 0.06, t0 + i)) ok++;
   check(`発射: 1 人 ${SHOT_RATE_PER_SEC}/s まで`, ok === SHOT_RATE_PER_SEC && g.lastRejectReason === "rate limited");
   const scoreBefore = g.scores().join();
-  const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.1, next());
+  const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.06, next());
   check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && g.scores().join() === scoreBefore);
 
   const before = g.scores();
   check("ここまでの発射は試合時間内", tm < 31000, `${tm}`);
   const ev = g.tick(31000);
   check("時間切れで result（勝者は多い方）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winner === (before[0] > before[1] ? 1 : 2));
-  check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.1, 31500) === null && g.lastRejectReason === "not playing");
+  check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.06, 31500) === null && g.lastRejectReason === "not playing");
   const ev2 = g.tick(33000);
   check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && g.scores()[0] === 0 && g.scores()[1] === 0);
   const snap = g.snapshot(33000, true);
   check("snapshot: grids は壁と床、totalCells は両方の和", Object.keys(snap.grids).length === 2 && snap.totalCells === snap.grids.wall.length + snap.grids.floor.length);
+  check("snapshot: ink に各プレイヤーの残量", typeof snap.ink.p2 === "number" && snap.ink.p2 <= 1);
+}
+
+// ================= 3b. インクタンク =================
+{
+  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1 });
+  g.join("p1", "A", 0);
+  g.updatePose("p1", [0, 0.1, 1], 0);
+  const cost = inkPerShot(g.config);
+  // 満タンから「拒否されるまで」連射（250ms 間隔 = 4/s なのでレート制限には当たらない）。
+  // 撃っている間も自然回復（満タン 20s = 1 発間隔で 0.0125）するので tankShots より数発多く撃てる
+  let fired = 0;
+  let t = 1000;
+  for (let i = 0; i < 30; i++) {
+    if (g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.06, t)) fired++;
+    else break;
+    t += 250;
+  }
+  check(`満タンで約 ${g.config.tankShots} 発（自然回復ぶん +5 まで）で "no ink"`, fired >= g.config.tankShots && fired <= g.config.tankShots + 5 && g.lastRejectReason === "no ink", `${fired} shots`);
+  const empty = g.inkOf("p1", t);
+  check("撃ち切った直後は 1 発ぶん未満", empty < cost + 0.05, empty.toFixed(3));
+  // 自然回復（自分の色の上ではない）: 満タンまで inkFullStandSec
+  const later = g.inkOf("p1", t + 4000);
+  check("自然回復は遅い（4 秒で +0.2）", near(later - empty, 4 / g.config.inkFullStandSec, 0.01), (later - empty).toFixed(3));
+  // 自分の色の床の上: 頭の真下の床セルを自分のチームで塗ってから測る
+  g.grids.get("floor").stamp([0.5, 1 / 1.5], 0.1, 1);
+  check("onOwnFloorInk: 頭の真下が自分の色", g.onOwnFloorInk("p1") === true);
+  const rec = g.inkOf("p1", t + 4000 + 1500);
+  check("自分の色の床の上では速く回復（1.5 秒で +0.5）", near(rec - later, 1.5 / g.config.inkFullOwnInkSec, 0.01), (rec - later).toFixed(3));
+  // 相手の色に塗り替えられると遅い回復に戻る
+  g.grids.get("floor").stamp([0.5, 1 / 1.5], 0.1, 2);
+  check("onOwnFloorInk: 相手の色なら false", g.onOwnFloorInk("p1") === false);
 }
 
 // ================= 4. server =================
@@ -212,15 +240,15 @@ try {
   const stA = await a.waitFor((m) => m.type === "state" && m.state.players.length === 2);
   check("入室で state が配られる", stA !== null);
 
-  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.1 });
+  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.06 });
   const rejNoPose = await b.waitFor((m) => m.type === "rejected");
   check("pose を送る前の shot は拒否（発射位置の検証に頭の位置が要る）", rejNoPose && /pose/.test(rejNoPose.reason));
   b.send({ type: "pose", pos: [0, 0.1, 2.3], quat: [0, 0, 0, 1], tracking: true });
   await sleep(50);
-  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.1 });
+  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.06 });
   const sa = await a.waitFor((m) => m.type === "shot");
   check("shot が全員に配られ、着弾（壁）とチームが付く", sa && sa.shot.by === "p2" && sa.shot.team === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
-  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.1 });
+  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.06 });
   const rej = await b.waitFor((m) => m.type === "rejected" && /velocity/.test(m.reason));
   check("不正な shot は本人に rejected", rej !== null);
   const bigField = connect({ ...cfg, room: "big", wallW: "20", wallH: "20", floorDepth: "20" });
@@ -228,10 +256,11 @@ try {
   check("格子が大きすぎるフィールドは拒否", errBig && /不正/.test(errBig.reason));
   const st = await a.waitFor((m) => m.type === "state" && m.state.scores[1] > 0, 2500);
   check("state に得点が反映される（B が塗った）", st !== null && st.state.scores[0] === 0);
+  check("state にインク残量（B は 1 発ぶん減っている）", st && st.state.ink.p2 < 1 && st.state.ink.p1 === 1, JSON.stringify(st?.state.ink));
 
-  b.send({ type: "pose", pos: [0, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, charge: 0.5 });
-  const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.charge !== undefined);
-  check("pose が中継され quat は正規化・charge 付き", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.charge === 0.5);
+  b.send({ type: "pose", pos: [0.5, 0, 1.5], quat: [0, 0, 0, 2], tracking: true });
+  const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
+  check("pose が中継され quat は正規化", pose && Math.abs(pose.quat[3] - 1) < 1e-9);
 
   const bad = connect({ ...cfg, gravity: "9.8" });
   const err = await bad.waitFor((m) => m.type === "error");
