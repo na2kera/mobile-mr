@@ -15,6 +15,8 @@
     "check:darts": "node scripts/headless-darts.mjs",
     "test:surface": "node scripts/test-surface.mjs",
     "check:surface": "node scripts/headless-surface.mjs",
+    "test:splatoon": "node scripts/test-splatoon.mjs",
+    "check:splatoon": "node scripts/headless-splatoon.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {

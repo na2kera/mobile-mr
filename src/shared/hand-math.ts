@@ -257,3 +257,35 @@ export function isPointingPose(world: readonly Vec3[]): boolean {
     fingerCurled(world, PINKY_PIP, PINKY_TIP)
   );
 }
+
+/** 4 指（人差し指〜小指）がすべて曲がっている = グー（親指は見ない） */
+export function isFistPose(world: readonly Vec3[]): boolean {
+  if (world.length < LANDMARK_COUNT) return false;
+  return (
+    fingerCurled(world, INDEX_PIP, INDEX_TIP) &&
+    fingerCurled(world, MIDDLE_PIP, MIDDLE_TIP) &&
+    fingerCurled(world, RING_PIP, RING_TIP) &&
+    fingerCurled(world, PINKY_PIP, PINKY_TIP)
+  );
+}
+
+/** 4 指がすべて伸びている = パー */
+export function isOpenPose(world: readonly Vec3[]): boolean {
+  if (world.length < LANDMARK_COUNT) return false;
+  return (
+    fingerExtended(world, INDEX_PIP, INDEX_TIP) &&
+    fingerExtended(world, MIDDLE_PIP, MIDDLE_TIP) &&
+    fingerExtended(world, RING_PIP, RING_TIP) &&
+    fingerExtended(world, PINKY_PIP, PINKY_TIP)
+  );
+}
+
+export type HandShape = "fist" | "open" | "point" | "other";
+
+/** 手の形（排他）。08 のチャージ（グー）→ 発射（パー）が使う */
+export function handShape(world: readonly Vec3[]): HandShape {
+  if (isFistPose(world)) return "fist";
+  if (isOpenPose(world)) return "open";
+  if (isPointingPose(world)) return "point";
+  return "other";
+}

@@ -1,0 +1,315 @@
+// Phase 8 (08-splatoon): 試合のルール（純粋クラス。サーバーが権威として持つ）。個人戦。
+//   - 参加順に 8 色から自分の色を割り当てる（その試合で未使用の色を優先。再利用時はその色のセルを消す）
+//   - 最初の 1 人が入ったら待機（waitSec。全員がマーカーを読み取る時間）→ 試合（matchSec）→
+//     結果（resultSec）→ 格子とインクをリセットして次の試合
+//   - 発射（shot）は位置・速度・半径・インク残量を検証し、着弾を simulateInk で決めて格子に塗る
+//   - 得点 = 自分の色のセル数（四方の壁 + 床）。勝者はセル最多の人（同点は複数）
+// 06 / 06-2 の *-game.ts と同じく three.js に依存しない（Node テスト対象）
+import {
+  DEFAULT_FIELD,
+  MAX_INK_COLORS,
+  InkGrid,
+  fieldSurfaces,
+  inkPerShot,
+  norm,
+  simulateInk,
+  type FieldConfig,
+  type InkLanding,
+  type InkColor,
+  type SurfaceFrame,
+  type V3,
+} from "./splatoon-sim.ts";
+
+export type Phase = "waiting" | "play" | "result";
+
+export type Player = { id: string; name: string; color: InkColor };
+
+export type Shot = {
+  seq: number;
+  by: string;
+  color: InkColor;
+  pos: V3;
+  vel: V3;
+  radius: number;
+  /** 権威時刻 [ms] */
+  launchedAt: number;
+  landing: InkLanding | null;
+};
+
+export type GameEvent =
+  | { kind: "start" }
+  /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空） */
+  | { kind: "result"; winners: string[]; winnerNames: string[] }
+  | { kind: "shot"; by: string };
+
+export type GameSnapshot = {
+  t: number;
+  seq: number;
+  phase: Phase;
+  /** 今のフェーズが終わる権威時刻 [ms] */
+  phaseEndsAt: number;
+  players: Player[];
+  /** プレイヤーごとの塗ったセル数（四方の壁 + 床） */
+  scores: Record<string, number>;
+  totalCells: number;
+  /** result 中の勝者（同点は複数、play 中は null） */
+  winners: string[] | null;
+  /** 勝者の表示名（結果確定時に固定。勝者が退出しても名前で表示できる） */
+  winnerNames: string[] | null;
+  /** 直近の発射（飛行の描画用。着弾済みのものも maxFlightSec の間は残す） */
+  shots: Shot[];
+  /** プレイヤーごとのインク残量 0..1（サーバー権威。クライアントはこれに予測を重ねる） */
+  ink: Record<string, number>;
+  /** Surface ごとの格子（welcome / 結果後のリセット時だけ載せる） */
+  grids?: Record<string, string>;
+  event?: GameEvent;
+};
+
+/** 1 人あたりの発射の上限 [回/秒]（クライアントの連射 fireRatePerSec=6 に余裕を持たせる。総量はインクが縛る） */
+export const SHOT_RATE_PER_SEC = 9;
+/** 発射位置の距離上限の最低値 [m]（実際はコートの対角 + 1m まで許す。コートを広げても奥から撃てる） */
+export const MAX_SHOT_DIST_M = 6;
+/** 発射位置は直近の頭の位置からこの距離 [m] 以内（腕の長さ + 手トラッキングの誤差） */
+export const MAX_SHOT_FROM_HEAD_M = 1.2;
+
+export class SplatoonGame {
+  readonly config: FieldConfig;
+  readonly surfaces: SurfaceFrame[];
+  readonly grids = new Map<string, InkGrid>();
+  readonly players = new Map<string, Player>();
+  phase: Phase = "waiting";
+  phaseEndsAt = Infinity;
+  winners: string[] | null = null;
+  winnerNames: string[] | null = null;
+  private seq = 0;
+  private shots: Shot[] = [];
+  private readonly shotTimes = new Map<string, number[]>();
+  /** 直近の頭の位置（発射位置の検証用） */
+  private readonly headPos = new Map<string, V3>();
+  /** インク残量（0..1）と最後に撃った時刻（回復の遅延用） */
+  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number }>();
+  /** この試合で一度でも使った色（退出者の塗りを新しい参加者が引き継がないように、未使用の色を優先する） */
+  private readonly usedColors = new Set<InkColor>();
+  /** 直近の join で色を再利用してその色のセルを消したか（サーバーはこれを見て格子を配り直す） */
+  lastJoinClearedColor = false;
+  /** 発射位置の距離上限（コートの対角 + 1m） */
+  private readonly maxShotDist: number;
+  private started = false;
+  lastRejectReason = "";
+
+  constructor(config: Partial<FieldConfig> = {}) {
+    this.config = { ...DEFAULT_FIELD, ...config };
+    this.surfaces = fieldSurfaces(this.config);
+    for (const s of this.surfaces) this.grids.set(s.id, new InkGrid(s, this.config.cellM));
+    const c = this.config;
+    this.maxShotDist = Math.max(MAX_SHOT_DIST_M, Math.hypot(c.wallW / 2, c.floorDrop + c.wallH, c.floorDepth) + 1);
+  }
+
+  get totalCells(): number {
+    let n = 0;
+    for (const g of this.grids.values()) n += g.cells.length;
+    return n;
+  }
+
+  /** プレイヤーごとの塗ったセル数（色番号で集計して id に引き当てる） */
+  scores(): Record<string, number> {
+    const byColor = new Array<number>(MAX_INK_COLORS + 1).fill(0);
+    for (const g of this.grids.values()) {
+      const c = g.counts();
+      for (let i = 1; i <= MAX_INK_COLORS; i++) byColor[i] += c[i];
+    }
+    const out: Record<string, number> = {};
+    for (const p of this.players.values()) out[p.id] = byColor[p.color];
+    return out;
+  }
+
+  /**
+   * 色の割当。この試合でまだ使っていない色を優先し、全色使用済みなら「今いない人」の色を再利用する。
+   * 再利用時はその色のセルを消す（退出者の塗りを新しい参加者が得点として引き継がないように）
+   */
+  private pickColor(): InkColor {
+    const active = new Set([...this.players.values()].map((p) => p.color));
+    this.lastJoinClearedColor = false;
+    for (let c = 1; c <= MAX_INK_COLORS; c++) {
+      if (!this.usedColors.has(c) && !active.has(c)) return c;
+    }
+    let c: InkColor = 1;
+    while (active.has(c) && c < MAX_INK_COLORS) c++;
+    for (const g of this.grids.values()) {
+      for (let i = 0; i < g.cells.length; i++) if (g.cells[i] === c) g.cells[i] = 0;
+    }
+    this.lastJoinClearedColor = true;
+    return c;
+  }
+
+  join(id: string, name: string, now: number): GameEvent[] {
+    const color = this.pickColor();
+    this.usedColors.add(color);
+    this.players.set(id, { id, name, color });
+    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity });
+    if (!this.started) {
+      // 最初の 1 人。すぐには始めず、全員がマーカーを読み取れるよう waitSec 待つ（tick が開始する。
+      // 入室の速さの差がそのまま得点差にならないように）
+      this.started = true;
+      this.phase = "waiting";
+      this.phaseEndsAt = now + this.config.waitSec * 1000;
+    }
+    return [];
+  }
+
+  leave(id: string) {
+    this.players.delete(id);
+    this.shotTimes.delete(id);
+    this.headPos.delete(id);
+    this.inkState.delete(id);
+  }
+
+  updatePose(id: string, pos: V3, now: number) {
+    if (!this.players.has(id)) return;
+    this.refreshInk(id, now);
+    this.headPos.set(id, pos);
+  }
+
+  /** 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ）。撃った直後 inkRegenDelaySec は回復しない */
+  private refreshInk(id: string, now: number) {
+    const st = this.inkState.get(id);
+    if (!st) return;
+    const regenFrom = Math.max(st.updatedMs, st.lastShotMs + this.config.inkRegenDelaySec * 1000);
+    const dt = Math.max(0, (now - regenFrom) / 1000);
+    st.updatedMs = now;
+    if (dt <= 0) return;
+    st.ink = Math.min(1, st.ink + dt / this.config.inkFullSec);
+  }
+
+  /** いまのインク残量（0..1）。存在しない id は 0 */
+  inkOf(id: string, now: number): number {
+    this.refreshInk(id, now);
+    return this.inkState.get(id)?.ink ?? 0;
+  }
+
+  private startMatch(now: number): GameEvent[] {
+    this.phase = "play";
+    this.phaseEndsAt = now + this.config.matchSec * 1000;
+    this.winners = null;
+    this.winnerNames = null;
+    // 新しい試合では「今いる人の色」だけが使用中（退出者の色は再び新品として使える）
+    this.usedColors.clear();
+    for (const p of this.players.values()) this.usedColors.add(p.color);
+    for (const g of this.grids.values()) g.clear();
+    for (const st of this.inkState.values()) {
+      st.ink = 1;
+      st.updatedMs = now;
+      st.lastShotMs = -Infinity;
+    }
+    this.shots = [];
+    this.seq++;
+    return [{ kind: "start" }];
+  }
+
+  tick(now: number): GameEvent[] {
+    if (!this.started) return [];
+    // 古い発射は捨てる（描画に要らない）
+    const keepAfter = now - this.config.maxFlightSec * 1000 - 500;
+    if (this.shots.length > 0 && this.shots[0].launchedAt < keepAfter) {
+      this.shots = this.shots.filter((s) => s.launchedAt >= keepAfter);
+    }
+    if (now < this.phaseEndsAt) return [];
+    if (this.phase === "waiting") return this.startMatch(now);
+    if (this.phase === "play") {
+      const scores = this.scores();
+      const max = Math.max(0, ...Object.values(scores));
+      this.winners = max > 0 ? Object.keys(scores).filter((id) => scores[id] === max) : [];
+      // 名前は結果確定時に固定する（勝者が result 中に退出しても名前で表示できる）
+      this.winnerNames = this.winners.map((id) => this.players.get(id)?.name ?? id);
+      this.phase = "result";
+      this.phaseEndsAt = now + this.config.resultSec * 1000;
+      this.seq++;
+      return [{ kind: "result", winners: this.winners, winnerNames: this.winnerNames }];
+    }
+    return this.startMatch(now);
+  }
+
+  /**
+   * 発射。速度・半径は固定値（連射）なので、上限を超えていたら拒否。
+   * インクタンクを検証して減らし、着弾は simulateInk で決めて格子に塗る。受理したら Shot を返す
+   */
+  shoot(id: string, pos: V3, vel: V3, radius: number, now: number): Shot | null {
+    const p = this.players.get(id);
+    if (!p) {
+      this.lastRejectReason = "unknown player";
+      return null;
+    }
+    if (this.phase !== "play") {
+      this.lastRejectReason = "not playing";
+      return null;
+    }
+    // レート制限を検証より先に（不正な発射の連投でログと返信が無制限に出ないように）
+    const times = this.shotTimes.get(id) ?? [];
+    while (times.length > 0 && now - times[0] > 1000) times.shift();
+    if (times.length >= SHOT_RATE_PER_SEC) {
+      this.lastRejectReason = "rate limited";
+      return null;
+    }
+    times.push(now);
+    this.shotTimes.set(id, times);
+    const cfg = this.config;
+    if (!(norm(pos) <= this.maxShotDist) || !(pos[2] > 0)) {
+      this.lastRejectReason = "bad position";
+      return null;
+    }
+    const head = this.headPos.get(id);
+    if (!head) {
+      this.lastRejectReason = "no pose yet";
+      return null;
+    }
+    if (!(norm([pos[0] - head[0], pos[1] - head[1], pos[2] - head[2]]) <= MAX_SHOT_FROM_HEAD_M)) {
+      this.lastRejectReason = "too far from head";
+      return null;
+    }
+    if (!(norm(vel) <= cfg.shotSpeed * 1.05) || !(radius >= cfg.shotRadius * 0.9 && radius <= cfg.shotRadius * 1.1)) {
+      this.lastRejectReason = "bad velocity/radius";
+      return null;
+    }
+    // インクタンク: 1 発 = 1/tankShots。足りなければ拒否（残量はサーバーが権威）
+    this.refreshInk(id, now);
+    const st = this.inkState.get(id)!;
+    const cost = inkPerShot(cfg);
+    if (st.ink + 1e-9 < cost) {
+      this.lastRejectReason = "no ink";
+      return null;
+    }
+    st.ink = Math.max(0, st.ink - cost);
+    st.lastShotMs = now;
+    const landing = simulateInk(pos, vel, this.surfaces, cfg);
+    if (landing?.hit) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.color);
+    const shot: Shot = { seq: ++this.seq, by: id, color: p.color, pos, vel, radius, launchedAt: now, landing };
+    this.shots.push(shot);
+    return shot;
+  }
+
+  snapshot(now: number, withGrids = false, event?: GameEvent): GameSnapshot {
+    const snap: GameSnapshot = {
+      t: now,
+      seq: this.seq,
+      phase: this.phase,
+      phaseEndsAt: this.phaseEndsAt,
+      players: [...this.players.values()],
+      scores: this.scores(),
+      totalCells: this.totalCells,
+      winners: this.winners,
+      winnerNames: this.winnerNames,
+      shots: this.shots.slice(),
+      ink: {},
+    };
+    for (const id of this.players.keys()) {
+      // 切り捨て（四捨五入だと実残量より多く見え、クライアントが空撃ちする）。0..1 にクランプ
+      snap.ink[id] = Math.min(1, Math.max(0, Math.floor(this.inkOf(id, now) * 100) / 100));
+    }
+    if (withGrids) {
+      snap.grids = {};
+      for (const [id, g] of this.grids) snap.grids[id] = g.encode();
+    }
+    if (event) snap.event = event;
+    return snap;
+  }
+}
