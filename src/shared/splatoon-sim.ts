@@ -81,6 +81,9 @@ export const DEFAULT_FIELD: FieldConfig = {
 
 export const WALL_ID = "wall";
 export const FLOOR_ID = "floor";
+export const LEFT_ID = "left";
+export const RIGHT_ID = "right";
+export const BACK_ID = "back";
 
 function cross(a: V3, b: V3): V3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -95,31 +98,36 @@ export function norm(a: V3): number {
   return Math.hypot(a[0], a[1], a[2]);
 }
 
-/** 壁（Z=0）と床（Y=-floorDrop）の 2 枚 */
+/**
+ * 四方の壁と床の 5 枚。床（wallW × floorDepth）を囲む箱型のコートで、
+ * 正面 = マーカーの壁（Z=0）、左右 = x=±wallW/2、背面 = z=floorDepth。
+ * 左右・背面は現実の壁が無くても立つ仮想の壁。法線はすべてコートの内側を向く。
+ * 壁の縦の中心はマーカーの高さ（y=0）で、下端は床（y=-floorDrop = -wallH/2 のとき接続）
+ */
 export function fieldSurfaces(cfg: FieldConfig): SurfaceFrame[] {
-  const wallX: V3 = [1, 0, 0];
-  const wallY: V3 = [0, -1, 0];
-  const floorX: V3 = [1, 0, 0];
-  const floorY: V3 = [0, 0, 1];
+  const down: V3 = [0, -1, 0];
+  const halfW = cfg.wallW / 2;
+  const zMid = cfg.floorDepth / 2;
+  const frame = (id: string, origin: V3, xAxis: V3, widthM: number, heightM: number, yAxis: V3 = down): SurfaceFrame => ({
+    id,
+    origin,
+    xAxis,
+    yAxis,
+    normal: cross(yAxis, xAxis),
+    widthM,
+    heightM,
+  });
   return [
-    {
-      id: WALL_ID,
-      origin: [0, 0, 0],
-      xAxis: wallX,
-      yAxis: wallY,
-      normal: cross(wallY, wallX), // (0,-1,0) × (1,0,0) = (0,0,1)
-      widthM: cfg.wallW,
-      heightM: cfg.wallH,
-    },
-    {
-      id: FLOOR_ID,
-      origin: [0, -cfg.floorDrop, cfg.floorDepth / 2],
-      xAxis: floorX,
-      yAxis: floorY,
-      normal: cross(floorY, floorX), // (0,0,1) × (1,0,0) = (0,1,0)
-      widthM: cfg.wallW,
-      heightM: cfg.floorDepth,
-    },
+    // 正面（マーカーの壁）: 法線 +Z。UV は部屋の中から見て左上 (0,0)
+    frame(WALL_ID, [0, 0, 0], [1, 0, 0], cfg.wallW, cfg.wallH),
+    // 床: 法線 +Y。v は壁 → 部屋側
+    frame(FLOOR_ID, [0, -cfg.floorDrop, zMid], [1, 0, 0], cfg.wallW, cfg.floorDepth, [0, 0, 1]),
+    // 左（x=-wallW/2）: 法線 +X。u は背面 → 正面（部屋の中から見て左 → 右）
+    frame(LEFT_ID, [-halfW, 0, zMid], [0, 0, -1], cfg.floorDepth, cfg.wallH),
+    // 右（x=+wallW/2）: 法線 -X。u は正面 → 背面
+    frame(RIGHT_ID, [halfW, 0, zMid], [0, 0, 1], cfg.floorDepth, cfg.wallH),
+    // 背面（z=floorDepth）: 法線 -Z（マーカー側を向く）
+    frame(BACK_ID, [0, 0, cfg.floorDepth], [-1, 0, 0], cfg.wallW, cfg.wallH),
   ];
 }
 

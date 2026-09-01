@@ -7,8 +7,10 @@
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import {
+  BACK_ID,
   DEFAULT_FIELD,
   FLOOR_ID,
+  LEFT_ID,
   InkGrid,
   WALL_ID,
   fieldSurfaces,
@@ -35,8 +37,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ================= 1. sim =================
 {
   const cfg = { ...DEFAULT_FIELD, wallW: 2, wallH: 1, floorDrop: 1, floorDepth: 1.5 };
-  const [wall, floor] = fieldSurfaces(cfg);
+  const all = fieldSurfaces(cfg);
+  const [wall, floor, left, right, back] = all;
+  check("5 枚（正面・床・左・右・背面）", all.length === 5 && left.id === LEFT_ID && back.id === BACK_ID);
   check("壁の法線は +Z、床の法線は +Y", wall.normal[2] === 1 && floor.normal[1] === 1);
+  check("左右の法線はコートの内側（+X / -X）", left.normal[0] === 1 && right.normal[0] === -1);
+  check("背面の法線は -Z（マーカー側）", back.normal[2] === -1);
+  // 左の壁: 正面の壁際・上端 = UV (1, 0)
+  const ltl = frameUvToPoint(left, [1, 0]);
+  check("左の壁: UV (1,0) は正面の壁際の上 (-1, +wallH/2, 0)", near(ltl[0], -1) && near(ltl[1], 0.5) && near(ltl[2], 0));
   const wtl = frameUvToPoint(wall, [0, 0]);
   check("壁: UV (0,0) は左上 (-w/2, +h/2, 0)", near(wtl[0], -1) && near(wtl[1], 0.5) && near(wtl[2], 0));
   const ftl = frameUvToPoint(floor, [0, 0]);
@@ -60,6 +69,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 上向きに撃つと放物線の下りで床へ（上りで面をまたがない）
   const l3 = simulateInk([0, 0, 1], [0, 2, -0.5], [wall, floor], cfg);
   check("山なりで床へ", l3 && l3.surfaceId === FLOOR_ID && l3.hitT > 1);
+  // 左の壁への着弾: 真横へ撃つと x=-1（左の壁）に t=0.2 で当たる
+  const lw = simulateInk([0, 0, 1], [-5, 0, 0], all, cfg);
+  check("左の壁に当たる", lw && lw.surfaceId === LEFT_ID && near(lw.hitT, 0.2) && lw.hit);
+  // 背面への着弾: 部屋の中から +Z へ
+  const bw = simulateInk([0, 0, 0.5], [0, 0, 5], all, cfg);
+  check("背面の壁に当たる", bw && bw.surfaceId === BACK_ID && near(bw.hitT, 0.2) && bw.hit);
+  // 背面の外側（z > floorDepth）から -Z へ撃っても背面には塗れない（表側からだけ）
+  const bw2 = simulateInk([0, 0, 3], [0, 0, -5], [back], cfg);
+  check("背面の外側からは当たらない", bw2 === null);
   // 範囲外（壁の横）は当たらず、床の範囲も外れれば null
   const l4 = simulateInk([3, 0, 0.5], [0, 0, -5], [wall, floor], cfg);
   check("矩形の外で面を横切ると hit=false の着弾（突き抜けない）", l4 && l4.hit === false && l4.surfaceId === WALL_ID && near(l4.hitT, 0.1));
@@ -146,7 +164,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const ev2 = g.tick(33000);
   check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && Object.values(g.scores()).every((v) => v === 0));
   const snap = g.snapshot(33000, true);
-  check("snapshot: grids は壁と床、totalCells は両方の和", Object.keys(snap.grids).length === 2 && snap.totalCells === snap.grids.wall.length + snap.grids.floor.length);
+  check("snapshot: grids は 5 枚、totalCells は全部の和", Object.keys(snap.grids).length === 5 && snap.totalCells === Object.values(snap.grids).reduce((a, gs) => a + gs.length, 0));
   check("snapshot: ink に各プレイヤーの残量", typeof snap.ink.p2 === "number" && snap.ink.p2 <= 1);
   check("新しい試合でインクは満タンに戻る", snap.ink.p2 === 1 && snap.ink.p3 === 1);
 }

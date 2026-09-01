@@ -93,7 +93,9 @@ function parseRoomConfig(url: URL): SplatoonRoomConfig | null {
   const gravity = num("gravity", DEFAULT_FIELD.gravity, 0, 30);
   const matchSec = num("matchSec", DEFAULT_FIELD.matchSec, 10, 600);
   if (wallW === null || wallH === null || floorDrop === null || floorDepth === null || gravity === null || matchSec === null) return null;
-  const cells = (wallW * wallH + wallW * floorDepth) / (DEFAULT_FIELD.cellM * DEFAULT_FIELD.cellM);
+  // 四方の壁（正面 + 背面 + 左右）+ 床
+  const area = wallW * wallH * 2 + floorDepth * wallH * 2 + wallW * floorDepth;
+  const cells = area / (DEFAULT_FIELD.cellM * DEFAULT_FIELD.cellM);
   if (cells > MAX_CELLS) return null;
   return { markerId, markerMm, wallW, wallH, floorDrop, floorDepth, gravity, matchSec };
 }
