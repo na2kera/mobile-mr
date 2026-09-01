@@ -129,20 +129,21 @@ async function openPage(target, name) {
   return page;
 }
 
-/** HUD の me / game 行を読む */
+/** HUD の me / game 行を読む（個人戦: scores は p1:107,p2:324 形式） */
 function parseHud(hud) {
-  const g = hud.match(/game: phase=(\S+) left=(\S+) team=(\S+) players=(\S*) scores=(\d+)\/(\d+)\/(\d+) shots=(\d+)\/(\d+)/);
+  const g = hud.match(/game: phase=(\S+) left=(\S+) color=(\S+) players=(\S*) scores=(\S*) total=(\d+) shots=(\d+)\/(\d+)/);
+  const scores = {};
+  for (const m of (g?.[5] ?? "").matchAll(/(p\d+):(\d+)/g)) scores[m[1]] = Number(m[2]);
   return {
     me: hud.match(/\bme=(\S+)/)?.[1] ?? "-",
     marker: hud.match(/marker=(\S+)/)?.[1] ?? "",
     phase: g?.[1] ?? "",
-    team: g ? Number(g[3]) : 0,
+    color: g ? Number(g[3]) : 0,
     players: (g?.[4] ?? "").split(",").filter(Boolean),
-    scoreA: g ? Number(g[5]) : -1,
-    scoreB: g ? Number(g[6]) : -1,
-    total: g ? Number(g[7]) : 0,
-    sent: g ? Number(g[8]) : -1,
-    accepted: g ? Number(g[9]) : -1,
+    scores,
+    total: g ? Number(g[6]) : 0,
+    sent: g ? Number(g[7]) : -1,
+    accepted: g ? Number(g[8]) : -1,
   };
 }
 
@@ -187,18 +188,18 @@ try {
   const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
   const hud1 = await readHud(p1);
   const hud2 = await readHud(p2);
-  const show = (h) => `me=${h.me} marker=${h.marker} phase=${h.phase} team=${h.team} players=${h.players.join("|")} scores=${h.scoreA}/${h.scoreB}/${h.total} shots=${h.sent}/${h.accepted}`;
+  const show = (h) => `me=${h.me} marker=${h.marker} phase=${h.phase} color=${h.color} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)}/${h.total} shots=${h.sent}/${h.accepted}`;
   console.log(`window1: ${show(hud1)}`);
   console.log(`window2: ${show(hud2)}`);
   check("両ウィンドウでマーカーが検出されている", hud1.marker.startsWith("id=") && hud2.marker.startsWith("id="));
   check("両方が同じ room に入り 2 人になっている", hud1.players.length === 2 && hud2.players.length === 2);
-  check("別チームに分かれている（オレンジ / ブルー）", hud1.team > 0 && hud2.team > 0 && hud1.team !== hud2.team, `${hud1.team} vs ${hud2.team}`);
-  check("ウィンドウ 1 で発射が送られ受理されている（形の判定 → チャージ → 発射 → サーバー検証）", hud1.sent >= 3 && hud1.accepted >= 3, `${hud1.sent}/${hud1.accepted}`);
-  check("ウィンドウ 2 でも発射が受理されている", hud2.sent >= 3 && hud2.accepted >= 3, `${hud2.sent}/${hud2.accepted}`);
-  check("両チームが得点している（着弾と塗りが field 座標で合っている）", hud1.scoreA > 0 && hud1.scoreB > 0, `${hud1.scoreA}/${hud1.scoreB}`);
+  check("個人戦: 別の色が割り当たっている", hud1.color > 0 && hud2.color > 0 && hud1.color !== hud2.color, `${hud1.color} vs ${hud2.color}`);
+  check("ウィンドウ 1 で連射が送られ受理されている（形の判定 → 連射 → サーバー検証）", hud1.sent >= 5 && hud1.accepted >= 5, `${hud1.sent}/${hud1.accepted}`);
+  check("ウィンドウ 2 でも連射が受理されている", hud2.sent >= 5 && hud2.accepted >= 5, `${hud2.sent}/${hud2.accepted}`);
+  check("両プレイヤーが得点している（着弾と塗りが field 座標で合っている）", (hud1.scores[hud1.me] ?? 0) > 0 && (hud2.scores[hud2.me] ?? 0) > 0, JSON.stringify(hud1.scores));
   // 得点は 1 秒ごとの state で更新されるので、読み取りタイミングで少し違い得る
-  const close = Math.abs(hud1.scoreA - hud2.scoreA) + Math.abs(hud1.scoreB - hud2.scoreB) <= Math.max(200, hud1.total * 0.02);
-  check("両ウィンドウの HUD でほぼ同じ得点が見えている（権威状態の配信）", close, `${hud1.scoreA}/${hud1.scoreB} vs ${hud2.scoreA}/${hud2.scoreB}`);
+  const diff = Object.keys({ ...hud1.scores, ...hud2.scores }).reduce((a, k) => a + Math.abs((hud1.scores[k] ?? 0) - (hud2.scores[k] ?? 0)), 0);
+  check("両ウィンドウの HUD でほぼ同じ得点が見えている（権威状態の配信）", diff <= Math.max(200, hud1.total * 0.02), `${JSON.stringify(hud1.scores)} vs ${JSON.stringify(hud2.scores)}`);
   const hits = landings.filter((l) => l.where !== "miss");
   check("着弾のほとんどが壁か床に当たっている（外れが半分未満）", landings.length >= 6 && hits.length > landings.length / 2, `${hits.length}/${landings.length} hit`);
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions].slice(0, 2).join(" | "));

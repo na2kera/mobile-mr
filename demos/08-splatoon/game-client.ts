@@ -29,7 +29,8 @@ export type GameClientEvents = {
 };
 
 export type GameClient = {
-  sendPose: (pose: PlayerPose) => void;
+  /** 送れたら true */
+  sendPose: (pose: PlayerPose) => boolean;
   /** 送れたら true */
   sendShot: (pos: V3, vel: V3, radius: number) => boolean;
   dispose: () => void;
@@ -114,7 +115,7 @@ export function connectGame(room: string, name: string, config: SplatoonRoomConf
 
   return {
     sendPose(pose) {
-      send({ type: "pose", ...pose });
+      return send({ type: "pose", ...pose });
     },
     sendShot(pos, vel, radius) {
       return send({ type: "shot", pos, vel, radius });

@@ -53,25 +53,29 @@ export type FieldConfig = {
   inkFullOwnInkSec: number;
   /** それ以外のときの自然回復で満タンまで [s] */
   inkFullStandSec: number;
+  /** 撃ってからこの時間 [s] は回復しない（撃ちながら回復して無限に撃てるのを防ぐ） */
+  inkRegenDelaySec: number;
   /** 格子の 1 セル [m] */
   cellM: number;
 };
 
 export const DEFAULT_FIELD: FieldConfig = {
-  wallW: 1.5,
-  wallH: 1.0,
-  floorDrop: 1.0,
-  floorDepth: 1.5,
+  // 壁の下端（wallH/2 = 1.2m 下）と床がちょうど接続する寸法。マーカーは床から 1.2m の高さに貼る想定
+  wallW: 3.0,
+  wallH: 2.4,
+  floorDrop: 1.2,
+  floorDepth: 2.5,
   gravity: 4,
   maxFlightSec: 3,
   matchSec: 90,
   resultSec: 8,
   shotSpeed: 5,
   shotRadius: 0.06,
-  tankShots: 15,
+  tankShots: 40,
   fireRatePerSec: 4,
-  inkFullOwnInkSec: 3,
-  inkFullStandSec: 20,
+  inkFullOwnInkSec: 2,
+  inkFullStandSec: 8,
+  inkRegenDelaySec: 1,
   cellM: 0.02,
 };
 
@@ -210,8 +214,10 @@ export function inkPerShot(cfg: FieldConfig): number {
 
 // ---- 塗りの格子（サーバーの権威状態。ストロークの列ではなく「塗った結果」を持つ。07 の痛点への回答） ----
 
-/** セルの値: 0 = 未塗装, 1 = チーム A, 2 = チーム B */
-export type Team = 1 | 2;
+/** 色の数の上限（= Room の人数上限。個人戦なので 1 人 1 色） */
+export const MAX_INK_COLORS = 8;
+/** セルの値: 0 = 未塗装, 1..MAX_INK_COLORS = プレイヤーの色番号 */
+export type InkColor = number;
 
 export class InkGrid {
   readonly cols: number;
@@ -228,8 +234,8 @@ export class InkGrid {
     this.cells = new Uint8Array(this.cols * this.rows);
   }
 
-  /** UV を中心に半径 radiusM の円を team で塗る。塗り替えたセル数を返す */
-  stamp(uv: V2, radiusM: number, team: Team): number {
+  /** UV を中心に半径 radiusM の円を color（1..MAX_INK_COLORS）で塗る。塗り替えたセル数を返す */
+  stamp(uv: V2, radiusM: number, color: InkColor): number {
     const cx = uv[0] * this.cols;
     const cy = uv[1] * this.rows;
     const rx = radiusM / this.surface.widthM * this.cols;
@@ -245,8 +251,8 @@ export class InkGrid {
         const dy = (y + 0.5 - cy) / ry;
         if (dx * dx + dy * dy > 1) continue;
         const i = y * this.cols + x;
-        if (this.cells[i] !== team) {
-          this.cells[i] = team;
+        if (this.cells[i] !== color) {
+          this.cells[i] = color;
           changed++;
         }
       }
@@ -258,9 +264,9 @@ export class InkGrid {
     this.cells.fill(0);
   }
 
-  /** チームごとのセル数 [未塗装, A, B] */
-  counts(): [number, number, number] {
-    const c: [number, number, number] = [0, 0, 0];
+  /** 色ごとのセル数（index 0 = 未塗装、1.. = 色番号） */
+  counts(): number[] {
+    const c = new Array<number>(MAX_INK_COLORS + 1).fill(0);
     for (const v of this.cells) c[v]++;
     return c;
   }
@@ -274,6 +280,9 @@ export class InkGrid {
 
   decode(s: string) {
     const n = Math.min(s.length, this.cells.length);
-    for (let i = 0; i < n; i++) this.cells[i] = (s.charCodeAt(i) - 48) as 0 | 1 | 2;
+    for (let i = 0; i < n; i++) {
+      const v = s.charCodeAt(i) - 48;
+      this.cells[i] = v >= 0 && v <= MAX_INK_COLORS ? v : 0;
+    }
   }
 }

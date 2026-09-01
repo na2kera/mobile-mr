@@ -8,7 +8,7 @@ import type { GameSnapshot, Shot } from "./splatoon-game.ts";
 export const SPLATOON_PATH = "/api/splatoon";
 
 /** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否） */
-export const SPLATOON_PROTOCOL_VERSION = 2;
+export const SPLATOON_PROTOCOL_VERSION = 3;
 
 export const NAME_MAX_LENGTH = 12;
 

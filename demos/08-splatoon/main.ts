@@ -33,13 +33,13 @@ import {
   simulateInk,
   uvInside,
 } from "../../src/shared/splatoon-sim";
-import type { FieldConfig, InkLanding, SurfaceFrame, Team, V3 } from "../../src/shared/splatoon-sim";
+import type { FieldConfig, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import { NAME_MAX_LENGTH } from "../../src/shared/splatoon-protocol";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
-import { InkView, TEAM_COLORS, TEAM_NAMES } from "./ink-view";
+import { InkView, inkColorHex, inkColorName } from "./ink-view";
 import { scriptedSplatHand } from "./fake-splat-hand";
 
 // Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
@@ -179,12 +179,17 @@ camera.add(inkPanel.mesh);
 
 // ---- インクの玉（飛行中）----
 const inkGeometry = new THREE.SphereGeometry(1, 16, 12);
-const inkMaterials: Record<Team, THREE.MeshStandardMaterial> = {
-  1: new THREE.MeshStandardMaterial({ color: TEAM_COLORS[1], roughness: 0.4 }),
-  2: new THREE.MeshStandardMaterial({ color: TEAM_COLORS[2], roughness: 0.4 }),
-};
-function createInkMesh(team: Team, radius: number): THREE.Mesh {
-  const m = new THREE.Mesh(inkGeometry, inkMaterials[team]);
+const inkMaterials = new Map<number, THREE.MeshStandardMaterial>();
+function inkMaterialOf(color: InkColor): THREE.MeshStandardMaterial {
+  let m = inkMaterials.get(color);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({ color: inkColorHex(color), roughness: 0.4 });
+    inkMaterials.set(color, m);
+  }
+  return m;
+}
+function createInkMesh(color: InkColor, radius: number): THREE.Mesh {
+  const m = new THREE.Mesh(inkGeometry, inkMaterialOf(color));
   m.scale.setScalar(radius * 0.45);
   field.add(m);
   return m;
@@ -285,7 +290,7 @@ function updatePeers(now: number) {
     peer.group.quaternion.slerp(peer.targetQuat, alpha);
     const opacity = peer.tracking ? 1 : 0.3;
     for (const m of peer.materials) m.opacity = opacity;
-    const color = teamColorOf(id);
+    const color = colorHexOf(id);
     peer.materials[0].color.setHex(color);
     for (const [i, view] of peer.hands.entries()) {
       const target = peer.handTargets[i];
@@ -389,7 +394,8 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
     // 連射中にフィールドが飛ぶと発射の向きがずれるので lerp だけ
-    canSnap: () => performance.now() - lastShotMs > 500,
+    // 発射間隔（250ms）よりわずかに長く。連射の合間には再スナップできる
+    canSnap: () => performance.now() - lastShotMs > 300,
   });
 }
 
@@ -484,7 +490,7 @@ function updateHands(now: number) {
   // 自分の手はチーム色
   for (const slot of handSlots.slots) {
     if (!slot.view.visible) continue;
-    slot.view.setColor(myTeam ? TEAM_COLORS[myTeam] : 0xe8eaed);
+    slot.view.setColor(myColor ? inkColorHex(myColor) : 0xe8eaed);
   }
 }
 
@@ -502,7 +508,7 @@ let netStatus = "idle";
 let client: GameClient | null = null;
 let joined = false;
 let auth: { state: GameSnapshot; recvMs: number } | null = null;
-let myTeam: Team | null = null;
+let myColor: InkColor | null = null;
 let cameraError = "";
 let shotsSent = 0;
 let shotsAccepted = 0;
@@ -510,12 +516,17 @@ let lastRejectReason = "";
 let flash: { text: string; untilMs: number } | null = null;
 let lastEventKey = "";
 
-function teamOf(id: string): Team | null {
-  return auth?.state.players.find((p) => p.id === id)?.team ?? null;
+function colorOf(id: string): InkColor | null {
+  return auth?.state.players.find((p) => p.id === id)?.color ?? null;
 }
-function teamColorOf(id: string): number {
-  const t = teamOf(id);
-  return t ? TEAM_COLORS[t] : 0xe8eaed;
+function colorHexOf(id: string): number {
+  const c = colorOf(id);
+  return c ? inkColorHex(c) : 0xe8eaed;
+}
+function playerName(id: string): string {
+  const p = auth?.state.players.find((x) => x.id === id);
+  const base = p?.name ?? id;
+  return id === selfId ? `${base}（あなた）` : base;
 }
 
 /** 権威時刻 → 受信時刻基準のローカル時刻 [ms] */
@@ -526,7 +537,7 @@ function localTimeOf(serverT: number, refServerT: number, refLocalMs: number): n
 function onState(state: GameSnapshot) {
   const now = performance.now();
   auth = { state, recvMs: now };
-  myTeam = teamOf(selfId);
+  myColor = colorOf(selfId);
   // インク残量はサーバーが権威。受信のたびローカルの予測を上書きする（間はローカルで進める）
   const serverInk = state.ink?.[selfId];
   if (serverInk !== undefined) inkLocal = serverInk;
@@ -536,10 +547,16 @@ function onState(state: GameSnapshot) {
     lastEventKey = key;
     if (ev?.kind === "start") flash = { text: "スタート！ 塗れ！", untilMs: now + 2500 };
     else if (ev?.kind === "result") {
-      const w = ev.winner;
-      flash = { text: w === 0 ? "引き分け！" : `${TEAM_NAMES[w]} の勝ち！`, untilMs: now + 4000 };
+      const w = ev.winners;
+      const text =
+        w.length === 0
+          ? "だれも塗れず…"
+          : w.includes(selfId)
+            ? "あなたの勝ち！"
+            : `${w.map(playerName).join("・")} の勝ち！`;
+      flash = { text, untilMs: now + 4000 };
     }
-    console.log(`[game] event ${ev?.kind} phase=${state.phase} scores=${state.scores.join("/")} players=${state.players.length}`);
+    console.log(`[game] event ${ev?.kind} phase=${state.phase} scores=${JSON.stringify(state.scores)} players=${state.players.length}`);
   }
   if (state.grids) {
     for (const [id, enc] of Object.entries(state.grids)) {
@@ -583,6 +600,7 @@ function connect() {
         selfId = id;
         netStatus = "open";
         joined = true;
+        posesSent = 0;
         fieldCfg = cfg;
         [...peers.keys()].forEach(removePeer);
         peerIds.forEach(createPeer);
@@ -593,7 +611,7 @@ function connect() {
         shots.clear();
         splatted.clear();
         onState(state);
-        console.log(`[game] joined "${ROOM}" as ${id} team=${myTeam} (peers: ${peerIds.join(", ") || "none"})`);
+        console.log(`[game] joined "${ROOM}" as ${id} color=${myColor} (peers: ${peerIds.join(", ") || "none"})`);
       },
       onPeerJoin: (id) => {
         createPeer(id);
@@ -632,6 +650,8 @@ const posePos = new THREE.Vector3();
 const poseQuat = new THREE.Quaternion();
 const poseScale = new THREE.Vector3();
 let lastSendMs = -Infinity;
+/** 入室後に pose を送った回数。サーバーは pose が届く前の発射を拒否するので、最初の pose まで撃たない */
+let posesSent = 0;
 
 function sendPoseIfDue(now: number) {
   if (!client || !markerAnchor?.everDetected) return;
@@ -658,7 +678,7 @@ function sendPoseIfDue(now: number) {
     tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
   };
   if (hands.length > 0) pose.hands = hands;
-  client.sendPose(pose);
+  if (client.sendPose(pose)) posesSent++;
 }
 
 function round3(v: number): number {
@@ -679,13 +699,13 @@ let lastInkUpdateMs = performance.now();
 let lastNoInkFlashMs = -Infinity;
 
 function canShoot(): boolean {
-  return joined && auth?.state.phase === "play" && anchor.visible && myTeam !== null;
+  return joined && auth?.state.phase === "play" && anchor.visible && myColor !== null && posesSent > 0;
 }
 
 /** 頭の真下の床のセルが自分の色か（サーバーの onOwnFloorInk と同じ式。表示と予測用） */
 const headField = new THREE.Vector3();
 function onOwnFloorInkNow(): boolean {
-  if (!anchor.visible || myTeam === null) return false;
+  if (!anchor.visible || myColor === null) return false;
   camera.getWorldPosition(headField);
   field.worldToLocal(headField);
   const uv = framePointToUv(floorFrame, [headField.x, headField.y, headField.z]);
@@ -693,7 +713,7 @@ function onOwnFloorInkNow(): boolean {
   const g = clientGrids.get(FLOOR_ID)!;
   const x = Math.min(g.cols - 1, Math.max(0, Math.floor(uv[0] * g.cols)));
   const y = Math.min(g.rows - 1, Math.max(0, Math.floor(uv[1] * g.rows)));
-  return g.cells[y * g.cols + x] === myTeam;
+  return g.cells[y * g.cols + x] === myColor;
 }
 
 const camWorldPos = new THREE.Vector3();
@@ -726,11 +746,14 @@ function fire(originWorld: THREE.Vector3, now: number, how: string) {
 }
 
 function updateFire(now: number) {
-  // ローカルのインク予測（サーバーと同じ式。state が来たら上書きされる）
-  const dt = Math.min(1, Math.max(0, (now - lastInkUpdateMs) / 1000));
+  // ローカルのインク予測（サーバーと同じ式。state が来たら上書きされる）。撃った直後は回復しない
+  const regenFrom = Math.max(lastInkUpdateMs, lastShotMs + fieldCfg.inkRegenDelaySec * 1000);
+  const dt = Math.min(1, Math.max(0, (now - regenFrom) / 1000));
   lastInkUpdateMs = now;
-  const fullSec = onOwnFloorInkNow() ? fieldCfg.inkFullOwnInkSec : fieldCfg.inkFullStandSec;
-  inkLocal = Math.min(1, inkLocal + dt / fullSec);
+  if (dt > 0) {
+    const fullSec = onOwnFloorInkNow() ? fieldCfg.inkFullOwnInkSec : fieldCfg.inkFullStandSec;
+    inkLocal = Math.min(1, inkLocal + dt / fullSec);
+  }
 
   const openSlot = handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open");
 
@@ -741,7 +764,7 @@ function updateFire(now: number) {
     if (inkLocal + 1e-9 < inkPerShot(fieldCfg)) {
       if (now - lastNoInkFlashMs > 2000) {
         lastNoInkFlashMs = now;
-        flash = { text: "インク切れ！\n自分の色の床の上にいると回復", untilMs: now + 1800 };
+        flash = { text: "インク切れ！\n自分の色の床の上にいると回復", untilMs: now + 2000 };
       }
     } else if (wantHand) {
       fire(openSlot!.contactsWorld[PALM_CONTACT], now, "hand");
@@ -799,7 +822,7 @@ function clearPredicted() {
 }
 
 function addShot(shot: Shot, serverT: number, recvMs: number, launchLocalMs?: number) {
-  const mesh = createInkMesh(shot.team, shot.radius);
+  const mesh = createInkMesh(shot.color, shot.radius);
   shots.set(shot.seq, { shot, launchLocalMs: launchLocalMs ?? localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
 }
 
@@ -822,8 +845,8 @@ function updateShots(now: number) {
     const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing);
     if (landed && shot.landing?.hit && !splatted.has(seq)) {
       splatted.add(seq);
-      inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.team);
-      clientGrids.get(shot.landing.surfaceId)?.stamp(shot.landing.uv, shot.radius, shot.team);
+      inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.color);
+      clientGrids.get(shot.landing.surfaceId)?.stamp(shot.landing.uv, shot.radius, shot.color);
     }
     if (elapsed > fieldCfg.maxFlightSec + 1) {
       live.mesh.removeFromParent();
@@ -835,7 +858,7 @@ function updateShots(now: number) {
     if (now - predicted.sinceMs > PREDICT_MAX_MS) {
       clearPredicted();
     } else {
-      if (!predicted.mesh) predicted.mesh = createInkMesh(myTeam ?? 1, predicted.radius);
+      if (!predicted.mesh) predicted.mesh = createInkMesh(myColor ?? 1, predicted.radius);
       placeInk(predicted.mesh, predicted.pos, predicted.vel, (now - predicted.sinceMs) / 1000, predicted.landing);
     }
   }
@@ -856,11 +879,16 @@ function updateMessages(now: number) {
   const s = auth?.state;
   if (s) {
     const total = Math.max(1, s.totalCells);
-    const pa = ((s.scores[0] / total) * 100).toFixed(1);
-    const pb = ((s.scores[1] / total) * 100).toFixed(1);
     const left = Math.ceil(remainingSec(now));
     const head = s.phase === "result" ? "結果" : `残り ${left} 秒`;
-    scorePanel.set(`${head}\n${TEAM_NAMES[1]} ${pa}%   ${TEAM_NAMES[2]} ${pb}%`, "#e8eaed");
+    const ranking = [...s.players]
+      .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
+      .map((p, i) => {
+        const pct = (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1);
+        const win = s.winners?.includes(p.id) ? " 🏆" : "";
+        return `${i + 1}. ${inkColorName(p.color)} ${p.name}${p.id === selfId ? "（あなた）" : ""} ${pct}%${win}`;
+      });
+    scorePanel.set([head, ...ranking].join("\n"), "#e8eaed", "left");
   }
   let text = "";
   let color = "#e8eaed";
@@ -876,7 +904,7 @@ function updateMessages(now: number) {
     text = "壁のマーカーを見てください";
     color = "#fdd663";
   } else if (trackerStatus.startsWith("error")) {
-    text = "手の検出に失敗しました\n画面を押している間チャージ、離すと発射";
+    text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";
     color = "#f28b82";
   } else if (!FAKE_HANDS && !tracker) {
     text = "手の検出を読み込み中…";
@@ -891,20 +919,20 @@ function updateMessages(now: number) {
     text = flash.text;
     color = flash.text.startsWith("インク切れ") ? "#fdd663" : "#81c995";
   } else if (auth.state.phase === "result") {
-    const w = auth.state.winner ?? 0;
-    text = w === 0 ? "引き分け" : `${TEAM_NAMES[w]} の勝ち${w === myTeam ? "！" : ""}`;
-    color = w === myTeam ? "#81c995" : "#e8eaed";
+    const w = auth.state.winners ?? [];
+    text = w.length === 0 ? "だれも塗れず…" : w.includes(selfId) ? "あなたの勝ち！" : `${w.map(playerName).join("・")} の勝ち`;
+    color = w.includes(selfId) ? "#81c995" : "#e8eaed";
   } else if (inkLocal < 0.999 && onOwnFloorInkNow()) {
     text = "回復中…（自分の色の床の上）";
     color = "#ffffff";
   } else {
-    text = `あなたは ${myTeam ? TEAM_NAMES[myTeam] : "-"}\nパーで連射（自分の色の床の上で回復）`;
-    color = myTeam ? `#${TEAM_COLORS[myTeam].toString(16).padStart(6, "0")}` : "#e8eaed";
+    text = `あなたは ${myColor ? inkColorName(myColor) : "-"}\nパーで連射（自分の色の床の上で回復）`;
+    color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
   message.set(text, color);
   // インクゲージ（入室後は常時）
-  if (joined && myTeam) {
-    const hex = `#${TEAM_COLORS[myTeam].toString(16).padStart(6, "0")}`;
+  if (joined && myColor) {
+    const hex = `#${inkColorHex(myColor).toString(16).padStart(6, "0")}`;
     inkPanel.set(`インク ${gauge(inkLocal)}`, inkLocal < inkPerShot(fieldCfg) ? "#fdd663" : hex);
   } else {
     inkPanel.set("");
@@ -947,7 +975,7 @@ function renderHud() {
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
     `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} ink=${inkLocal.toFixed(2)} own=${onOwnFloorInkNow() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
-      `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s team=${myTeam ?? "-"} players=${s.players.map((p) => `${p.id}:${p.team}`).join(",")} scores=${s.scores.join("/")}/${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
+      `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
     .filter(Boolean)
     .join("\n");

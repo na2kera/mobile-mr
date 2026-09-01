@@ -157,7 +157,7 @@ export function splatoonServer() {
       room.broadcast({ type: "join", id } satisfies ServerMessage, id);
       // チーム割当が変わったので全員に配る
       broadcastState(room, now, events.length > 0, events[0]);
-      console.log(`[splatoon] ${id} "${name}" team ${game.players.get(id)?.team}`);
+      console.log(`[splatoon] ${id} "${name}" color ${game.players.get(id)?.color}`);
     },
     onMessage(room: Ctx, id, msg, now) {
       const { game } = room.state;

@@ -7,6 +7,7 @@
 import {
   DEFAULT_FIELD,
   FLOOR_ID,
+  MAX_INK_COLORS,
   InkGrid,
   fieldSurfaces,
   framePointToUv,
@@ -16,19 +17,19 @@ import {
   uvInside,
   type FieldConfig,
   type InkLanding,
+  type InkColor,
   type SurfaceFrame,
-  type Team,
   type V3,
 } from "./splatoon-sim.ts";
 
 export type Phase = "play" | "result";
 
-export type Player = { id: string; name: string; team: Team };
+export type Player = { id: string; name: string; color: InkColor };
 
 export type Shot = {
   seq: number;
   by: string;
-  team: Team;
+  color: InkColor;
   pos: V3;
   vel: V3;
   radius: number;
@@ -39,7 +40,8 @@ export type Shot = {
 
 export type GameEvent =
   | { kind: "start" }
-  | { kind: "result"; winner: Team | 0 }
+  /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空） */
+  | { kind: "result"; winners: string[] }
   | { kind: "shot"; by: string };
 
 export type GameSnapshot = {
@@ -49,10 +51,11 @@ export type GameSnapshot = {
   /** 今のフェーズが終わる権威時刻 [ms] */
   phaseEndsAt: number;
   players: Player[];
-  /** [壁 + 床の A のセル数, B のセル数] */
-  scores: [number, number];
+  /** プレイヤーごとの塗ったセル数（壁 + 床） */
+  scores: Record<string, number>;
   totalCells: number;
-  winner: Team | 0 | null;
+  /** result 中の勝者（同点は複数、play 中は null） */
+  winners: string[] | null;
   /** 直近の発射（飛行の描画用。着弾済みのものも maxFlightSec の間は残す） */
   shots: Shot[];
   /** プレイヤーごとのインク残量 0..1（サーバー権威。クライアントはこれに予測を重ねる） */
@@ -76,15 +79,15 @@ export class SplatoonGame {
   readonly players = new Map<string, Player>();
   phase: Phase = "play";
   phaseEndsAt = Infinity;
+  winners: string[] | null = null;
   private seq = 0;
   private shots: Shot[] = [];
   private readonly shotTimes = new Map<string, number[]>();
   /** 直近の頭の位置（発射位置の検証と「自分の色の床の上か」の判定用） */
   private readonly headPos = new Map<string, V3>();
-  /** インク残量（0..1） */
-  private readonly inkState = new Map<string, { ink: number; updatedMs: number }>();
+  /** インク残量（0..1）と最後に撃った時刻（回復の遅延用） */
+  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number }>();
   private started = false;
-  winner: Team | 0 | null = null;
   lastRejectReason = "";
 
   constructor(config: Partial<FieldConfig> = {}) {
@@ -99,28 +102,29 @@ export class SplatoonGame {
     return n;
   }
 
-  scores(): [number, number] {
-    let a = 0;
-    let b = 0;
+  /** プレイヤーごとの塗ったセル数（色番号で集計して id に引き当てる） */
+  scores(): Record<string, number> {
+    const byColor = new Array<number>(MAX_INK_COLORS + 1).fill(0);
     for (const g of this.grids.values()) {
       const c = g.counts();
-      a += c[1];
-      b += c[2];
+      for (let i = 1; i <= MAX_INK_COLORS; i++) byColor[i] += c[i];
     }
-    return [a, b];
+    const out: Record<string, number> = {};
+    for (const p of this.players.values()) out[p.id] = byColor[p.color];
+    return out;
   }
 
-  /** 少ない方のチームへ（同数なら A） */
-  private pickTeam(): Team {
-    let a = 0;
-    let b = 0;
-    for (const p of this.players.values()) if (p.team === 1) a++; else b++;
-    return a <= b ? 1 : 2;
+  /** いま使われていない最小の色番号（07 の色割当と同じ。退出者の色は再利用され、残った塗りも引き継がれ得るが個人戦の範囲では許容） */
+  private pickColor(): InkColor {
+    const used = new Set([...this.players.values()].map((p) => p.color));
+    let c = 1;
+    while (used.has(c) && c < MAX_INK_COLORS) c++;
+    return c;
   }
 
   join(id: string, name: string, now: number): GameEvent[] {
-    this.players.set(id, { id, name, team: this.pickTeam() });
-    this.inkState.set(id, { ink: 1, updatedMs: now });
+    this.players.set(id, { id, name, color: this.pickColor() });
+    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity });
     if (!this.started) {
       this.started = true;
       return this.startMatch(now);
@@ -153,15 +157,17 @@ export class SplatoonGame {
     const g = this.grids.get(FLOOR_ID)!;
     const x = Math.min(g.cols - 1, Math.max(0, Math.floor(uv[0] * g.cols)));
     const y = Math.min(g.rows - 1, Math.max(0, Math.floor(uv[1] * g.rows)));
-    return g.cells[y * g.cols + x] === p.team;
+    return g.cells[y * g.cols + x] === p.color;
   }
 
-  /** 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ） */
+  /** 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ）。撃った直後 inkRegenDelaySec は回復しない */
   private refreshInk(id: string, now: number) {
     const st = this.inkState.get(id);
     if (!st) return;
-    const dt = Math.max(0, (now - st.updatedMs) / 1000);
+    const regenFrom = Math.max(st.updatedMs, st.lastShotMs + this.config.inkRegenDelaySec * 1000);
+    const dt = Math.max(0, (now - regenFrom) / 1000);
     st.updatedMs = now;
+    if (dt <= 0) return;
     const fullSec = this.onOwnFloorInk(id) ? this.config.inkFullOwnInkSec : this.config.inkFullStandSec;
     st.ink = Math.min(1, st.ink + dt / fullSec);
   }
@@ -175,11 +181,12 @@ export class SplatoonGame {
   private startMatch(now: number): GameEvent[] {
     this.phase = "play";
     this.phaseEndsAt = now + this.config.matchSec * 1000;
-    this.winner = null;
+    this.winners = null;
     for (const g of this.grids.values()) g.clear();
     for (const st of this.inkState.values()) {
       st.ink = 1;
       st.updatedMs = now;
+      st.lastShotMs = -Infinity;
     }
     this.shots = [];
     this.seq++;
@@ -195,12 +202,13 @@ export class SplatoonGame {
     }
     if (now < this.phaseEndsAt) return [];
     if (this.phase === "play") {
-      const [a, b] = this.scores();
-      this.winner = a > b ? 1 : b > a ? 2 : 0;
+      const scores = this.scores();
+      const max = Math.max(0, ...Object.values(scores));
+      this.winners = max > 0 ? Object.keys(scores).filter((id) => scores[id] === max) : [];
       this.phase = "result";
       this.phaseEndsAt = now + this.config.resultSec * 1000;
       this.seq++;
-      return [{ kind: "result", winner: this.winner }];
+      return [{ kind: "result", winners: this.winners }];
     }
     return this.startMatch(now);
   }
@@ -255,9 +263,10 @@ export class SplatoonGame {
       return null;
     }
     st.ink -= cost;
+    st.lastShotMs = now;
     const landing = simulateInk(pos, vel, this.surfaces, cfg);
-    if (landing?.hit) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.team);
-    const shot: Shot = { seq: ++this.seq, by: id, team: p.team, pos, vel, radius, launchedAt: now, landing };
+    if (landing?.hit) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.color);
+    const shot: Shot = { seq: ++this.seq, by: id, color: p.color, pos, vel, radius, launchedAt: now, landing };
     this.shots.push(shot);
     return shot;
   }
@@ -271,12 +280,13 @@ export class SplatoonGame {
       players: [...this.players.values()],
       scores: this.scores(),
       totalCells: this.totalCells,
-      winner: this.winner,
+      winners: this.winners,
       shots: this.shots.slice(),
       ink: {},
     };
     for (const id of this.players.keys()) {
-      snap.ink[id] = Math.round(this.inkOf(id, now) * 100) / 100;
+      // 切り捨て（四捨五入だと実残量より多く見え、クライアントが空撃ちする）
+      snap.ink[id] = Math.floor(this.inkOf(id, now) * 100) / 100;
     }
     if (withGrids) {
       snap.grids = {};

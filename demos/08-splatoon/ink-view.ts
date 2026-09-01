@@ -2,10 +2,20 @@
 // 07 の SurfaceView（壁面 Z=0 前提）の向き付き版。着弾はチーム色の円で描き、snapshot（格子）が来たら
 // 格子から描き直す（格子は 2cm セルなので少し粗いが、再接続と試合の切り替え時だけ）
 import * as THREE from "three";
-import { InkGrid, type SurfaceFrame, type Team, type V2 } from "../../src/shared/splatoon-sim";
+import { InkGrid, MAX_INK_COLORS, type InkColor, type SurfaceFrame, type V2 } from "../../src/shared/splatoon-sim";
 
-export const TEAM_COLORS: Record<Team, number> = { 1: 0xff7a1a, 2: 0x2bd4ff };
-export const TEAM_NAMES: Record<Team, string> = { 1: "オレンジ", 2: "ブルー" };
+/** プレイヤーの色（個人戦。色番号 1.. の順） */
+export const INK_COLORS = [0xff7a1a, 0x2bd4ff, 0x81c995, 0xf28b82, 0xfdd663, 0xc58af9, 0xe8eaed, 0xff8bcb];
+export const INK_COLOR_NAMES = ["オレンジ", "ブルー", "グリーン", "レッド", "イエロー", "パープル", "ホワイト", "ピンク"];
+if (INK_COLORS.length !== MAX_INK_COLORS || INK_COLOR_NAMES.length !== MAX_INK_COLORS) {
+  throw new Error("INK_COLORS / INK_COLOR_NAMES と MAX_INK_COLORS が一致していない");
+}
+export function inkColorHex(color: InkColor): number {
+  return INK_COLORS[Math.min(MAX_INK_COLORS, Math.max(1, Math.round(color))) - 1];
+}
+export function inkColorName(color: InkColor): string {
+  return INK_COLOR_NAMES[Math.min(MAX_INK_COLORS, Math.max(1, Math.round(color))) - 1];
+}
 
 /** 1m あたりの px。07 と同じ理由で控えめ（毎フレーム全面転送） */
 const DEFAULT_PX_PER_M = 384;
@@ -74,14 +84,14 @@ export class InkView {
     this.texture.needsUpdate = true;
   }
 
-  private color(team: Team): string {
-    return `#${TEAM_COLORS[team].toString(16).padStart(6, "0")}`;
+  private color(c: InkColor): string {
+    return `#${inkColorHex(c).toString(16).padStart(6, "0")}`;
   }
 
   /** 着弾: UV を中心に半径 radiusM の円 */
-  splat(uv: V2, radiusM: number, team: Team) {
+  splat(uv: V2, radiusM: number, color: InkColor) {
     const { ctx, canvas } = this;
-    ctx.fillStyle = this.color(team);
+    ctx.fillStyle = this.color(color);
     ctx.beginPath();
     ctx.arc(uv[0] * canvas.width, uv[1] * canvas.height, Math.max(1, radiusM * this.pxPerM), 0, Math.PI * 2);
     ctx.fill();
@@ -100,7 +110,7 @@ export class InkView {
       for (let x = 0; x < grid.cols; x++) {
         const v = grid.cells[y * grid.cols + x];
         if (v === 0) continue;
-        ctx.fillStyle = this.color(v as Team);
+        ctx.fillStyle = this.color(v);
         ctx.fillRect(x * cw, y * ch, cw + 0.5, ch + 0.5);
       }
     }

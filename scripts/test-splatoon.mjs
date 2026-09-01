@@ -105,13 +105,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1 });
   check("開始前は tick しても何も起きない", g.tick(0).length === 0);
   const e1 = g.join("p1", "A", 1000);
-  check("最初の入室で試合開始（A チーム）", e1[0]?.kind === "start" && g.players.get("p1").team === 1 && g.phase === "play" && g.phaseEndsAt === 31000);
+  check("最初の入室で試合開始（色 1）", e1[0]?.kind === "start" && g.players.get("p1").color === 1 && g.phase === "play" && g.phaseEndsAt === 31000);
   g.join("p2", "B", 1100);
   g.join("p3", "C", 1200);
-  check("参加順に交互（B → A）", g.players.get("p2").team === 2 && g.players.get("p3").team === 1);
+  check("個人戦: 参加順に別の色（2, 3）", g.players.get("p2").color === 2 && g.players.get("p3").color === 3);
   g.leave("p1");
   g.join("p4", "D", 1300);
-  check("少ない方のチームへ（A が抜けたので A）", g.players.get("p4").team === 1);
+  check("退出した人の色（1）を次の入室者に再利用", g.players.get("p4").color === 1);
 
   // レート制限（6/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
   let tm = 2000;
@@ -122,7 +122,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   g.updatePose("p4", [1.5, 0, 0.8], 1500);
   check("発射: 頭から 1.2m 以上離れた位置からは拒否", g.shoot("p2", [0, 0, 0.3], [0, 0, -5], 0.06, next()) === null && g.lastRejectReason === "too far from head");
   const shot = g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.06, next());
-  check("発射: 受理され着弾（壁）と格子への塗りが起きる", shot && shot.team === 2 && shot.landing?.surfaceId === WALL_ID && g.scores()[1] > 0);
+  check("発射: 受理され着弾（壁）と自分の色の塗りが起きる", shot && shot.color === 2 && shot.landing?.surfaceId === WALL_ID && g.scores().p2 > 0);
   check("発射: 速すぎる", g.shoot("p2", [0, 0, 2], [0, 0, -(g.config.shotSpeed * 1.5)], 0.06, next()) === null && g.lastRejectReason === "bad velocity/radius");
   check("発射: 半径が違う", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.2, next()) === null && g.lastRejectReason === "bad velocity/radius");
   g.updatePose("p2", [0, 0, -0.5], 1500);
@@ -133,20 +133,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const t0 = next();
   for (let i = 0; i < SHOT_RATE_PER_SEC + 3; i++) if (g.shoot("p3", [0, 0, 2], [0, 0, -3], 0.06, t0 + i)) ok++;
   check(`発射: 1 人 ${SHOT_RATE_PER_SEC}/s まで`, ok === SHOT_RATE_PER_SEC && g.lastRejectReason === "rate limited");
-  const scoreBefore = g.scores().join();
+  const scoreBefore = JSON.stringify(g.scores());
   const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.06, next());
-  check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && g.scores().join() === scoreBefore);
+  check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && JSON.stringify(g.scores()) === scoreBefore);
 
-  const before = g.scores();
   check("ここまでの発射は試合時間内", tm < 31000, `${tm}`);
   const ev = g.tick(31000);
-  check("時間切れで result（勝者は多い方）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winner === (before[0] > before[1] ? 1 : 2));
+  const sc = g.scores();
+  const maxSc = Math.max(...Object.values(sc));
+  check("時間切れで result（勝者 = 最多セルの人。同点は複数）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winners.length >= 1 && ev[0].winners.every((id) => sc[id] === maxSc && maxSc > 0));
   check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.06, 31500) === null && g.lastRejectReason === "not playing");
   const ev2 = g.tick(33000);
-  check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && g.scores()[0] === 0 && g.scores()[1] === 0);
+  check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && Object.values(g.scores()).every((v) => v === 0));
   const snap = g.snapshot(33000, true);
   check("snapshot: grids は壁と床、totalCells は両方の和", Object.keys(snap.grids).length === 2 && snap.totalCells === snap.grids.wall.length + snap.grids.floor.length);
   check("snapshot: ink に各プレイヤーの残量", typeof snap.ink.p2 === "number" && snap.ink.p2 <= 1);
+  check("新しい試合でインクは満タンに戻る", snap.ink.p2 === 1 && snap.ink.p3 === 1);
 }
 
 // ================= 3b. インクタンク =================
@@ -156,27 +158,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   g.updatePose("p1", [0, 0.1, 1], 0);
   const cost = inkPerShot(g.config);
   // 満タンから「拒否されるまで」連射（250ms 間隔 = 4/s なのでレート制限には当たらない）。
-  // 撃っている間も自然回復（満タン 20s = 1 発間隔で 0.0125）するので tankShots より数発多く撃てる
+  // 撃った直後 inkRegenDelaySec（1s）は回復しないので、連射中は回復せずちょうど tankShots 発で切れる
   let fired = 0;
   let t = 1000;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < g.config.tankShots + 10; i++) {
     if (g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.06, t)) fired++;
     else break;
     t += 250;
   }
-  check(`満タンで約 ${g.config.tankShots} 発（自然回復ぶん +5 まで）で "no ink"`, fired >= g.config.tankShots && fired <= g.config.tankShots + 5 && g.lastRejectReason === "no ink", `${fired} shots`);
+  check(`満タンでちょうど ${g.config.tankShots} 発で "no ink"（連射中は回復しない）`, fired === g.config.tankShots && g.lastRejectReason === "no ink", `${fired} shots`);
   const empty = g.inkOf("p1", t);
   check("撃ち切った直後は 1 発ぶん未満", empty < cost + 0.05, empty.toFixed(3));
-  // 自然回復（自分の色の上ではない）: 満タンまで inkFullStandSec
-  const later = g.inkOf("p1", t + 4000);
-  check("自然回復は遅い（4 秒で +0.2）", near(later - empty, 4 / g.config.inkFullStandSec, 0.01), (later - empty).toFixed(3));
-  // 自分の色の床の上: 頭の真下の床セルを自分のチームで塗ってから測る
-  g.grids.get("floor").stamp([0.5, 1 / 1.5], 0.1, 1);
+  // 回復の基準点（撃ってから delay 経過後）を過ぎてから測る
+  const t1 = t + g.config.inkRegenDelaySec * 1000 + 500;
+  const e1 = g.inkOf("p1", t1);
+  const e2 = g.inkOf("p1", t1 + 2000);
+  check("自然回復（2 秒で 2/inkFullStandSec）", near(e2 - e1, 2 / g.config.inkFullStandSec, 0.01), (e2 - e1).toFixed(3));
+  // 自分の色の床の上: 頭の真下の床セルを自分の色で塗ってから測る
+  g.grids.get("floor").stamp([0.5, 1 / g.config.floorDepth], 0.1, 1);
   check("onOwnFloorInk: 頭の真下が自分の色", g.onOwnFloorInk("p1") === true);
-  const rec = g.inkOf("p1", t + 4000 + 1500);
-  check("自分の色の床の上では速く回復（1.5 秒で +0.5）", near(rec - later, 1.5 / g.config.inkFullOwnInkSec, 0.01), (rec - later).toFixed(3));
+  const e3 = g.inkOf("p1", t1 + 2000 + 1000);
+  check("自分の色の床の上では速く回復（1 秒で 1/inkFullOwnInkSec）", near(e3 - e2, 1 / g.config.inkFullOwnInkSec, 0.01), (e3 - e2).toFixed(3));
   // 相手の色に塗り替えられると遅い回復に戻る
-  g.grids.get("floor").stamp([0.5, 1 / 1.5], 0.1, 2);
+  g.grids.get("floor").stamp([0.5, 1 / g.config.floorDepth], 0.1, 2);
   check("onOwnFloorInk: 相手の色なら false", g.onOwnFloorInk("p1") === false);
 }
 
@@ -233,10 +237,10 @@ try {
   const cfg = { room: "test", markerId: "0", markerMm: "100", matchSec: "20" };
   const a = connect(cfg, "Alice");
   const wa = await a.waitFor((m) => m.type === "welcome");
-  check("welcome: id・config・格子付きの state・開始イベント", wa && wa.id === "p1" && wa.config.matchSec === 20 && wa.state.grids && wa.state.event?.kind === "start" && wa.state.players[0].team === 1);
+  check("welcome: id・config・格子付きの state・開始イベント", wa && wa.id === "p1" && wa.config.matchSec === 20 && wa.state.grids && wa.state.event?.kind === "start" && wa.state.players[0].color === 1);
   const b = connect(cfg, "Bob");
   const wb = await b.waitFor((m) => m.type === "welcome");
-  check("2 人目は B チーム・peers に p1", wb && wb.state.players.find((p) => p.id === wb.id).team === 2 && wb.peers.includes("p1"));
+  check("2 人目は色 2・peers に p1", wb && wb.state.players.find((p) => p.id === wb.id).color === 2 && wb.peers.includes("p1"));
   const stA = await a.waitFor((m) => m.type === "state" && m.state.players.length === 2);
   check("入室で state が配られる", stA !== null);
 
@@ -247,15 +251,15 @@ try {
   await sleep(50);
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.06 });
   const sa = await a.waitFor((m) => m.type === "shot");
-  check("shot が全員に配られ、着弾（壁）とチームが付く", sa && sa.shot.by === "p2" && sa.shot.team === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
+  check("shot が全員に配られ、着弾（壁）と色が付く", sa && sa.shot.by === "p2" && sa.shot.color === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.06 });
   const rej = await b.waitFor((m) => m.type === "rejected" && /velocity/.test(m.reason));
   check("不正な shot は本人に rejected", rej !== null);
   const bigField = connect({ ...cfg, room: "big", wallW: "20", wallH: "20", floorDepth: "20" });
   const errBig = await bigField.waitFor((m) => m.type === "error");
   check("格子が大きすぎるフィールドは拒否", errBig && /不正/.test(errBig.reason));
-  const st = await a.waitFor((m) => m.type === "state" && m.state.scores[1] > 0, 2500);
-  check("state に得点が反映される（B が塗った）", st !== null && st.state.scores[0] === 0);
+  const st = await a.waitFor((m) => m.type === "state" && (m.state.scores.p2 ?? 0) > 0, 2500);
+  check("state に得点が反映される（p2 が塗った）", st !== null && (st.state.scores.p1 ?? 0) === 0);
   check("state にインク残量（B は 1 発ぶん減っている）", st && st.state.ink.p2 < 1 && st.state.ink.p1 === 1, JSON.stringify(st?.state.ink));
 
   b.send({ type: "pose", pos: [0.5, 0, 1.5], quat: [0, 0, 0, 2], tracking: true });
