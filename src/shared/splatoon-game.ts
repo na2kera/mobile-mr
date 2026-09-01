@@ -65,8 +65,8 @@ export type GameSnapshot = {
   event?: GameEvent;
 };
 
-/** 1 人あたりの発射の上限 [回/秒]（クライアントの連射 fireRatePerSec=4 に余裕を持たせる。総量はインクが縛る） */
-export const SHOT_RATE_PER_SEC = 6;
+/** 1 人あたりの発射の上限 [回/秒]（クライアントの連射 fireRatePerSec=6 に余裕を持たせる。総量はインクが縛る） */
+export const SHOT_RATE_PER_SEC = 9;
 /** 発射位置がこの距離 [m] を超えて壁から離れていたら不正 */
 export const MAX_SHOT_DIST_M = 6;
 /** 発射位置は直近の頭の位置からこの距離 [m] 以内（腕の長さ + 手トラッキングの誤差） */
