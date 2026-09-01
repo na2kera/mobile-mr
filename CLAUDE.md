@@ -44,7 +44,7 @@
 - WebXR には依存しない。`HeadTracker` / `StereoRenderer` のような interface でスマホ実装と WebXR 実装を差し替え可能にする方針（ただし抽象化を急がない。上記方針を優先）
 - **既存ライブラリ（three-stdlib の DeviceOrientationControls、three 同梱の StereoEffect 等）は暫定採用。SDK 化の段階でコア部分は自力実装に移行する方針**。理由: 許可フロー等の制御点をラップでは持てない・拡張の余地がない・依存先が保守停止している・この空白領域こそがプロジェクトの存在意義（詳細: [PR #1 のコメント](https://github.com/na2kera/mobile-mr/pull/1#issuecomment-5255304585)）。移行は一括ではなく、痛点が実害になった箇所から順に行う。移行のタイミングと進め方は上記「ライブラリ化の3段階戦略」の段階3に従う
 
-## ロードマップ（現在地: Phase 8 PC 確認済み・実機確認待ち → Phase 9）
+## ロードマップ（現在地: Phase 8 実機確認済み → Phase 9）
 
 1. ~~Phase 1: スマホVR~~ — Three.js シーンを左右2眼レンダリング + DeviceOrientation で頭追従（完了: `demos/01-stereo-box/`）
 2. ~~Phase 2: Passthrough MR~~ — 背面カメラ映像を背景に（完了: `demos/02-passthrough/`）
@@ -54,7 +54,7 @@
 6. ~~Phase 6: MRバレーボール（統合ゲーム第1弾）~~ — サーバー権威の物理 + bot + 2台対戦（完了: `demos/06-volleyball/`。iPhone 実機 + ゴーグルで確認済み 2026-08-27）
    - Phase 6-2: MR ダーツ（統合ゲーム第2弾。`demos/06-2-darts/`）— 壁のマーカーにボード、手を振って投げる、何人でも参加順に 3 投ずつ。サーバー権威（`server/darts.ts`）。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**（PR #11 マージ済み 2026-08-27）
 7. ~~Phase 7: Surface Mapping~~ — 壁のマーカー座標系を Surface にし、指差しの視線で UV を指してペイント、サーバー権威で共有（完了: `demos/07-surface-mapping/`、`server/surface.ts` + 共通化した `server/room-server.ts`。iPhone 実機で確認済み 2026-08-29。PR #12）
-8. Phase 8: MRスプラトゥーン — 壁マーカー 1 枚で壁 + 床をフィールドにし、グーでチャージ → パーで「目 → 手」の向きへインク発射、サーバー権威の格子で塗りと得点を共有（`demos/08-splatoon/`、`server/splatoon.ts`。PC で確認済み、**実機は未確認**。2026-08-29）
+8. ~~Phase 8: MRスプラトゥーン~~ — 壁マーカー 1 枚で四方の壁 + 床の箱型コート（3.0×2.5m）を作り、パーの間「目 → 手」の向きへインクを連射（タンク 50 発・自分の色の床の上で回復）、参加順に 8 色の個人戦。サーバー権威の格子で塗りと得点を共有（完了: `demos/08-splatoon/`、`server/splatoon.ts`。**iPhone 実機で確認済み** 2026-09-02。PR #15）
 9. **Phase 9: 現実の人物と Player ID の対応（Body Tracking はここで扱う）** ← 次
 9. Phase 10: SDK / ライブラリ化（`@mobile-mr/core` ほか。詳細は CONCEPT.md §6）
 

@@ -21,7 +21,7 @@
 | [07. Surface Mapping](./demos/07-surface-mapping/) | 壁のマーカーを原点に「Surface」を定義し、指差しでUV座標を指してペイント。Surface ID + UVで全員が同じ場所を見る | スマートフォン1台以上、壁に貼ったマーカー |
 | [08. MR Splatoon](./demos/08-splatoon/) | 四方の壁と床の箱型コートに、パーの間、手からインクを連射。全員が自分の色で塗り合う個人戦 | スマートフォン1台以上、壁に貼ったマーカー |
 
-Phase 1〜7は完了し（MRバレーボール・Surface MappingはiPhone実機で確認済み）、Phase 6-2のMRダーツとPhase 8のMRスプラトゥーンはPC確認まで済んでいます（実機は未確認）。次は現実の人物との対応、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
+Phase 1〜8は完了しています（MRバレーボール・Surface Mapping・MRスプラトゥーンはiPhone実機で確認済み。Phase 6-2のMRダーツのみ実機未確認）。次は現実の人物との対応、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
 
 ## 技術構成
 
