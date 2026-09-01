@@ -24,7 +24,7 @@ const CDP_PORT = 9336;
 const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 20;
 const BASE = `https://localhost:${PORT}/demos/08-splatoon/`;
 const COMMON =
-  "fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check";
+  "fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check&waitSec=1";
 
 if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);

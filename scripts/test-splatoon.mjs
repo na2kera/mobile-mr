@@ -45,9 +45,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("背面の法線は -Z（マーカー側）", back.normal[2] === -1);
   // 左の壁: 正面の壁際・上端 = UV (1, 0)
   const ltl = frameUvToPoint(left, [1, 0]);
-  check("左の壁: UV (1,0) は正面の壁際の上 (-1, +wallH/2, 0)", near(ltl[0], -1) && near(ltl[1], 0.5) && near(ltl[2], 0));
+  check("左の壁: UV (1,0) は正面の壁際の上端 (-1, -floorDrop + wallH, 0)", near(ltl[0], -1) && near(ltl[1], 0) && near(ltl[2], 0));
   const wtl = frameUvToPoint(wall, [0, 0]);
-  check("壁: UV (0,0) は左上 (-w/2, +h/2, 0)", near(wtl[0], -1) && near(wtl[1], 0.5) && near(wtl[2], 0));
+  check("壁: 下端は床に固定。UV (0,0) は左上 (-w/2, -floorDrop + wallH, 0)", near(wtl[0], -1) && near(wtl[1], 0) && near(wtl[2], 0));
+  const wbl = frameUvToPoint(wall, [0, 1]);
+  check("壁: UV (0,1) の高さは床（-floorDrop）", near(wbl[1], -1));
   const ftl = frameUvToPoint(floor, [0, 0]);
   check("床: UV (0,0) は壁際の左 (-w/2, -floorDrop, 0)", near(ftl[0], -1) && near(ftl[1], -1) && near(ftl[2], 0));
   const fbr = frameUvToPoint(floor, [1, 1]);
@@ -61,7 +63,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 放物線: 壁の 2m 手前、目の高さ（y=0）から水平に 5m/s → 0.4s で壁、その間に落ちる分は 0.5·4·0.16 = 0.32m
   const l1 = simulateInk([0, 0, 2], [0, 0, -5], [wall, floor], cfg);
-  check("壁に当たる（t=0.4s、y=-0.32）", l1 && l1.surfaceId === WALL_ID && near(l1.hitT, 0.4) && near(l1.point[1], -0.32) && near(l1.uv[1], 0.5 + 0.32));
+  check("壁に当たる（t=0.4s、y=-0.32。v は壁上端からの距離）", l1 && l1.surfaceId === WALL_ID && near(l1.hitT, 0.4) && near(l1.point[1], -0.32) && near(l1.uv[1], 0.32));
   // 遅い球は壁の手前で床へ: 1m/s → 壁まで 2s、床（y=-1）へは 0.5·4·t² = 1 → t = 0.707s
   const l2 = simulateInk([0, 0, 2], [0, 0, -1], [wall, floor], cfg);
   check("遅い球は先に床へ落ちる（t≈0.707s）", l2 && l2.surfaceId === FLOOR_ID && near(l2.hitT, Math.sqrt(0.5), 1e-6) && near(l2.point[2], 2 - Math.sqrt(0.5)));
@@ -120,19 +122,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 3. game =================
 {
-  const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1 });
+  const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1, waitSec: 1 });
   check("開始前は tick しても何も起きない", g.tick(0).length === 0);
   const e1 = g.join("p1", "A", 1000);
-  check("最初の入室で試合開始（色 1）", e1[0]?.kind === "start" && g.players.get("p1").color === 1 && g.phase === "play" && g.phaseEndsAt === 31000);
-  g.join("p2", "B", 1100);
-  g.join("p3", "C", 1200);
+  check("最初の入室では待機フェーズ（waitSec 後に開始予定）", e1.length === 0 && g.players.get("p1").color === 1 && g.phase === "waiting" && g.phaseEndsAt === 2000);
+  g.updatePose("p1", [0, 0.1, 1], 1100);
+  check("待機中は撃てない", g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 1100) === null && g.lastRejectReason === "not playing");
+  check("待機時間の前は tick しても始まらない", g.tick(1500).length === 0 && g.phase === "waiting");
+  const es = g.tick(2000);
+  check("待機時間が過ぎると開始（matchSec の計測はここから）", es[0]?.kind === "start" && g.phase === "play" && g.phaseEndsAt === 32000);
+  g.join("p2", "B", 2100);
+  g.join("p3", "C", 2200);
   check("個人戦: 参加順に別の色（2, 3）", g.players.get("p2").color === 2 && g.players.get("p3").color === 3);
   g.leave("p1");
-  g.join("p4", "D", 1300);
-  check("退出した人の色（1）を次の入室者に再利用", g.players.get("p4").color === 1);
+  g.join("p4", "D", 2300);
+  check("試合中は退出者の色（1）を使い回さず、未使用の色（4）を割り当てる", g.players.get("p4").color === 4 && !g.lastJoinClearedColor);
 
-  // レート制限（6/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
-  let tm = 2000;
+  // レート制限（9/s）は検証より先に数えるので、検証のテストは 1.1 秒ずつ離して呼ぶ
+  let tm = 2300;
   const next = () => (tm += 1100);
   check("発射: pose が届く前は拒否", g.shoot("p2", [0, 0, 2], [0, 0, -5], 0.09, next()) === null && g.lastRejectReason === "no pose yet");
   g.updatePose("p2", [0, 0.1, 2.3], 1500);
@@ -155,25 +162,49 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.09, next());
   check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && JSON.stringify(g.scores()) === scoreBefore);
 
-  check("ここまでの発射は試合時間内", tm < 31000, `${tm}`);
-  const ev = g.tick(31000);
+  check("ここまでの発射は試合時間内", tm < 32000, `${tm}`);
+  const ev = g.tick(32000);
   const sc = g.scores();
   const maxSc = Math.max(...Object.values(sc));
-  check("時間切れで result（勝者 = 最多セルの人。同点は複数）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winners.length >= 1 && ev[0].winners.every((id) => sc[id] === maxSc && maxSc > 0));
-  check("result 中は発射できない", g.shoot("p2", [0, 0, 2], [0, 0, -3], 0.09, 31500) === null && g.lastRejectReason === "not playing");
-  const ev2 = g.tick(33000);
+  check("時間切れで result（勝者 = 最多セルの人。同点は複数・名前つき）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winners.length >= 1 && ev[0].winners.every((id) => sc[id] === maxSc && maxSc > 0) && ev[0].winnerNames.length === ev[0].winners.length);
+  // 勝者が result 中に退出しても、確定時の名前は snapshot に残る
+  const winId = ev[0].winners[0];
+  const winName = ev[0].winnerNames[0];
+  g.leave(winId);
+  const snapAfterLeave = g.snapshot(32500);
+  check("勝者が退出しても winnerNames は確定時のまま", snapAfterLeave.winners.includes(winId) && snapAfterLeave.winnerNames[0] === winName);
+  const survivor = [...g.players.keys()][0];
+  check("result 中は発射できない", g.shoot(survivor, [0, 0, 2], [0, 0, -3], 0.09, 32500) === null && g.lastRejectReason === "not playing");
+  const ev2 = g.tick(34000);
   check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && Object.values(g.scores()).every((v) => v === 0));
-  const snap = g.snapshot(33000, true);
+  const snap = g.snapshot(34000, true);
   check("snapshot: grids は 5 枚、totalCells は全部の和", Object.keys(snap.grids).length === 5 && snap.totalCells === Object.values(snap.grids).reduce((a, gs) => a + gs.length, 0));
-  check("snapshot: ink に各プレイヤーの残量", typeof snap.ink.p2 === "number" && snap.ink.p2 <= 1);
-  check("新しい試合でインクは満タンに戻る", snap.ink.p2 === 1 && snap.ink.p3 === 1);
+  const inks = Object.values(snap.ink);
+  check("snapshot: ink に残っている全員の残量", Object.keys(snap.ink).length === g.players.size && inks.every((v) => typeof v === "number" && v <= 1));
+  check("新しい試合でインクは満タンに戻る", inks.every((v) => v === 1));
+}
+
+// ================= 3c. 全色使用時の再利用はセルを消す =================
+{
+  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+  for (let i = 1; i <= 8; i++) g.join(`p${i}`, `P${i}`, 0);
+  g.tick(1);
+  g.updatePose("p1", [0, 0.1, 1], 10);
+  // 壁の上端は床から wallH（この設定では y=-0.2）なので、下向きに撃って壁に当てる
+  g.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 100);
+  const before = g.scores().p1;
+  check("p1 が塗った", before > 0);
+  g.leave("p1");
+  const e = g.join("p9", "P9", 200);
+  check("8 色使用済みなら退出者の色を再利用し、そのセルを消してから割り当てる", e.length === 0 && g.players.get("p9").color === 1 && g.lastJoinClearedColor && g.scores().p9 === 0);
 }
 
 // ================= 3b. インクタンク =================
 {
-  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1 });
+  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
   g.join("p1", "A", 0);
-  g.updatePose("p1", [0, 0.1, 1], 0);
+  g.tick(1);
+  g.updatePose("p1", [0, 0.1, 1], 2);
   const cost = inkPerShot(g.config);
   // 満タンから「拒否されるまで」連射（250ms 間隔 = 4/s なのでレート制限には当たらない）。
   // 撃った直後 inkRegenDelaySec（1s）は回復しないので、連射中は回復せずちょうど tankShots 発で切れる
@@ -187,19 +218,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(`満タンでちょうど ${g.config.tankShots} 発で "no ink"（連射中は回復しない）`, fired === g.config.tankShots && g.lastRejectReason === "no ink", `${fired} shots`);
   const empty = g.inkOf("p1", t);
   check("撃ち切った直後は 1 発ぶん未満", empty < cost + 0.05, empty.toFixed(3));
-  // 回復の基準点（撃ってから delay 経過後）を過ぎてから測る
+  check("snapshot の ink は 0..1 にクランプ（-0.01 にならない）", g.snapshot(t).ink.p1 >= 0);
+  // 回復の基準点（撃ってから delay 経過後）を過ぎてから測る。場所に依存しない単一レート
   const t1 = t + g.config.inkRegenDelaySec * 1000 + 500;
   const e1 = g.inkOf("p1", t1);
   const e2 = g.inkOf("p1", t1 + 2000);
-  check("自然回復（2 秒で 2/inkFullStandSec）", near(e2 - e1, 2 / g.config.inkFullStandSec, 0.01), (e2 - e1).toFixed(3));
-  // 自分の色の床の上: 頭の真下の床セルを自分の色で塗ってから測る
-  g.grids.get("floor").stamp([0.5, 1 / g.config.floorDepth], 0.1, 1);
-  check("onOwnFloorInk: 頭の真下が自分の色", g.onOwnFloorInk("p1") === true);
-  const e3 = g.inkOf("p1", t1 + 2000 + 1000);
-  check("自分の色の床の上では速く回復（1 秒で 1/inkFullOwnInkSec）", near(e3 - e2, 1 / g.config.inkFullOwnInkSec, 0.01), (e3 - e2).toFixed(3));
-  // 相手の色に塗り替えられると遅い回復に戻る
-  g.grids.get("floor").stamp([0.5, 1 / g.config.floorDepth], 0.1, 2);
-  check("onOwnFloorInk: 相手の色なら false", g.onOwnFloorInk("p1") === false);
+  check("回復（2 秒で 2/inkFullSec）", near(e2 - e1, 2 / g.config.inkFullSec, 0.01), (e2 - e1).toFixed(3));
+  // コートを広げても奥から撃てる（発射位置の上限はコートの対角 + 1m）
+  const wide = new SplatoonGame({ matchSec: 300, floorDepth: 8, waitSec: 0 });
+  wide.join("w1", "W", 0);
+  wide.tick(1);
+  wide.updatePose("w1", [0, 0.1, 7.5], 10);
+  check("広いコートの奥からも発射できる", wide.shoot("w1", [0, 0, 7.4], [0, 0, -5], 0.09, 100) !== null);
 }
 
 // ================= 4. server =================
@@ -252,15 +282,17 @@ function connect(query, name = "") {
 let exitCode = 1;
 try {
   if (!(await waitForServer())) throw new Error(`dev サーバーが起動しなかった（ポート ${PORT} が使用中でないか確認）`);
-  const cfg = { room: "test", markerId: "0", markerMm: "100", matchSec: "20" };
+  const cfg = { room: "test", markerId: "0", markerMm: "100", matchSec: "20", waitSec: "1" };
   const a = connect(cfg, "Alice");
   const wa = await a.waitFor((m) => m.type === "welcome");
-  check("welcome: id・config・格子付きの state・開始イベント", wa && wa.id === "p1" && wa.config.matchSec === 20 && wa.state.grids && wa.state.event?.kind === "start" && wa.state.players[0].color === 1);
+  check("welcome: id・config・格子付きの state・待機フェーズから", wa && wa.id === "p1" && wa.config.matchSec === 20 && wa.config.waitSec === 1 && wa.state.grids && wa.state.phase === "waiting" && wa.state.players[0].color === 1);
   const b = connect(cfg, "Bob");
   const wb = await b.waitFor((m) => m.type === "welcome");
   check("2 人目は色 2・peers に p1", wb && wb.state.players.find((p) => p.id === wb.id).color === 2 && wb.peers.includes("p1"));
   const stA = await a.waitFor((m) => m.type === "state" && m.state.players.length === 2);
   check("入室で state が配られる", stA !== null);
+  const playSt = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.event?.kind === "start", 4000);
+  check("waitSec 後に start が配られ play になる", playSt !== null);
 
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.09 });
   const rejNoPose = await b.waitFor((m) => m.type === "rejected");

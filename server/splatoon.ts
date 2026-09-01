@@ -92,16 +92,17 @@ function parseRoomConfig(url: URL): SplatoonRoomConfig | null {
   const floorDepth = num("floorDepth", DEFAULT_FIELD.floorDepth, 0.2, 20);
   const gravity = num("gravity", DEFAULT_FIELD.gravity, 0, 30);
   const matchSec = num("matchSec", DEFAULT_FIELD.matchSec, 10, 600);
-  if (wallW === null || wallH === null || floorDrop === null || floorDepth === null || gravity === null || matchSec === null) return null;
+  const waitSec = num("waitSec", DEFAULT_FIELD.waitSec, 0, 120);
+  if (wallW === null || wallH === null || floorDrop === null || floorDepth === null || gravity === null || matchSec === null || waitSec === null) return null;
   // 四方の壁（正面 + 背面 + 左右）+ 床
   const area = wallW * wallH * 2 + floorDepth * wallH * 2 + wallW * floorDepth;
   const cells = area / (DEFAULT_FIELD.cellM * DEFAULT_FIELD.cellM);
   if (cells > MAX_CELLS) return null;
-  return { markerId, markerMm, wallW, wallH, floorDrop, floorDepth, gravity, matchSec };
+  return { markerId, markerMm, wallW, wallH, floorDrop, floorDepth, gravity, matchSec, waitSec };
 }
 
 function describeConfig(c: SplatoonRoomConfig): string {
-  return `markerId=${c.markerId} markerMm=${c.markerMm} wallW=${c.wallW} wallH=${c.wallH} floorDrop=${c.floorDrop} floorDepth=${c.floorDepth} gravity=${c.gravity} matchSec=${c.matchSec}`;
+  return `markerId=${c.markerId} markerMm=${c.markerMm} wallW=${c.wallW} wallH=${c.wallH} floorDrop=${c.floorDrop} floorDepth=${c.floorDepth} gravity=${c.gravity} matchSec=${c.matchSec} waitSec=${c.waitSec}`;
 }
 
 function broadcastState(room: Ctx, now: number, withGrids: boolean, event?: ReturnType<SplatoonGame["tick"]>[number]) {
@@ -131,6 +132,7 @@ export function splatoonServer() {
         floorDepth: c.floorDepth,
         gravity: c.gravity,
         matchSec: c.matchSec,
+        waitSec: c.waitSec,
       }),
       lastBroadcastMs: -Infinity,
       poseRate: new RateLimiter(POSE_RATE_PER_SEC),
@@ -157,8 +159,8 @@ export function splatoonServer() {
         state: game.snapshot(now, true, events[0]),
       } satisfies ServerMessage);
       room.broadcast({ type: "join", id } satisfies ServerMessage, id);
-      // チーム割当が変わったので全員に配る
-      broadcastState(room, now, events.length > 0, events[0]);
+      // 色の割当が変わったので全員に配る（色を再利用してセルを消したときは格子ごと）
+      broadcastState(room, now, events.length > 0 || game.lastJoinClearedColor, events[0]);
       console.log(`[splatoon] ${id} "${name}" color ${game.players.get(id)?.color}`);
     },
     onMessage(room: Ctx, id, msg, now) {

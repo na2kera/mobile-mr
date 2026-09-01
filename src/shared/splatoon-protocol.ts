@@ -8,7 +8,7 @@ import type { GameSnapshot, Shot } from "./splatoon-game.ts";
 export const SPLATOON_PATH = "/api/splatoon";
 
 /** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否） */
-export const SPLATOON_PROTOCOL_VERSION = 3;
+export const SPLATOON_PROTOCOL_VERSION = 4;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -23,6 +23,7 @@ export type SplatoonRoomConfig = SpaceConfig & {
   floorDepth: number;
   gravity: number;
   matchSec: number;
+  waitSec: number;
 };
 
 /** field 座標系での自分のカメラ姿勢 + 手の 21 点（06-2 と同じ形） */

@@ -49,12 +49,12 @@ export type FieldConfig = {
   tankShots: number;
   /** 連射の速さ [発/s] */
   fireRatePerSec: number;
-  /** 自分の色の床の上にいるとき、満タンまでの回復時間 [s] */
-  inkFullOwnInkSec: number;
-  /** それ以外のときの自然回復で満タンまで [s] */
-  inkFullStandSec: number;
+  /** 満タンまでの回復時間 [s]（場所に依存しない。3DoF では頭の位置がマーカーを見ている間しか更新できないため、位置ベースの回復はやめた） */
+  inkFullSec: number;
   /** 撃ってからこの時間 [s] は回復しない（撃ちながら回復して無限に撃てるのを防ぐ） */
   inkRegenDelaySec: number;
+  /** 最初の 1 人が入ってから試合開始までの待機 [s]（全員がマーカーを読み取る時間。入室の速さが得点差にならないように） */
+  waitSec: number;
   /** 格子の 1 セル [m] */
   cellM: number;
 };
@@ -73,9 +73,9 @@ export const DEFAULT_FIELD: FieldConfig = {
   shotRadius: 0.09,
   tankShots: 50,
   fireRatePerSec: 6,
-  inkFullOwnInkSec: 2,
-  inkFullStandSec: 8,
+  inkFullSec: 5,
   inkRegenDelaySec: 1,
+  waitSec: 15,
   cellM: 0.02,
 };
 
@@ -102,12 +102,15 @@ export function norm(a: V3): number {
  * 四方の壁と床の 5 枚。床（wallW × floorDepth）を囲む箱型のコートで、
  * 正面 = マーカーの壁（Z=0）、左右 = x=±wallW/2、背面 = z=floorDepth。
  * 左右・背面は現実の壁が無くても立つ仮想の壁。法線はすべてコートの内側を向く。
- * 壁の縦の中心はマーカーの高さ（y=0）で、下端は床（y=-floorDrop = -wallH/2 のとき接続）
+ * 壁の下端は常に床（y=-floorDrop）に接続し、上端は床から wallH。マーカーの高さ（floorDrop）が
+ * いくつでも壁と床に隙間ができない（マーカーは壁の中の任意の高さで良い）
  */
 export function fieldSurfaces(cfg: FieldConfig): SurfaceFrame[] {
   const down: V3 = [0, -1, 0];
   const halfW = cfg.wallW / 2;
   const zMid = cfg.floorDepth / 2;
+  /** 壁の縦の中心（下端 = 床に固定） */
+  const wallMidY = -cfg.floorDrop + cfg.wallH / 2;
   const frame = (id: string, origin: V3, xAxis: V3, widthM: number, heightM: number, yAxis: V3 = down): SurfaceFrame => ({
     id,
     origin,
@@ -119,15 +122,15 @@ export function fieldSurfaces(cfg: FieldConfig): SurfaceFrame[] {
   });
   return [
     // 正面（マーカーの壁）: 法線 +Z。UV は部屋の中から見て左上 (0,0)
-    frame(WALL_ID, [0, 0, 0], [1, 0, 0], cfg.wallW, cfg.wallH),
+    frame(WALL_ID, [0, wallMidY, 0], [1, 0, 0], cfg.wallW, cfg.wallH),
     // 床: 法線 +Y。v は壁 → 部屋側
     frame(FLOOR_ID, [0, -cfg.floorDrop, zMid], [1, 0, 0], cfg.wallW, cfg.floorDepth, [0, 0, 1]),
     // 左（x=-wallW/2）: 法線 +X。u は背面 → 正面（部屋の中から見て左 → 右）
-    frame(LEFT_ID, [-halfW, 0, zMid], [0, 0, -1], cfg.floorDepth, cfg.wallH),
+    frame(LEFT_ID, [-halfW, wallMidY, zMid], [0, 0, -1], cfg.floorDepth, cfg.wallH),
     // 右（x=+wallW/2）: 法線 -X。u は正面 → 背面
-    frame(RIGHT_ID, [halfW, 0, zMid], [0, 0, 1], cfg.floorDepth, cfg.wallH),
+    frame(RIGHT_ID, [halfW, wallMidY, zMid], [0, 0, 1], cfg.floorDepth, cfg.wallH),
     // 背面（z=floorDepth）: 法線 -Z（マーカー側を向く）
-    frame(BACK_ID, [0, 0, cfg.floorDepth], [-1, 0, 0], cfg.wallW, cfg.wallH),
+    frame(BACK_ID, [0, wallMidY, cfg.floorDepth], [-1, 0, 0], cfg.wallW, cfg.wallH),
   ];
 }
 
