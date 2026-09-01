@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>ex8-1. God Hand — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜06 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #start-button {
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜05 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・手・通信・試合の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>ex8-1. ゴッドハンド</h1>
+      <p>
+        番外編: イナズマイレブンの円堂守のキーパー技「ゴッドハンド」を出す 1 人用デモです。
+        <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
+        >して<strong>壁に天地を合わせて貼る</strong>と、壁が相手コートになり、仮想のシューターが
+        あなたの背後のゴールへシュートを撃ってきます。
+      </p>
+      <p>
+        ボールが光ったら（予告 0.9 秒）、<strong>パーに開いた手を素早く前へ突き出す</strong>と、
+        巨大な金色の手 = ゴッドハンドが約 1.2 秒実体化します。その間にボールが触れればキャッチ！
+        通されると失点（ゴッドハンドが出ていたのに通されるとオーラが砕けます）。5 失点でリザルト →
+        自動で次のゲーム。連続キャッチを狙ってください。05 の較正（例: ?handScale=1.9）は毎回付けてください。
+      </p>
+      <p id="room-error" hidden></p>
+      <button id="start-button" type="button">開始</button>
+      <p>
+        確認の見方: 開始後、まず壁のマーカーを見ます（壁にシュートの出口とスコア、背後に自分のゴール枠が出ます）。
+        骨格が背景の手に重なったらパーのまま前へ突き出す → 金色の巨大な手が出れば OK。
+        手が取れないときは、画面をタップ（PC は Space）でも視界の先に発動します。
+      </p>
+      <p>
+        調整: 表示は ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。マーカーは ?markerMm=100&amp;detW=960。
+        発動は ?ghMinSpeed=2（突き出しとみなす手の速さ [m/s]）&amp;ghActiveSec=1.2（実体化時間）。
+        シュートは ?ghSpeed=4（初速）〜?ghSpeedMax=9 で徐々に速くなります。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1 で、合成の手がボールに合わせて
+        突き出してキャッチし続けます
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
