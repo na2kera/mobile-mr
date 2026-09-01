@@ -148,6 +148,13 @@ export class GodHandGame {
     if (this.hand) this.hand.center = [...center] as V3;
   }
 
+  /** 実体化を途中で終わらせる（破られた演出など）。クールダウンの起点は今 */
+  breakHand(now: number) {
+    if (!this.hand) return;
+    this.hand = null;
+    this.lastHandEndMs = now;
+  }
+
   handActive(now: number): boolean {
     return this.hand !== null && now - this.hand.activatedAt <= this.cfg.handActiveSec * 1000;
   }
@@ -182,17 +189,26 @@ export class GodHandGame {
         continue;
       }
       if (ball.state !== "flying") continue;
-      // 放物線（低重力）。dt 積分で十分（判定面は毎フレーム跨ぎを見る）
-      const prevZ = ball.pos[2];
+      // 放物線（低重力）
+      const prev: V3 = [ball.pos[0], ball.pos[1], ball.pos[2]];
       ball.vel[1] -= cfg.gravity * dt;
       ball.pos[0] += ball.vel[0] * dt;
       ball.pos[1] += ball.vel[1] * dt;
       ball.pos[2] += ball.vel[2] * dt;
-      // キャッチ判定（実体化中の手の球）
+      // キャッチ判定: 低 FPS だと 1 フレームで判定球を跳び越えるので、前回位置 → 今回位置の
+      // 「線分 vs 球」で連続的に見る。同じフレームでゴール面も跨いだ場合は、線分上で先に
+      // 起きた方（t が小さい方）を採用する
+      const crossGoal = prev[2] < ball.goalZ && ball.pos[2] >= ball.goalZ;
+      const goalT = crossGoal ? (ball.goalZ - prev[2]) / (ball.pos[2] - prev[2]) : null;
       if (this.phase === "play" && this.handActive(now) && this.hand) {
-        const h = this.hand.center;
-        const d = Math.hypot(ball.pos[0] - h[0], ball.pos[1] - h[1], ball.pos[2] - h[2]);
-        if (d <= cfg.handRadius + cfg.ballR) {
+        const catchT = segmentSphereT(prev, ball.pos, this.hand.center, cfg.handRadius + cfg.ballR);
+        if (catchT !== null && (goalT === null || catchT <= goalT)) {
+          // ボールは接触した点で止める
+          ball.pos = [
+            prev[0] + (ball.pos[0] - prev[0]) * catchT,
+            prev[1] + (ball.pos[1] - prev[1]) * catchT,
+            prev[2] + (ball.pos[2] - prev[2]) * catchT,
+          ];
           ball.state = "caught";
           ball.stateSinceMs = now;
           this.score++;
@@ -203,7 +219,7 @@ export class GodHandGame {
         }
       }
       // 失点判定（プレイヤーの後ろの面を跨いだ）
-      if (prevZ < ball.goalZ && ball.pos[2] >= ball.goalZ) {
+      if (crossGoal) {
         ball.state = "conceded";
         ball.stateSinceMs = now;
         if (this.phase === "play") {
@@ -232,4 +248,26 @@ export class GodHandGame {
     }
     return events;
   }
+}
+
+/**
+ * 線分 p0 → p1 と球（中心 c・半径 r）の最初の交差位置 t（0..1）。交差しなければ null。
+ * p0 が既に球の中なら 0
+ */
+export function segmentSphereT(p0: V3, p1: V3, c: V3, r: number): number | null {
+  const dx = p1[0] - p0[0];
+  const dy = p1[1] - p0[1];
+  const dz = p1[2] - p0[2];
+  const fx = p0[0] - c[0];
+  const fy = p0[1] - c[1];
+  const fz = p0[2] - c[2];
+  if (fx * fx + fy * fy + fz * fz <= r * r) return 0;
+  const a = dx * dx + dy * dy + dz * dz;
+  if (a < 1e-12) return null;
+  const b = 2 * (fx * dx + fy * dy + fz * dz);
+  const cc = fx * fx + fy * fy + fz * fz - r * r;
+  const disc = b * b - 4 * a * cc;
+  if (disc < 0) return null;
+  const t = (-b - Math.sqrt(disc)) / (2 * a);
+  return t >= 0 && t <= 1 ? t : null;
 }

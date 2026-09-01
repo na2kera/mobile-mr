@@ -163,6 +163,7 @@ export function createGodHand(): GodHand {
 
   const tmpA = new THREE.Vector3();
   const tmpB = new THREE.Vector3();
+  const tmpC = new THREE.Vector3();
   let lastBoltMs = -Infinity;
   function rebuildBolts() {
     for (let b = 0; b < BOLTS; b++) {
@@ -185,7 +186,7 @@ export function createGodHand(): GodHand {
         const m = boltSegs[b * SEGS + s];
         m.position.copy(tmpA).add(tmpB).multiplyScalar(0.5);
         m.scale.set(0.04, tmpA.distanceTo(tmpB), 0.04);
-        m.lookAt(tmpB.clone().add(m.position).sub(tmpA));
+        m.lookAt(tmpC.copy(tmpB).add(m.position).sub(tmpA));
         m.rotateX(Math.PI / 2);
         tmpA.copy(tmpB);
       }

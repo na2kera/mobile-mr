@@ -436,6 +436,10 @@ let flash: { text: string; untilMs: number; color: string } | null = null;
 let activations = 0;
 let holdRequested = false;
 let lastShapeInfo = "";
+/** 発動の元になった手のスロット（実体化中の追従先。hands=2 で別の手へ飛ばないように） */
+let activeSlot: ReturnType<HandSlots["visible"]>[number] | null = null;
+const velBoard = new THREE.Vector3();
+const boardQuatInv = new THREE.Quaternion();
 
 function tryActivate(originWorld: THREE.Vector3, now: number) {
   if (!anchor.visible) return;
@@ -457,14 +461,18 @@ function tryActivate(originWorld: THREE.Vector3, now: number) {
 function updateActivation(now: number) {
   const shapes = handSlots.slots.filter((s) => s.view.visible).map((s) => s.shape);
   lastShapeInfo = shapes.join(",") || "-";
-  // 1) パーの手の速い突き出し
+  // 1) パーの手の速い突き出し（壁の方向か上方向への成分が主であること。横に振っただけでは出さない）
   for (const slot of handSlots.slots) {
     if (!slot.view.visible || !slot.ema || slot.shape !== "open") continue;
     const v = slot.contactsVel[PALM_CONTACT];
-    if (v.length() >= GH_MIN_SPEED) {
-      tryActivate(slot.contactsWorld[PALM_CONTACT], now);
-      break;
-    }
+    if (v.length() < GH_MIN_SPEED) continue;
+    board.getWorldQuaternion(boardQuatInv).invert();
+    velBoard.copy(v).applyQuaternion(boardQuatInv);
+    const thrust = Math.max(-velBoard.z, velBoard.y); // 壁へ（-Z）か上へ（+Y）
+    if (thrust < GH_MIN_SPEED * 0.5) continue;
+    tryActivate(slot.contactsWorld[PALM_CONTACT], now);
+    if (game.hand) activeSlot = slot;
+    break;
   }
   // 2) タップ / Space（手が取れないときの保険）: 視界の先 0.9m
   if (holdRequested) {
@@ -473,17 +481,18 @@ function updateActivation(now: number) {
     camera.localToWorld(tmpVec);
     tryActivate(tmpVec, now);
   }
-  // 実体化中は手に追従（ゆっくり）
+  // 実体化中は「発動した手」に追従（ゆっくり）。手を見失ったら最後の位置を保つ
   if (game.hand && godHand) {
-    const slot = handSlots.slots.find((s) => s.view.visible && s.ema);
-    if (slot) {
-      tmpVec2.copy(slot.contactsWorld[PALM_CONTACT]);
+    if (activeSlot && activeSlot.view.visible && activeSlot.ema) {
+      tmpVec2.copy(activeSlot.contactsWorld[PALM_CONTACT]);
       board.worldToLocal(tmpVec2);
       tmpVec2.z -= GH_FORWARD_M;
       godHand.group.position.lerp(tmpVec2, 0.15);
-      const p = godHand.group.position;
-      game.moveHand([p.x, p.y, p.z]);
     }
+    const p = godHand.group.position;
+    game.moveHand([p.x, p.y, p.z]);
+  } else {
+    activeSlot = null;
   }
 }
 
@@ -528,7 +537,7 @@ function updateGame(now: number) {
         shatters.push(sh);
         godHand.dispose();
         godHand = null;
-        game.hand = null;
+        game.breakHand(now); // クールダウンの起点も記録（直接 null にすると即再発動できてしまう）
       }
       console.log("[gh] broken");
     } else if (ev.kind === "goal") {
@@ -566,6 +575,10 @@ function updateGame(now: number) {
       mesh.material.color.setRGB(1, 1 - 0.35 * k, 1 - 0.7 * k);
       mesh.scale.setScalar(0.6 + 0.4 * k);
     } else {
+      // キャッチ中でゴッドハンドがまだ出ていれば、手のひらに張り付いて一緒に動く
+      if (ball.state === "caught" && godHand && game.hand) {
+        ball.pos = [godHand.group.position.x, godHand.group.position.y + 0.05, godHand.group.position.z + 0.18];
+      }
       mesh.position.set(ball.pos[0], ball.pos[1], ball.pos[2]);
       mesh.material.color.setRGB(1, 1, 1);
       mesh.scale.setScalar(1);

@@ -1,7 +1,7 @@
 // 番外編 ex8-1（ゴッドハンド）の回帰テスト。`npm run test:godhand` で実行する。
 // 対象は demos/ex8-1-god-hand/god-hand-game.ts（純粋クラス。ローカルのみでサーバーは無い）。
 // テストフレームワークは使わない（04〜08 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
-import { DEFAULT_GH, GodHandGame } from "../demos/ex8-1-god-hand/god-hand-game.ts";
+import { DEFAULT_GH, GodHandGame, segmentSphereT } from "../demos/ex8-1-god-hand/god-hand-game.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -87,6 +87,35 @@ function run(game, fromMs, toMs, stepMs = 16) {
   check("result 中は発動できない", g.activate([0, 0, 1], 1650) === false);
   const evs2 = run(g, 1650, 2400);
   check("resultSec 後に自動リスタート（カウンタが戻る）", evs2.some((e) => e.kind === "restart") && g.phase === "play" && g.conceded === 0 && g.score === 0 && g.balls.length === 0);
+}
+
+// ================= 5b. 低 FPS でもすり抜けない（線分 vs 球） =================
+{
+  check("segmentSphereT: 線分が球を貫くと入口の t", near(segmentSphereT([0, 0, 0], [0, 0, 2], [0, 0, 1], 0.5), 0.25));
+  check("segmentSphereT: 始点が球の中なら 0", segmentSphereT([0, 0, 1], [0, 0, 2], [0, 0, 1], 0.5) === 0);
+  check("segmentSphereT: かすらなければ null", segmentSphereT([0, 1, 0], [0, 1, 2], [0, 0, 1], 0.5) === null);
+  // 9m/s のボールを 100ms 刻み（0.9m/フレーム）で進めても、判定球（半径 0.7）を跳び越えない
+  const g = new GodHandGame({ telegraphSec: 0.05, handActiveSec: 3, gravity: 0 });
+  g.spawnShot([0, 0, 0.2], [0, 0, 9], 2.6, 1000);
+  g.activate([0, 0, 1.4], 1000);
+  const evs = run(g, 1000, 1600, 100);
+  check("低 FPS（100ms 刻み）でも高速のボールをキャッチできる", evs.some((e) => e.kind === "catch"), JSON.stringify(g.balls[0]?.pos));
+  // 手がゴール面の直前でも「先に触れた方」が勝つ（同一フレームで両方起きる場合）
+  const g2 = new GodHandGame({ telegraphSec: 0.05, handActiveSec: 3, gravity: 0 });
+  g2.spawnShot([0, 0, 0.2], [0, 0, 9], 1.6, 1000);
+  g2.activate([0, 0, 1.3], 1000);
+  const evs2 = run(g2, 1000, 1600, 200);
+  check("同一フレームでゴール面も跨ぐときはキャッチが先", evs2.some((e) => e.kind === "catch") && !evs2.some((e) => e.kind === "goal" || e.kind === "broken"));
+}
+
+// ================= 5c. breakHand（破られたとき）のクールダウン =================
+{
+  const g = new GodHandGame({ handActiveSec: 5, handCooldownSec: 1 });
+  g.activate([0, 0, 1], 1000);
+  g.breakHand(1500);
+  check("breakHand で実体化が終わる", g.hand === null);
+  check("breakHand 直後は再発動できない（クールダウン）", g.activate([0, 0, 1], 1600) === false);
+  check("クールダウン後は再発動できる", g.activate([0, 0, 1], 2600) === true);
 }
 
 // ================= 6. 難易度の上がり方 =================
