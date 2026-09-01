@@ -6,7 +6,7 @@
 // テストフレームワークは使わない（04〜06 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
-import { BOARD, DEFAULT_DARTS, SEGMENTS, dartAt, scoreAt, simulateDart } from "../src/shared/darts-sim.ts";
+import { BOARD, DEFAULT_DARTS, MAX_LOFT_ELEVATION_DEG, SEGMENTS, dartAt, loftVelocity, scoreAt, simulateDart } from "../src/shared/darts-sim.ts";
 import { DartsGame } from "../src/shared/darts-game.ts";
 import { ThrowDetector } from "../src/shared/throw-detector.ts";
 import { launchVelocity } from "../src/shared/volleyball-sim.ts";
@@ -56,6 +56,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const wide = simulateDart([1, 0, 1], [0, 2.5, -2], cfg);
   check("simulateDart: ボードの外に刺さって 0 点", wide.hitT === 0.5 && wide.score.points === 0, `end=${wide.end.map((x) => x.toFixed(2))} stuck=${wide.stuck} r=${Math.hypot(wide.end[0], wide.end[1]).toFixed(2)} wallStickR=${cfg.wallStickR}`);
   check("BOARD: リングの半径が単調", BOARD.bullR < BOARD.outerBullR && BOARD.outerBullR < BOARD.tripleInR && BOARD.tripleInR < BOARD.tripleOutR && BOARD.tripleOutR < BOARD.doubleInR && BOARD.doubleInR < BOARD.doubleOutR && BOARD.doubleOutR < BOARD.boardR);
+}
+
+// ================= 1b. loftVelocity（打ち出しに足す仰角） =================
+{
+  const cfg = DEFAULT_DARTS;
+  const elevation = (v) => (Math.atan2(v[1], Math.hypot(v[0], v[2])) * 180) / Math.PI;
+  const speed = (v) => Math.hypot(v[0], v[1], v[2]);
+
+  const flat = [0, 0, -6];
+  const up20 = loftVelocity(flat, 20);
+  check("loftVelocity: 仰角が 20° 増える", near(elevation(up20) - elevation(flat), 20, 1e-9), `${elevation(flat).toFixed(2)} → ${elevation(up20).toFixed(2)}`);
+  check("loftVelocity: 速さは変わらない", near(speed(up20), speed(flat), 1e-9), `${speed(flat)} → ${speed(up20)}`);
+  check("loftVelocity: 0° は素通し", loftVelocity(flat, 0).join() === flat.join());
+
+  // 左右の向き（水平面内の方位）は変えない = 左右の狙いには補正を入れない
+  const diag = [2, -1, -5];
+  const azim = (v) => Math.atan2(v[0], v[2]);
+  check("loftVelocity: 左右の向きは変えない", near(azim(loftVelocity(diag, 25)), azim(diag), 1e-9));
+  // 逆回転で元に戻る（合成の手のテスト経路がこれに依存している）
+  const back = loftVelocity(loftVelocity(diag, 20), -20);
+  check("loftVelocity: 逆回転で元に戻る", back.every((x, i) => near(x, diag[i], 1e-9)), JSON.stringify(back));
+  // 既に真上近くを向いた振りを回しすぎても裏返らない（水平の向きが反転しない）
+  const steep = loftVelocity([0, 6, -0.05], 60);
+  check("loftVelocity: 真上を越えず水平の向きが裏返らない", steep[2] < 0 && elevation(steep) <= MAX_LOFT_ELEVATION_DEG + 1e-9, `elev=${elevation(steep).toFixed(2)} z=${steep[2]}`);
+
+  // 本題: 2m 手前から水平に 6m/s で振るとボードの遥か下（重力で 54cm 落ちる）だが、
+  // 仰角 20° を足すとボードに乗る
+  const from = [0, 0, 2];
+  const missed = simulateDart(from, flat, cfg);
+  check("loftVelocity: 水平のままではボードの下へ落ちる", missed.end[1] < -BOARD.boardR && missed.score.points === 0, `end=${missed.end.map((x) => x.toFixed(2))} score=${missed.score.label}`);
+  const hit = simulateDart(from, up20, cfg);
+  check("loftVelocity: 仰角 20° でボードに刺さって得点する", hit.stuck && Math.hypot(hit.end[0], hit.end[1]) <= BOARD.doubleOutR && hit.score.points > 0, `end=${hit.end.map((x) => x.toFixed(2))} score=${hit.score.label}`);
+  // 仰角を増やすほど遅い振りでも届く（着弾が上へ動く）
+  const slow20 = simulateDart(from, loftVelocity([0, 0, -5], 20), cfg);
+  const slow30 = simulateDart(from, loftVelocity([0, 0, -5], 30), cfg);
+  check("loftVelocity: 仰角を増やすと着弾が上がる", slow30.end[1] > slow20.end[1] && Math.hypot(slow30.end[0], slow30.end[1]) <= BOARD.boardR, `20°=${slow20.end.map((x) => x.toFixed(2))} 30°=${slow30.end.map((x) => x.toFixed(2))}`);
+  // 山なりになっている（弦より上に膨らむ）: 飛行の途中の高さが打ち出し点と着弾点を結んだ直線より上
+  const mid = dartAt(from, up20, hit.hitT / 2, cfg.gravity);
+  check("loftVelocity: 弾道が山なり（中間点が弦より上）", mid[1] > (from[1] + hit.end[1]) / 2, `mid=${mid.map((x) => x.toFixed(3))} chord=${((from[1] + hit.end[1]) / 2).toFixed(3)}`);
 }
 
 // ================= 2. game =================

@@ -24,7 +24,7 @@ import type { Release } from "../../src/shared/throw-detector";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import markerSvgUrl from "../../src/shared/marker-0.svg";
-import { BOARD, DEFAULT_DARTS, dartAt, dartVelAt, simulateDart } from "../../src/shared/darts-sim";
+import { BOARD, DEFAULT_DARTS, dartAt, dartVelAt, loftVelocity, simulateDart } from "../../src/shared/darts-sim";
 import type { DartsConfig, V3 } from "../../src/shared/darts-sim";
 import { launchVelocity } from "../../src/shared/volleyball-sim";
 import type { Dart, GameState } from "../../src/shared/darts-game";
@@ -98,6 +98,11 @@ const RELEASE_RATIO = numParam("releaseRatio", 0.5, { min: 0.1, max: 0.95 });
 const SWING_MAX_MS = numParam("swingMaxMs", 800, { min: 100, max: 3000 });
 /** 手の速度に掛ける係数。トラッカーの速度の過小申告を補う較正用（狙いの補正ではない）。既定 1 */
 const THROW_GAIN = numParam("throwGain", 1, { min: 0.1, max: 10 });
+/**
+ * 打ち出しに足す仰角 [deg]。水平に振っても山なりで届かせるための補正（loftVelocity 参照）。
+ * 0 で補正なし = 手の速度方向そのまま
+ */
+const THROW_LOFT = numParam("throwLoft", 20, { min: 0, max: 60 });
 const LOCAL_THROW_COOLDOWN_MS = 1000;
 const PREDICT_MAX_MS = 1500;
 
@@ -467,7 +472,8 @@ function fakeSwingVel(): Vec3 {
   camera.localToWorld(tmpVec);
   board.worldToLocal(tmpVec);
   const from: V3 = [tmpVec.x, tmpVec.y, tmpVec.z];
-  const v = launchVelocity(from, [0, 0, 0], FAKE_FLIGHT_SEC, GRAVITY);
+  // onRelease が仰角と較正を足すので、その逆をここで打ち消す（合成の手は狙って投げる）
+  const v = loftVelocity(launchVelocity(from, [0, 0, 0], FAKE_FLIGHT_SEC, GRAVITY), -THROW_LOFT);
   // board → world → camera（回転だけ）
   tmpVec.set(v[0], v[1], v[2]).applyQuaternion(board.getWorldQuaternion(tmpQuat));
   tmpVec.applyQuaternion(camera.getWorldQuaternion(tmpQuat).invert());
@@ -730,7 +736,10 @@ function updateThrowDetection(now: number) {
 }
 
 function onRelease(now: number, r: Release) {
-  const vel: V3 = [r.vel[0] * THROW_GAIN, r.vel[1] * THROW_GAIN, r.vel[2] * THROW_GAIN];
+  // 仰角を足してから速度の較正を掛ける（loftVelocity は速さを変えないので順序はどちらでも同じだが、
+  // 「手の速度 → 打ち出しの向き → 打ち出しの速さ」の順に読めるようにこの並びにする）
+  const lofted = loftVelocity(r.vel, THROW_LOFT);
+  const vel: V3 = [lofted[0] * THROW_GAIN, lofted[1] * THROW_GAIN, lofted[2] * THROW_GAIN];
   lastSwingInfo = `${r.why} peak=${r.peakSpeed.toFixed(2)}m/s pos=(${r.pos.map((v) => v.toFixed(2)).join(",")})`;
   if (!client || !auth || !canThrow()) return;
   if (now - lastLocalThrowMs < LOCAL_THROW_COOLDOWN_MS) return;
@@ -947,7 +956,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} rounds=${ROUNDS} throwMinSpeed=${THROW_MIN_SPEED} throwGain=${THROW_GAIN} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} rounds=${ROUNDS} throwMinSpeed=${THROW_MIN_SPEED} throwGain=${THROW_GAIN} throwLoft=${THROW_LOFT} mode=${touch ? "gyro" : "orbit"}`;
   connect();
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

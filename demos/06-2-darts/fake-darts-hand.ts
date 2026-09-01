@@ -10,7 +10,9 @@ import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 export const FAKE_REST: Vec3 = { x: 0.12, y: -0.12, z: -0.4 };
 /** 手番になってから振り始めるまで [s]・振る時間 [s]・止めて見せる時間 [s] */
 const WINDUP_SEC = 1.5;
-const SWING_SEC = 0.25;
+// 0.25 だと main.ts が渡す速度（仰角 throwLoft を打ち消して下向きに寝ている）で振り始めが
+// 顔に近すぎ、最初の数投が検出のならし中に外れる。短くして振りを定位置の周りに収める
+const SWING_SEC = 0.15;
 const HOLD_SEC = 0.6;
 /** 1 投のサイクル [s]。投げが刺さって次の投げに移る（settle 0.9s）より長く */
 export const FAKE_CYCLE_SEC = WINDUP_SEC + SWING_SEC + HOLD_SEC + 1.2;

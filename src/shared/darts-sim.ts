@@ -168,3 +168,33 @@ export function len3(v: V3): number {
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
+
+/** 仰角を足した後の打ち出しの仰角の上限 [deg]（真上を越えて裏返らせないため） */
+export const MAX_LOFT_ELEVATION_DEG = 89;
+
+/**
+ * 打ち出しの速度ベクトルを仰角ぶんだけ上向きへ回す（board 座標系。速さは変えない）。
+ *
+ * 手の速度方向をそのまま打ち出し方向にすると、水平に振ったダーツは重力で必ず手前に落ちる
+ * （距離 2m・重力 9.8 で山なりに届かせるには約 27° の上向きが要る）。実際のダーツも上へ投げるが、
+ * 手のトラッキングでその仰角まで正確に出すのは難しいので、離した瞬間の速度を一律で上へ回して補う。
+ * 回すのは仰角だけで左右（水平面内の向き）は手の向きのまま = 左右の狙いには補正を入れない。
+ *
+ * 水平成分が無い（真上・真下）ときは回す軸が定まらないのでそのまま返す。
+ */
+export function loftVelocity(vel: V3, deg: number): V3 {
+  const h = Math.hypot(vel[0], vel[2]);
+  if (deg === 0 || h < 1e-6) return [...vel];
+  // 既に上を向いている振りを真上より先まで回すと水平の向きが裏返って手前へ飛ぶので、
+  // 回した後の仰角が MAX_LOFT_ELEVATION_DEG を超えないところで頭打ちにする
+  const elevation = (Math.atan2(vel[1], h) * 180) / Math.PI;
+  const applied = clamp(deg, -MAX_LOFT_ELEVATION_DEG - elevation, MAX_LOFT_ELEVATION_DEG - elevation);
+  if (applied === 0) return [...vel];
+  const rad = (applied * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  // (水平成分, Y) の平面での回転。水平の向きは保ったまま大きさだけ付け替える
+  const h2 = h * c - vel[1] * s;
+  const y2 = h * s + vel[1] * c;
+  return [(vel[0] / h) * h2, y2, (vel[2] / h) * h2];
+}
