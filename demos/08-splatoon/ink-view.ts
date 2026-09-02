@@ -171,7 +171,10 @@ export class InkView {
       this.active.push(a);
       this.drawFrame(a, now);
     } else {
-      // 遅れて来た古い seq: 自分を完成形で描き、後ろの seq を seq 順に格子・描画とも上書きし直す
+      // 遅れて来た古い seq: 自分を完成形で描き、後ろの seq を seq 順に格子・描画とも上書きし直す。
+      // このときの overwrote は「既に描いた後ろの seq」に対する判定なので、サーバー順の帰属（本当は後ろの seq が
+      // 塗り替えた）とは入れ替わる。ただし鳴る音の組（通常 1 回 + 塗り替え 1 回）は同じで、遅れた着弾はフラッシュも
+      // 出さないので体験は変わらない。厳密に帰属を直すには基準格子からの再計算が要るので、レビュー指摘として記録のうえ許容
       this.drawBlob(a, 1, true);
       const idx = this.applied.findIndex((x) => x.seq > seq);
       this.applied.splice(idx, 0, { seq, uv, shape, color, atMs: now });
