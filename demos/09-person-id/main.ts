@@ -17,14 +17,7 @@ import type { PoseTracker } from "../../src/shared/pose-tracker";
 import { SkeletonView } from "../../src/shared/skeleton-view";
 import { TextPanel } from "../../src/shared/text-panel";
 import type { ViewMapping } from "../../src/shared/hand-math";
-import {
-  BODY_CONNECTIONS,
-  BODY_LANDMARK_COUNT,
-  bodyHeadPoint,
-  placeBodyLandmarks,
-  scaleBody,
-  solveBodyPlacement,
-} from "../../src/shared/body-math";
+import { BODY_CONNECTIONS, BODY_LANDMARK_COUNT, buildPersonDetection } from "../../src/shared/body-math";
 import type { BodyLandmark } from "../../src/shared/body-math";
 import { PersonTracks } from "../../src/shared/person-match";
 import type { MatchCandidate, PersonDetection } from "../../src/shared/person-match";
@@ -569,11 +562,7 @@ function updateBodies(now: number) {
   syncTrackViews(now);
 }
 
-// 2 つの写像を使い分ける（05 の手と同じ）:
-//   - 表示用（mapping）: 仮想カメラの FOV。この視線に沿って置いた点は背景の人に重なる（骨格・名札・線）
-//   - 実寸用（depthMapping）: 実カメラの FOV。深度を解くのと、追跡・対応づけ・seen に使う頭の位置はこちら。
-//     ピアの位置（マーカー由来）も実カメラの FOV で解いた座標なので、同じ系で比べないと ?fov= を変えたときに
-//     角度のゲートが別の系同士の比較になる（fov=auto なら両者は一致する）
+// 表示用（仮想カメラの FOV）と実寸用（実カメラの FOV）の 2 つの写像の使い分けは buildPersonDetection（body-math.ts）参照
 function applyPoseResult(result: PoseResultLike, now: number) {
   if (!passthrough) return;
   const mapping = passthrough.displayViewMapping(camera.fov);
@@ -582,20 +571,15 @@ function applyPoseResult(result: PoseResultLike, now: number) {
   const detections: PersonDetection[] = [];
   for (const [i, landmarks] of result.landmarks.entries()) {
     const worldRaw = result.worldLandmarks[i];
-    if (!worldRaw || landmarks.length < BODY_LANDMARK_COUNT || worldRaw.length < BODY_LANDMARK_COUNT) continue;
-    const world = scaleBody(worldRaw, BODY_SCALE);
-    const placement = solveBodyPlacement(landmarks, world, depthMapping, MIN_VIS);
-    if (!placement || placement.depth > MAX_BODY_DEPTH_M) continue;
-    const points = placeBodyLandmarks(landmarks, world, placement, mapping);
-    const metricPoints = depthMapping === mapping ? points : placeBodyLandmarks(landmarks, world, placement, depthMapping);
-    detections.push({
-      points,
-      head: bodyHeadPoint(metricPoints, landmarks, MIN_VIS),
-      displayHead: bodyHeadPoint(points, landmarks, MIN_VIS),
-      depth: placement.depth,
-      residual: placement.residual,
-      used: placement.used,
+    if (!worldRaw) continue;
+    const det = buildPersonDetection(landmarks, worldRaw, {
+      mapping,
+      depthMapping,
+      bodyScale: BODY_SCALE,
+      minVisibility: MIN_VIS,
+      maxDepthM: MAX_BODY_DEPTH_M,
     });
+    if (det) detections.push(det);
   }
   tracks.apply(detections, now);
   // 厳密モードでは自分がマーカーロスト中（位置が凍結）は照合しない（候補なし = 保持と期限切れだけ進む）

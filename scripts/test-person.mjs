@@ -11,6 +11,7 @@ import {
   MIN_VISIBLE_POINTS,
   RIGHT_EYE,
   bodyHeadPoint,
+  buildPersonDetection,
   placeBodyLandmarks,
   scaleBody,
   solveBodyPlacement,
@@ -85,6 +86,11 @@ const deg = (d) => (d * Math.PI) / 180;
   const displayHead = bodyHeadPoint(placeBodyLandmarks(r.landmarks[0], r.worldLandmarks[0], p, display), r.landmarks[0], 0.5);
   check("実カメラ FOV で置いた頭は真の位置", near(metricHead.x, hip.x + eyes.x, 1e-6) && near(metricHead.y, hip.y + eyes.y, 1e-6));
   check("表示 FOV で置いた頭は視線がずれる（対応づけに使ってはいけない）", Math.abs(displayHead.x - metricHead.x) > 0.3, `${displayHead.x.toFixed(2)} vs ${metricHead.x.toFixed(2)}`);
+  // main.ts が使う組み立て関数そのもの: head は実寸用、displayHead / points は表示用
+  const det = buildPersonDetection(r.landmarks[0], r.worldLandmarks[0], { mapping: display, depthMapping: metric, bodyScale: 1, minVisibility: 0.5, maxDepthM: 8 });
+  check("buildPersonDetection: head は実カメラ FOV（真の位置）、displayHead と points は表示 FOV", det && near(det.head.x, metricHead.x, 1e-9) && near(det.displayHead.x, displayHead.x, 1e-9) && near(det.points[LEFT_EYE].x, placeBodyLandmarks(r.landmarks[0], r.worldLandmarks[0], p, display)[LEFT_EYE].x, 1e-9) && near(det.depth, 2, 1e-6));
+  check("buildPersonDetection: 写像が同じなら head と displayHead は一致", (() => { const d = buildPersonDetection(r.landmarks[0], r.worldLandmarks[0], { mapping: metric, depthMapping: metric, bodyScale: 1, minVisibility: 0.5, maxDepthM: 8 }); return d && near(d.head.x, d.displayHead.x, 1e-12); })());
+  check("buildPersonDetection: maxDepthM を超えると null、bodyScale=2 で深度 4m", buildPersonDetection(r.landmarks[0], r.worldLandmarks[0], { mapping: metric, depthMapping: metric, bodyScale: 1, minVisibility: 0.5, maxDepthM: 1.5 }) === null && near(buildPersonDetection(r.landmarks[0], r.worldLandmarks[0], { mapping: metric, depthMapping: metric, bodyScale: 2, minVisibility: 0.5, maxDepthM: 8 })?.depth ?? 0, 4, 1e-6));
 }
 
 // ================= 2. person-match =================
@@ -132,6 +138,17 @@ const deg = (d) => (d * Math.PI) / 180;
   const keepB = matchPersons([{ key: 1, pos: at(0).pos }], [at(9, "p2"), at(1, "p3")], opts, new Map([[1, "p2"]]));
   check("差が大きければ乗り換える（p3）", keepB.get(1)?.id === "p3", keepB.get(1)?.id);
   check("keepBonus=0 なら僅差でも近い方", matchPersons([{ key: 1, pos: at(0).pos }], [at(3, "p2"), at(2, "p3")], { ...opts, keepBonus: 0 }, new Map([[1, "p2"]])).get(1)?.id === "p3");
+  // 複数割当で effective が負になる: 検出 a（現 id p2）は p2 とぴったり 0°（0 - 0.25 = -0.25）、b は p3 の方が近い
+  const negM = matchPersons(
+    [
+      { key: "a", pos: at(0).pos },
+      { key: "b", pos: at(5).pos },
+    ],
+    [at(0, "p2"), at(3, "p3")],
+    opts,
+    new Map([["a", "p2"]]),
+  );
+  check("負の effective コストがあっても 2 人とも対応し、現 id を維持（a→p2, b→p3）", negM.size === 2 && negM.get("a")?.id === "p2" && negM.get("b")?.id === "p3", JSON.stringify([...negM]));
 
   // 追跡 + ヒステリシス
   const shape = syntheticBodyShape();
@@ -171,15 +188,34 @@ const deg = (d) => (d * Math.PI) / 180;
     }
     const held = t2.live(332)[0];
     check("空フレームの間は候補を進めない（p3 に切り替わらない）。保持中は detected() に入らない", held && held.id === "p2" && held.candidateStreak === 0 && held.fresh === false && t2.detected(332).length === 0 && t2.live(332).length === 1, `${held?.id} streak=${held?.candidateStreak}`);
-    t2.apply([], 1200);
-    t2.match([], 1200, opts);
-    check("保持中でも idHoldMs を過ぎれば id は外れる（lostMs は過ぎているので live からも消える）", t2.live(1200).length === 0);
+    t2.apply([], 700);
+    t2.match([], 700, opts);
+    check("lostMs 超で live から消える（update() を待たずに live() が除く）", t2.live(700).length === 0 && t2.tracks.length === 1);
+    t2.update(700);
+    check("update() で内部からも消える", t2.tracks.length === 0);
+    // 保持中（lostMs > idHoldMs）に idHoldMs を過ぎると、live のまま id だけ外れる
+    const t3h = new PersonTracks({ maxTracks: 2, smooth: 1, lostMs: 2000, trackDistM: 0.5, idHoldMs: 1000, idStreak: 3 });
+    for (const t of [0, 66, 132]) {
+      t3h.apply([det(0, -2)], t);
+      t3h.match(peerAt(0.05, -2.05), t, opts);
+    }
+    for (const t of [200, 1100]) {
+      t3h.apply([], t);
+      t3h.match([], t, opts);
+    }
+    check("保持中: idHoldMs 以内（968ms）は id を維持", t3h.live(1100).length === 1 && t3h.live(1100)[0].id === "p2" && t3h.live(1100)[0].fresh === false);
+    t3h.apply([], 1200);
+    t3h.match([], 1200, opts);
+    check("保持中でも idHoldMs を過ぎれば（1068ms）id が外れ、追跡自体は live のまま", t3h.live(1200).length === 1 && t3h.live(1200)[0].id === null);
   }
   // 2 人目は別の追跡
   tracks.apply([det(0.04, -2), det(1.5, -2)], 1400);
   check("1.5m 離れた検出は別の追跡になる", tracks.live(1400).length === 2 && tracks.live(1400).map((t) => t.key).join() === "1,2");
-  // 一意性: p2 が A に付いた後、B の位置へ移ると A から外れて B に付く
-  for (const t of [1400, 1466, 1532]) tracks.match(peerAt(0.05, -2.05), t, opts);
+  // 一意性: p2 が A に付いた後、B の位置へ移ると A から外れて B に付く（本番と同じく毎フレーム apply → match）
+  for (const t of [1400, 1466, 1532]) {
+    tracks.apply([det(0.04, -2), det(1.5, -2)], t);
+    tracks.match(peerAt(0.05, -2.05), t, opts);
+  }
   const [a, b] = tracks.live(1532);
   check("A に p2", a.id === "p2" && b.id === null);
   for (const t of [1600, 1666, 1732]) {

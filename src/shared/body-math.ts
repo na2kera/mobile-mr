@@ -137,6 +137,48 @@ function mid(a: Vec3, b: Vec3): Vec3 {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
 }
 
+export type PersonDetectionLike = {
+  /** 表示用の 33 点（表示 FOV の視線に沿って置いたもの。背景の人に重なる） */
+  points: Vec3[];
+  /** 頭の位置（実カメラの FOV の視線で置いたもの。追跡・対応づけ・seen に使う） */
+  head: Vec3;
+  /** 表示用の頭の位置（名札と線の位置に使う） */
+  displayHead: Vec3;
+  depth: number;
+  residual: number;
+  used: number;
+};
+
+/**
+ * 1 人ぶんの検出結果を組み立てる（main.ts の applyPoseResult から切り出した純粋関数。回帰テストで
+ * 「表示用と実寸用の写像の使い分け」を直接検証するため）。2 つの写像の使い分けは 05 の手と同じ:
+ *   - mapping（表示用）: 仮想カメラの FOV。この視線に沿って置いた点は背景の人に重なる（骨格・名札・線）
+ *   - depthMapping（実寸用）: 実カメラの FOV。深度を解くのと、追跡・対応づけ・seen に使う頭の位置はこちら。
+ *     ピアの位置（マーカー由来）も実カメラの FOV で解いた座標なので、同じ系で比べないと ?fov= を変えたときに
+ *     角度のゲートが別の系同士の比較になる（fov=auto なら両者は一致する）
+ * @returns 解けなければ null（可視点不足・退化・maxDepthM 超え）
+ */
+export function buildPersonDetection(
+  landmarks: readonly BodyLandmark[],
+  worldRaw: readonly BodyLandmark[],
+  opts: { mapping: ViewMapping; depthMapping: ViewMapping; bodyScale: number; minVisibility: number; maxDepthM: number },
+): PersonDetectionLike | null {
+  if (landmarks.length < BODY_LANDMARK_COUNT || worldRaw.length < BODY_LANDMARK_COUNT) return null;
+  const world = scaleBody(worldRaw, opts.bodyScale);
+  const placement = solveBodyPlacement(landmarks, world, opts.depthMapping, opts.minVisibility);
+  if (!placement || placement.depth > opts.maxDepthM) return null;
+  const points = placeBodyLandmarks(landmarks, world, placement, opts.mapping);
+  const metricPoints = opts.depthMapping === opts.mapping ? points : placeBodyLandmarks(landmarks, world, placement, opts.depthMapping);
+  return {
+    points,
+    head: bodyHeadPoint(metricPoints, landmarks, opts.minVisibility),
+    displayHead: bodyHeadPoint(points, landmarks, opts.minVisibility),
+    depth: placement.depth,
+    residual: placement.residual,
+    used: placement.used,
+  };
+}
+
 /**
  * 画像の正規化座標（体の中心など）→ カメラ座標系での方向（深度 1 の平面上）。
  * imageToRay の再エクスポート（デモ側が hand-math を意識しなくて済むように）
