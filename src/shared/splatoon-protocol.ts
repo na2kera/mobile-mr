@@ -7,8 +7,11 @@ import type { GameSnapshot, Shot } from "./splatoon-game.ts";
 
 export const SPLATOON_PATH = "/api/splatoon";
 
-/** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否）。v5: 練習 / 俯瞰画面からの開始 / グーで補充 */
-export const SPLATOON_PROTOCOL_VERSION = 5;
+/**
+ * メッセージや座標系の意味を変えたら上げる（不一致は入室拒否）。
+ * v5: 練習 / 俯瞰画面からの開始 / グーで補充。v6: 着弾を飛沫の形で塗る（shot.radius は円ではなく飛沫の基準半径。得点もその形）
+ */
+export const SPLATOON_PROTOCOL_VERSION = 6;
 
 export const NAME_MAX_LENGTH = 12;
 
