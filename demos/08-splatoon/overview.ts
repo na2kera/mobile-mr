@@ -365,6 +365,7 @@ const splatted = new Set<number>();
 
 const splatSound = createSplatSound(SOUND);
 addEventListener("pointerdown", () => splatSound.unlock());
+addEventListener("pageshow", () => splatSound.unlock());
 addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") splatSound.unlock();
 });
@@ -404,7 +405,7 @@ function splatLanding(shot: Shot, now: number) {
   const view = inkViews.get(landing.surfaceId);
   if (!surface || !view) return;
   const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity), isWallSurface(surface));
-  const overwrote = view.splat(landing.uv, shape, shot.color, now);
+  const overwrote = view.splat(shot.seq, landing.uv, shape, shot.color, now);
   splatSound.play(0.25, overwrote);
 }
 

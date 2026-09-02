@@ -859,7 +859,7 @@ function splatLanding(shot: Shot, now: number) {
   const view = inkViews.get(landing.surfaceId);
   if (!surface || !view) return;
   const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity), isWallSurface(surface));
-  const overwrote = view.splat(landing.uv, shape, shot.color, now);
+  const overwrote = view.splat(shot.seq, landing.uv, shape, shot.color, now);
   splatSound.play(shot.by === selfId ? 0.5 : 0.3, overwrote);
 }
 

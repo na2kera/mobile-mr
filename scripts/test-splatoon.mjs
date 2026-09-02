@@ -157,7 +157,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("垂れの帯と先端の玉は insideSplat で中、帯の横は外", insideSplat(aw, dr.du, dr.dv + dr.len * 0.5) && insideSplat(aw, dr.du, dr.dv + dr.len + dr.w * 0.5) && !insideSplat(aw, dr.du + dr.w * 2 + aw.r * 2, dr.dv + dr.len * 0.5));
   check("垂れは extent に含まれる", splatExtent(aw) >= Math.hypot(dr.du, dr.dv + dr.len) + dr.w);
   check("壁の形は垂れ以外は床と同じ（seed が同じなら本体・滴が一致）", JSON.stringify(aw.drops) === JSON.stringify(a.drops) && JSON.stringify(aw.waves) === JSON.stringify(a.waves));
-  check("向きなしの後方滴も上に偏らない（全方向）", (() => { let up = 0, n = 0; for (let sd = 1; sd <= 40; sd++) for (const d of splatShape(sd, 0.09, null).drops) { n++; if (d.dv < 0) up++; } return up > n * 0.3 && up < n * 0.7; })());
+  check("向きなしの後方滴（配列の末尾）も上に偏らない（全方向）", (() => { let up = 0, n = 0; for (let sd = 1; sd <= 60; sd++) { const d = splatShape(sd, 0.09, null).drops.at(-1); n++; if (d.dv < 0) up++; } return up > n * 0.3 && up < n * 0.7; })());
   check("isWallSurface: 壁は true、床は false", isWallSurface(wall) && !isWallSurface(floor));
   // 進行方向: 壁に正面から撃つと重力で下向き成分だけが残り、壁の yAxis（下）方向 = [0, 1]
   const lw = simulateInk([0, 0, 2], [0, 0, -5], [wall, floor], cfg);
@@ -194,6 +194,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const g3 = new InkGrid(sf, game.config.cellM);
   const nExpect = g3.stampSplat(sh.landing.uv, expectShape, sh.color);
   check("サーバーの格子は shot.seq 由来の飛沫の形（壁なので垂れ込み）で塗られている（クライアントと同じ形 = 得点）", game.scores().s1 === nExpect && nExpect > 0 && expectShape.drips.length > 0, `${game.scores().s1} vs ${nExpect}`);
+  check("サーバーの格子の中身（encode）がクライアントの再現と完全一致", game.grids.get(sf.id).encode() === g3.encode());
+  // 着弾順の再現: サーバーは seq 順（1 → 2）に塗るが、クライアントには近い 2 が先に着く。
+  // 遅れて 1 が来たら 1 を塗ってから 2 を塗り直せばサーバーと同じ格子になる（InkView.splat の手順）
+  const s1 = splatShape(1, 0.09, [0, 1], true);
+  const s2 = splatShape(2, 0.09, [0.3, 1], true);
+  const gServer = new InkGrid(wall, 0.02);
+  gServer.stampSplat([0.5, 0.5], s1, 1);
+  gServer.stampSplat([0.52, 0.5], s2, 2);
+  const gClient = new InkGrid(wall, 0.02);
+  gClient.stampSplat([0.52, 0.5], s2, 2); // 2 が先に着弾
+  const naive = gClient.encode();
+  gClient.stampSplat([0.5, 0.5], s1, 1); // 遅れて 1
+  check("順序が逆転すると格子が違う（そのままでは 1 が 2 を上書きしてしまう）", gClient.encode() !== gServer.encode() && naive !== gServer.encode());
+  gClient.stampSplat([0.52, 0.5], s2, 2); // 後ろの seq を塗り直す
+  check("後ろの seq を塗り直すとサーバーの格子と完全一致", gClient.encode() === gServer.encode());
 }
 
 // ================= 2. hand shape =================

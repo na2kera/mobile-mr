@@ -4,7 +4,10 @@
 // 見た目の遊び（Phase 8 追加 A 案）: 本体はツヤのあるグラデーション + ハイライト、着弾から 150ms で広がり、
 // 壁では下に垂れる（垂れも形の一部で得点に入る）。相手の色を塗り替えたときは一瞬白く光る。
 // 塗りは蓄積する canvas なので、アニメーション（広がり・フラッシュ）は短く（≤ 220ms）し、新しい着弾が来たら
-// 同じ面の進行中の着弾を先に確定して着弾順（= サーバーの格子の順）を保つ。
+// 同じ面の進行中の着弾を先に確定する。
+// サーバーは発射を受理した順（seq 順）に格子を塗るが、クライアントは着弾時刻に塗るので、飛行時間が違う 2 発が
+// 重なると順序が逆転し得る（近い方が先に着く）。seq の小さい着弾が後から来たときは、それを描いてから
+// 既に描いた seq の大きい着弾を seq 順に描き直して、サーバーと同じ順序（= 同じ格子）にする。
 // 「塗り替えたか」は描画色ではなく、サーバーと同じ格子（InkGrid）をクライアントにも持って判定する
 import * as THREE from "three";
 import { InkGrid, MAX_INK_COLORS, type InkColor, type SurfaceFrame, type V2 } from "../../src/shared/splatoon-sim";
@@ -38,6 +41,7 @@ const ANIM_INTERVAL_MS = 1000 / 30;
 const EDGE_STEPS = 48;
 
 type ActiveSplat = {
+  seq: number;
   cx: number;
   cy: number;
   shape: SplatShape;
@@ -45,6 +49,11 @@ type ActiveSplat = {
   startMs: number;
   overwrote: boolean;
 };
+
+/** 描き直し用の履歴（seq 順）。古い seq が後から来なくなる時間が過ぎたら捨てる */
+type AppliedSplat = { seq: number; uv: V2; shape: SplatShape; color: InkColor; atMs: number };
+/** 履歴を持つ時間 [ms]（最長の飛行 maxFlightSec=3s より長ければ、それより古い seq は後から来ない） */
+const HISTORY_MS = 4500;
 
 function hexToRgb(hex: number): [number, number, number] {
   return [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
@@ -67,8 +76,9 @@ export class InkView {
   private readonly frameMaterial: THREE.LineBasicMaterial;
   private readonly pxPerM: number;
   /** サーバーと同じ格子（塗り替えの判定用。snapshot が来たら上書きされる） */
-  private readonly grid: InkGrid;
+  private grid: InkGrid;
   private readonly active: ActiveSplat[] = [];
+  private readonly applied: AppliedSplat[] = [];
   private lastAnimMs = -Infinity;
 
   constructor(frame: SurfaceFrame, pxPerM = DEFAULT_PX_PER_M, cellM = 0.02) {
@@ -124,6 +134,7 @@ export class InkView {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     this.grid.clear();
     this.active.length = 0;
+    this.applied.length = 0;
     this.texture.needsUpdate = true;
   }
 
@@ -133,15 +144,20 @@ export class InkView {
 
   /**
    * 着弾: UV を中心に飛沫の形で塗る。広がりとフラッシュのアニメーションは update(now) で進める。
-   * 同じ面で進行中の着弾があれば先に確定する（着弾順 = サーバーの格子の順を保つ）
+   * 同じ面で進行中の着弾があれば先に確定する。seq が既に描いたものより小さい（遅れて着弾した）ときは
+   * アニメーション無しで描き、その後ろの seq を描き直してサーバーの順序に合わせる
+   * @param seq サーバーの通し番号（塗る順序 = サーバーの格子の順）
    * @returns 相手の色を塗り替えたか（格子で判定。音とフラッシュに使う）
    */
-  splat(uv: V2, shape: SplatShape, color: InkColor, now: number): boolean {
+  splat(seq: number, uv: V2, shape: SplatShape, color: InkColor, now: number): boolean {
     for (const a of this.active) this.drawBlob(a, 1, true);
     this.active.length = 0;
+    // 履歴の掃除（これより古い seq はもう来ない）
+    while (this.applied.length > 0 && now - this.applied[0].atMs > HISTORY_MS) this.applied.shift();
     const stats = { overwritten: 0 };
     this.grid.stampSplat(uv, shape, color, stats);
     const a: ActiveSplat = {
+      seq,
       cx: uv[0] * this.canvas.width,
       cy: uv[1] * this.canvas.height,
       shape,
@@ -149,8 +165,21 @@ export class InkView {
       startMs: now,
       overwrote: stats.overwritten > 0,
     };
-    this.active.push(a);
-    this.drawFrame(a, now);
+    const later = this.applied.filter((x) => x.seq > seq);
+    if (later.length === 0) {
+      this.applied.push({ seq, uv, shape, color, atMs: now });
+      this.active.push(a);
+      this.drawFrame(a, now);
+    } else {
+      // 遅れて来た古い seq: 自分を完成形で描き、後ろの seq を seq 順に格子・描画とも上書きし直す
+      this.drawBlob(a, 1, true);
+      const idx = this.applied.findIndex((x) => x.seq > seq);
+      this.applied.splice(idx, 0, { seq, uv, shape, color, atMs: now });
+      for (const x of later) {
+        this.grid.stampSplat(x.uv, x.shape, x.color);
+        this.drawBlob({ seq: x.seq, cx: x.uv[0] * this.canvas.width, cy: x.uv[1] * this.canvas.height, shape: x.shape, color: x.color, startMs: now, overwrote: false }, 1, true);
+      }
+    }
     this.lastAnimMs = now;
     this.texture.needsUpdate = true;
     return a.overwrote;
@@ -257,9 +286,10 @@ export class InkView {
     ctx.restore();
   }
 
-  /** 格子（サーバーの権威状態）から描き直す。cellM はサーバーと同じ値（FieldConfig.cellM） */
+  /** 格子（サーバーの権威状態）から描き直す。cellM はサーバーと同じ値（FieldConfig.cellM。違えば格子を作り直す） */
   redrawFromGrid(encoded: string, cellM: number) {
-    const grid = this.grid.cellM === cellM ? this.grid : new InkGrid(this.frame, cellM);
+    if (this.grid.cellM !== cellM) this.grid = new InkGrid(this.frame, cellM);
+    const grid = this.grid;
     this.clear();
     grid.decode(encoded);
     const { ctx, canvas } = this;
