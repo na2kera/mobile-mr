@@ -124,6 +124,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 {
   const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1, waitSec: 1 });
   check("誰もいなくても tick は何も起こさない（練習のまま）", g.tick(0).length === 0 && g.phase === "practice");
+  check("プレイヤーがいないと start は拒否", g.start(0).length === 0 && g.lastRejectReason === "no players" && g.phase === "practice");
   const e1 = g.join("p1", "A", 1000);
   check("入室しても練習のまま（自動では始まらない。issue #20）", e1.length === 0 && g.players.get("p1").color === 1 && g.phase === "practice" && g.phaseEndsAt === Infinity);
   check("snapshot の phaseEndsAt は練習中 null（JSON に Infinity は載らない）", g.snapshot(1000).phaseEndsAt === null);
@@ -197,7 +198,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   g2.start(0);
   g2.tick(1000);
   g2.tick(11000);
-  check("result 中の start は受け付ける（結果表示を待たずに次の対戦へ）", g2.phase === "result" && g2.start(12000)[0]?.kind === "countdown" && g2.phase === "waiting");
+  check("result 中の start は受け付ける（結果表示を待たずに次の対戦へ）。勝者の表示は消える", g2.phase === "result" && g2.winners !== null && g2.start(12000)[0]?.kind === "countdown" && g2.phase === "waiting" && g2.winners === null && g2.snapshot(12000).winnerNames === null);
 }
 
 // ================= 3c. 全色使用時の再利用はセルを消す =================

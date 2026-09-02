@@ -207,9 +207,18 @@ try {
   const p3 = await openPage(t3, "3");
   await p3.send("Page.navigate", { url: OVERVIEW });
 
+  const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
+  // 3 ページの起動は CPU 次第で数秒ずれる（並走する他のテストや初回のシェーダ構築）。固定の待ちだけだと
+  // 遅い方のウィンドウが入室前で HUD が空のまま読んでしまうので、両方が入室してマーカーを検出するまで先に待つ
+  const t0 = Date.now();
+  while (Date.now() - t0 < 40000) {
+    const [h1, h2] = await Promise.all([readHud(p1), readHud(p2)]);
+    if (h1.me.startsWith("p") && h2.me.startsWith("p") && h1.marker.startsWith("id=") && h2.marker.startsWith("id=")) break;
+    await sleep(500);
+  }
+  console.log(`両ウィンドウの入室 + マーカー検出まで ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   await sleep(WAIT_SEC * 1000);
 
-  const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
   const readOverview = async () => parseOverviewHud((await p3.eval("document.querySelector('#hud')?.textContent")) ?? "");
   const show = (h) => `me=${h.me} marker=${h.marker} phase=${h.phase} color=${h.color} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)}/${h.total} shots=${h.sent}/${h.accepted}`;
   const showOv = (h) => `me=${h.me} ws=${h.ws} phase=${h.phase} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)} starts=${h.starts}`;

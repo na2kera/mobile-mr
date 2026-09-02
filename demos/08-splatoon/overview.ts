@@ -427,7 +427,7 @@ function renderPanel() {
     const w = s.winnerNames ?? [];
     phaseText = w.length === 0 ? "結果: だれも塗れず…" : `結果: ${w.join("・")} の勝ち！`;
   }
-  const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result");
+  const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0;
   const total = Math.max(1, s?.totalCells ?? 1);
   const ranking = s
     ? [...s.players]
@@ -439,7 +439,8 @@ function renderPanel() {
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   startButton.disabled = !canStart;
-  startButton.textContent = s?.phase === "result" ? "次の対戦を開始" : s?.phase === "play" ? "対戦中" : s?.phase === "waiting" ? "カウントダウン中" : "対戦開始";
+  startButton.textContent =
+    s?.phase === "play" ? "対戦中" : s?.phase === "waiting" ? "カウントダウン中" : s && s.players.length === 0 ? "プレイヤー待ち" : s?.phase === "result" ? "次の対戦を開始" : "対戦開始";
   playersEl.replaceChildren(
     ...ranking.map(({ p, pct, ink, win }) => {
       const li = document.createElement("li");

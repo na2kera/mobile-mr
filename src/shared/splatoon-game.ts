@@ -218,8 +218,15 @@ export class SplatoonGame {
       this.lastRejectReason = `cannot start during ${this.phase}`;
       return [];
     }
+    if (this.players.size === 0) {
+      this.lastRejectReason = "no players";
+      return [];
+    }
     this.phase = "waiting";
     this.phaseEndsAt = now + this.config.waitSec * 1000;
+    // 結果表示中からの開始: 前の勝者の表示（🏆）はここで消す（格子は試合開始まで残す）
+    this.winners = null;
+    this.winnerNames = null;
     this.seq++;
     return [{ kind: "countdown" }];
   }
