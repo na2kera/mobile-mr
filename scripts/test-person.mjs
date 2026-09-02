@@ -193,6 +193,23 @@ const deg = (d) => (d * Math.PI) / 180;
     check("lostMs 超で live から消える（update() を待たずに live() が除く）", t2.live(700).length === 0 && t2.tracks.length === 1);
     t2.update(700);
     check("update() で内部からも消える", t2.tracks.length === 0);
+    // 別の候補が揺れて idStreak に届かない間も、いまの id の猶予は進む（外部レビューの反例）
+    const t3f = new PersonTracks({ maxTracks: 2, smooth: 1, lostMs: 500, trackDistM: 0.5, idHoldMs: 1000, idStreak: 3 });
+    for (const t of [0, 66, 132]) {
+      t3f.apply([det(0, -2)], t);
+      t3f.match(peerAt(0.05, -2.05), t, opts);
+    }
+    let tt = 132;
+    let flickerOk = true;
+    for (let i = 0; i < 30; i++) {
+      tt += 66;
+      t3f.apply([det(0, -2)], tt);
+      // p3 と p4 が交互に最良（p2 は居ない）
+      t3f.match([{ id: i % 2 === 0 ? "p3" : "p4", pos: { x: 0.05, y: 0.75, z: -2.05 } }], tt, opts);
+      const id = t3f.live(tt)[0].id;
+      if (tt - 132 <= 1000 ? id !== "p2" : id !== null) flickerOk = false;
+    }
+    check("候補が p3 / p4 で揺れて切り替わらなくても、p2 は idHoldMs で外れる", flickerOk && t3f.live(tt)[0].id === null && t3f.live(tt)[0].candidateStreak <= 1, `${t3f.live(tt)[0].id}`);
     // 保持中（lostMs > idHoldMs）に idHoldMs を過ぎると、live のまま id だけ外れる
     const t3h = new PersonTracks({ maxTracks: 2, smooth: 1, lostMs: 2000, trackDistM: 0.5, idHoldMs: 1000, idStreak: 3 });
     for (const t of [0, 66, 132]) {

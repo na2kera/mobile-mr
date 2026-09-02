@@ -343,10 +343,11 @@ export class PersonTracks {
           track.lastMatchMs = now;
           track.candidate = null;
           track.candidateStreak = 0;
+          continue;
         }
-        continue;
-      }
-      if (track.fresh) {
+        // 切り替えに至らなくても、いまの id の最終一致からの猶予は下で評価する
+        // （別の候補が揺れ続けると古い id が無期限に残る）
+      } else if (track.fresh) {
         track.candidate = null;
         track.candidateStreak = 0;
       }
