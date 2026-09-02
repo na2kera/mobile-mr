@@ -20,6 +20,7 @@ import {
   type SurfaceFrame,
   type V3,
 } from "./splatoon-sim.ts";
+import { impactDirUv, isWallSurface, splatShape } from "./splat-shape.ts";
 
 export type Phase = "practice" | "waiting" | "play" | "result";
 
@@ -350,8 +351,16 @@ export class SplatoonGame {
     st.ink = Math.max(0, st.ink - cost);
     st.lastShotMs = now;
     const landing = simulateInk(pos, vel, this.surfaces, cfg);
-    if (landing?.hit) this.grids.get(landing.surfaceId)?.stamp(landing.uv, radius, p.color);
-    const shot: Shot = { seq: ++this.seq, by: id, color: p.color, pos, vel, radius, launchedAt: now, landing };
+    const seq = ++this.seq;
+    if (landing?.hit) {
+      // 見た目（InkView）と同じ飛沫の形で塗る（形は seq を種に全端末で同じ）
+      const surface = this.surfaces.find((s) => s.id === landing.surfaceId);
+      if (surface) {
+        const shape = splatShape(seq, radius, impactDirUv(landing, vel, surface, cfg.gravity), isWallSurface(surface));
+        this.grids.get(landing.surfaceId)?.stampSplat(landing.uv, shape, p.color);
+      }
+    }
+    const shot: Shot = { seq, by: id, color: p.color, pos, vel, radius, launchedAt: now, landing };
     this.shots.push(shot);
     return shot;
   }

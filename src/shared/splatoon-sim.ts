@@ -10,6 +10,8 @@
 // Surface（07 の SurfaceDef は「壁面 Z=0」前提だったので、ここでは向きを持つ SurfaceFrame に一般化する。
 // UV の規約は 07 と同じ: 左上 (0,0) → 右下 (1,1)。壁: u = X 右, v = 下。床: u = X 右, v = 壁から部屋側へ）
 import type { V2, V3 } from "./surface.ts";
+import { insideSplat, splatExtent } from "./splat-shape.ts";
+import type { SplatShape } from "./splat-shape.ts";
 
 export type { V2, V3 };
 
@@ -271,6 +273,40 @@ export class InkGrid {
         }
       }
     }
+    return changed;
+  }
+
+  /**
+   * UV を中心に飛沫の形（splat-shape.ts）で塗る。見た目（InkView）と同じ形で格子を塗るので、見た目 = 得点になる。
+   * 塗り替えたセル数を返す
+   */
+  stampSplat(uv: V2, shape: SplatShape, color: InkColor, stats?: { overwritten: number }): number {
+    const cx = uv[0] * this.cols;
+    const cy = uv[1] * this.rows;
+    const mPerCellX = this.surface.widthM / this.cols;
+    const mPerCellY = this.surface.heightM / this.rows;
+    const ext = splatExtent(shape);
+    let changed = 0;
+    let overwritten = 0;
+    const x0 = Math.max(0, Math.floor(cx - ext / mPerCellX));
+    const x1 = Math.min(this.cols - 1, Math.ceil(cx + ext / mPerCellX));
+    const y0 = Math.max(0, Math.floor(cy - ext / mPerCellY));
+    const y1 = Math.min(this.rows - 1, Math.ceil(cy + ext / mPerCellY));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const du = (x + 0.5 - cx) * mPerCellX;
+        const dv = (y + 0.5 - cy) * mPerCellY;
+        if (!insideSplat(shape, du, dv)) continue;
+        const i = y * this.cols + x;
+        if (this.cells[i] !== color) {
+          if (this.cells[i] !== 0) overwritten++;
+          this.cells[i] = color;
+          changed++;
+        }
+      }
+    }
+    // 塗り替えたセル数（他の色だったセル。クライアントの「塗り替えフラッシュ」の判定に使う）
+    if (stats) stats.overwritten = overwritten;
     return changed;
   }
 
