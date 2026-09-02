@@ -105,6 +105,9 @@ export default defineConfig({
         "demo-08-splatoon": fileURLToPath(
           new URL("./demos/08-splatoon/index.html", import.meta.url),
         ),
+        "demo-08-splatoon-overview": fileURLToPath(
+          new URL("./demos/08-splatoon/overview.html", import.meta.url),
+        ),
         "demo-ex8-1-god-hand": fileURLToPath(
           new URL("./demos/ex8-1-god-hand/index.html", import.meta.url),
         ),

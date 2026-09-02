@@ -51,9 +51,11 @@ export type FieldConfig = {
   fireRatePerSec: number;
   /** 満タンまでの回復時間 [s]（場所に依存しない。3DoF では頭の位置がマーカーを見ている間しか更新できないため、位置ベースの回復はやめた） */
   inkFullSec: number;
+  /** グー（イカ）の間の満タンまでの回復時間 [s]（issue #20「グーで補充」。inkFullSec より短い） */
+  inkFistFullSec: number;
   /** 撃ってからこの時間 [s] は回復しない（撃ちながら回復して無限に撃てるのを防ぐ） */
   inkRegenDelaySec: number;
-  /** 最初の 1 人が入ってから試合開始までの待機 [s]（全員がマーカーを読み取る時間。入室の速さが得点差にならないように） */
+  /** 俯瞰画面で「対戦開始」を押してから試合が始まるまでのカウントダウン [s]（全員が構える時間） */
   waitSec: number;
   /** 格子の 1 セル [m] */
   cellM: number;
@@ -67,15 +69,16 @@ export const DEFAULT_FIELD: FieldConfig = {
   floorDepth: 2.5,
   gravity: 4,
   maxFlightSec: 3,
-  matchSec: 90,
+  matchSec: 180,
   resultSec: 8,
   shotSpeed: 5,
   shotRadius: 0.09,
   tankShots: 50,
   fireRatePerSec: 6,
   inkFullSec: 5,
+  inkFistFullSec: 2,
   inkRegenDelaySec: 1,
-  waitSec: 15,
+  waitSec: 5,
   cellM: 0.02,
 };
 

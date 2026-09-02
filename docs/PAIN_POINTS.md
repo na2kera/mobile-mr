@@ -399,3 +399,24 @@
 - **どう対処したか**: 片方のウィンドウに `?camFov=25`（実カメラの FOV の申告値）を入れて焦点距離を変え、同じ 80px のマーカーを「遠く（約 1.8m）」と解釈させた。表示 FOV は `fov=70` 固定なのでそちらは変わらない。合成の体は「相手のアバターの頭の位置 + 0.15m」に立たせ、1.5m 横にもう 1 人置いて「？」の経路も通す。本物の PoseLandmarker はヘッドレスで初期化まで確認（GPU デリゲートが SwiftShader で通った）
 - **SDK ならどう解決するか（案）**: フェイクカメラ / 合成トラッカーを SDK の標準デバッグ機能にし、「マーカー座標系でカメラをこの姿勢に置く」「この位置に人 / 手を置く」を直接指定できるようにする（今は画像上のマーカーの位置と大きさから逆算するしかない）
 - **関連**: `src/shared/fake-body.ts`、`scripts/headless-person.mjs`、PAIN_POINTS Phase 5「手トラッキングは PC で再現できず…」
+
+## [2026-09-02] Phase 8 追加 / 08-splatoon 俯瞰画面: Room サーバーに「役割」が無く、観戦・運営の端末を入れるのに spec 側で除外を手書きした
+
+- **何が苦しかったか**: 俯瞰画面（PC。プレイヤーではなく、全員の pose / shot / state を受け取り「対戦開始」だけを送る）を同じ room に入れたかったが、`room-server.ts` は members を一律に「プレイヤー」として扱う（welcome の peers・join / leave の通知・maxMembers の数え方）。spec の `onJoin` / `onLeave` / `onMessage` で `?role=overview` を見て、`game.join` しない・join / leave を配らない・peers から除く・pose を捨てる・start だけ許す、を個別に書いた。プレイヤー側のクライアントも「welcome の peers に俯瞰画面が混ざるとアバターを作ってしまう」ので、サーバーで除く必要があった
+- **どう対処したか**: State に `overviews: Set<id>` を持ち、上記を spec 内で分岐。maxMembers は 8 → 9（プレイヤー 8 + 俯瞰 1）にしたが、room-server は役割ごとの上限を持てないので 9 台目のスマホも入れてしまう（色は使い回し）
+- **SDK ならどう解決するか（案）**: `@mobile-mr/network` の Room に役割（player / spectator / admin）を一級で持たせ、「誰に何を配るか」「誰が何を送れるか」「役割ごとの上限」を spec の宣言で書けるようにする。観戦・運営画面はマルチプレイヤー MR の定番なので、毎デモで除外を手書きしない
+- **関連**: `server/splatoon.ts` の `roleOf` / `playerIds`、`server/room-server.ts`、`demos/08-splatoon/overview.ts`
+
+## [2026-09-02] Phase 8 追加 / 08-splatoon: 試合の進行（自動開始 → 練習 + 手動開始）を変えたら、フェーズ名に依存する箇所が 3 か所（クライアントの判定・表示・テストの HUD 解析）に散っていた
+
+- **何が苦しかったか**: ルールは純粋クラス（`splatoon-game.ts`）に閉じているので「入室 → 練習、俯瞰画面の start → カウントダウン → 試合 → 結果 → 練習」への変更自体は小さかった。だがクライアントは `phase === "play"` で撃てるかを決め、メッセージ・スコアボードの見出し・HUD もフェーズ名で分岐し、ヘッドレス確認はその HUD 文字列を正規表現で読む。フェーズを 1 つ足すだけで「撃てるか」「時間表示があるか（practice は `phaseEndsAt` が Infinity で JSON に載らない）」を全部追いかけ直した
+- **どう対処したか**: `phaseEndsAt` を `number | null` にして受信側で扱い、`canShoot` を practice / play の両方に。テストとヘッドレスは新しい進行に書き直した（ヘッドレスは 3 ウィンドウ目で俯瞰画面のボタンを CDP から押す）
+- **SDK ならどう解決するか（案）**: 試合の進行を SDK 側の標準の状態機械（lobby / countdown / play / result）にし、クライアントが見るのはフェーズ名ではなく「撃てるか」「残り時間（無ければ null）」「開始できる役割か」といった能力フラグにする。俯瞰・運営画面の「開始 / 終了」もその状態機械の標準操作にする
+- **関連**: `src/shared/splatoon-game.ts` の `start` / `tick`、`demos/08-splatoon/main.ts` の `canShoot` / `updateMessages`、`scripts/headless-splatoon.mjs`
+
+## [2026-09-02] Phase 8 追加 / 08-splatoon: 「グーで補充」は手の形をサーバーに送って権威側で回復速度を変えるしかなく、形の切り替えは pose の送信間隔ぶん遅れる
+
+- **何が苦しかったか**: インク残量はサーバー権威（撃ちながら回復して無限に撃つ不正を防ぐため）なので、グーで速く回復するにはサーバーが「いまグーか」を知る必要がある。手の形は 15Hz の pose に `fist` として載せたので、切り替えの反映は最大 66ms + RTT 遅れ、クライアントの予測（同じ式 `inkRegenPerSec`）とは一瞬ずれる。手の形そのものはクライアントの自己申告なので、グーだと偽って速く回復する不正は防げない（本人の端末でしか手は見えない。06 の hit と同じ構図）
+- **どう対処したか**: pose に `fist` を足し、サーバーは前の形で経過ぶん回復させてから形を切り替える。予測は同じ式で即時反映し、state が来たら上書き。不正は LAN のデモでは扱わない
+- **SDK ならどう解決するか（案）**: 「本人の端末でしか観測できない入力（手の形・接触）を権威に渡す」経路を SDK の標準にし、送信レート・遅延補償・上限（回復量の物理的な上限）をまとめて持つ
+- **関連**: `src/shared/splatoon-game.ts` の `updatePose` / `refreshInk` / `inkRegenPerSec`、`demos/08-splatoon/main.ts` の `isFist` / `updateFire`
