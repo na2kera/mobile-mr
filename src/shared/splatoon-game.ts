@@ -1,8 +1,9 @@
 // Phase 8 (08-splatoon): 試合のルール（純粋クラス。サーバーが権威として持つ）。個人戦。
 //   - 参加順に 8 色から自分の色を割り当てる（その試合で未使用の色を優先。再利用時はその色のセルを消す）
-//   - 最初の 1 人が入ったら待機（waitSec。全員がマーカーを読み取る時間）→ 試合（matchSec）→
-//     結果（resultSec）→ 格子とインクをリセットして次の試合
+//   - 入室したら練習（practice。時間無制限に自由に塗れる。issue #20）→ 俯瞰画面の「対戦開始」（start）で
+//     カウントダウン（waiting。waitSec）→ 試合（matchSec）→ 結果（resultSec）→ 格子とインクをリセットして練習に戻る
 //   - 発射（shot）は位置・速度・半径・インク残量を検証し、着弾を simulateInk で決めて格子に塗る
+//   - インクは撃つのをやめると回復し、グー（fist）の間は速く回復する（issue #20「グーで補充」）
 //   - 得点 = 自分の色のセル数（四方の壁 + 床）。勝者はセル最多の人（同点は複数）
 // 06 / 06-2 の *-game.ts と同じく three.js に依存しない（Node テスト対象）
 import {
@@ -20,7 +21,7 @@ import {
   type V3,
 } from "./splatoon-sim.ts";
 
-export type Phase = "waiting" | "play" | "result";
+export type Phase = "practice" | "waiting" | "play" | "result";
 
 export type Player = { id: string; name: string; color: InkColor };
 
@@ -37,7 +38,11 @@ export type Shot = {
 };
 
 export type GameEvent =
+  /** 俯瞰画面が「対戦開始」を押した（カウントダウン開始） */
+  | { kind: "countdown" }
   | { kind: "start" }
+  /** 結果表示が終わり練習に戻った（格子は消える） */
+  | { kind: "practice" }
   /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空） */
   | { kind: "result"; winners: string[]; winnerNames: string[] }
   | { kind: "shot"; by: string };
@@ -46,8 +51,8 @@ export type GameSnapshot = {
   t: number;
   seq: number;
   phase: Phase;
-  /** 今のフェーズが終わる権威時刻 [ms] */
-  phaseEndsAt: number;
+  /** 今のフェーズが終わる権威時刻 [ms]。practice は終わらないので null（Infinity は JSON に載らない。受信側は null = 時間表示なし） */
+  phaseEndsAt: number | null;
   players: Player[];
   /** プレイヤーごとの塗ったセル数（四方の壁 + 床） */
   scores: Record<string, number>;
@@ -71,13 +76,18 @@ export const SHOT_RATE_PER_SEC = 9;
 export const MAX_SHOT_DIST_M = 6;
 /** 発射位置は直近の頭の位置からこの距離 [m] 以内（腕の長さ + 手トラッキングの誤差） */
 export const MAX_SHOT_FROM_HEAD_M = 1.2;
+/**
+ * グー（fist）の申告が有効な時間 [ms]。pose（15Hz）が止まったら（タブ停止・通信停滞・一度だけ true を送る
+ * クライアント）この時間で通常の回復速度に戻す（外部レビュー指摘: 申告が無期限に効くと高速回復が続く）
+ */
+export const FIST_STALE_MS = 1000;
 
 export class SplatoonGame {
   readonly config: FieldConfig;
   readonly surfaces: SurfaceFrame[];
   readonly grids = new Map<string, InkGrid>();
   readonly players = new Map<string, Player>();
-  phase: Phase = "waiting";
+  phase: Phase = "practice";
   phaseEndsAt = Infinity;
   winners: string[] | null = null;
   winnerNames: string[] | null = null;
@@ -86,15 +96,14 @@ export class SplatoonGame {
   private readonly shotTimes = new Map<string, number[]>();
   /** 直近の頭の位置（発射位置の検証用） */
   private readonly headPos = new Map<string, V3>();
-  /** インク残量（0..1）と最後に撃った時刻（回復の遅延用） */
-  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number }>();
+  /** インク残量（0..1）・最後に撃った時刻（回復の遅延用）・グーにしているか（回復の速さ）とその申告時刻 */
+  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number; fist: boolean; fistUpdatedMs: number }>();
   /** この試合で一度でも使った色（退出者の塗りを新しい参加者が引き継がないように、未使用の色を優先する） */
   private readonly usedColors = new Set<InkColor>();
   /** 直近の join で色を再利用してその色のセルを消したか（サーバーはこれを見て格子を配り直す） */
   lastJoinClearedColor = false;
   /** 発射位置の距離上限（コートの対角 + 1m） */
   private readonly maxShotDist: number;
-  private started = false;
   lastRejectReason = "";
 
   constructor(config: Partial<FieldConfig> = {}) {
@@ -123,22 +132,39 @@ export class SplatoonGame {
     return out;
   }
 
+  /** 色 c のセルを全部消す。消した数を返す */
+  private clearColor(c: InkColor): number {
+    let n = 0;
+    for (const g of this.grids.values()) {
+      for (let i = 0; i < g.cells.length; i++) {
+        if (g.cells[i] === c) {
+          g.cells[i] = 0;
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+
   /**
-   * 色の割当。この試合でまだ使っていない色を優先し、全色使用済みなら「今いない人」の色を再利用する。
-   * 再利用時はその色のセルを消す（退出者の塗りを新しい参加者が得点として引き継がないように）
+   * 色の割当。試合中はその試合でまだ使っていない色を優先し、全色使用済みなら「今いない人」の色を再利用する。
+   * 再利用時はその色のセルを消す（退出者の塗りを新しい参加者が得点として引き継がないように）。
+   * 練習中（終わらないので usedColors が積み上がる。iPhone の瞬断で再接続するたび新しい id になる）は
+   * 「今いない人」の色をすぐ再利用してよい（引き継ぎ防止は試合中だけの要件）
    */
   private pickColor(): InkColor {
     const active = new Set([...this.players.values()].map((p) => p.color));
     this.lastJoinClearedColor = false;
+    const reserved = this.phase === "practice" ? active : new Set([...this.usedColors, ...active]);
     for (let c = 1; c <= MAX_INK_COLORS; c++) {
-      if (!this.usedColors.has(c) && !active.has(c)) return c;
+      if (!reserved.has(c)) {
+        if (this.usedColors.has(c)) this.lastJoinClearedColor = this.clearColor(c) > 0;
+        return c;
+      }
     }
     let c: InkColor = 1;
     while (active.has(c) && c < MAX_INK_COLORS) c++;
-    for (const g of this.grids.values()) {
-      for (let i = 0; i < g.cells.length; i++) if (g.cells[i] === c) g.cells[i] = 0;
-    }
-    this.lastJoinClearedColor = true;
+    this.lastJoinClearedColor = this.clearColor(c) > 0;
     return c;
   }
 
@@ -146,14 +172,8 @@ export class SplatoonGame {
     const color = this.pickColor();
     this.usedColors.add(color);
     this.players.set(id, { id, name, color });
-    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity });
-    if (!this.started) {
-      // 最初の 1 人。すぐには始めず、全員がマーカーを読み取れるよう waitSec 待つ（tick が開始する。
-      // 入室の速さの差がそのまま得点差にならないように）
-      this.started = true;
-      this.phase = "waiting";
-      this.phaseEndsAt = now + this.config.waitSec * 1000;
-    }
+    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity, fist: false, fistUpdatedMs: -Infinity });
+    // 入室しても試合は始めない（練習のまま）。開始は俯瞰画面の start()
     return [];
   }
 
@@ -164,21 +184,35 @@ export class SplatoonGame {
     this.inkState.delete(id);
   }
 
-  updatePose(id: string, pos: V3, now: number) {
+  /** 頭の位置と手の形（グーなら回復が速い）を更新する。fist は「見えている手のどれかがグー」 */
+  updatePose(id: string, pos: V3, now: number, fist = false) {
     if (!this.players.has(id)) return;
+    // ここまでは前の形で回復させてから、形を切り替える
     this.refreshInk(id, now);
     this.headPos.set(id, pos);
+    const st = this.inkState.get(id);
+    if (st) {
+      st.fist = fist;
+      st.fistUpdatedMs = now;
+    }
   }
 
-  /** 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ）。撃った直後 inkRegenDelaySec は回復しない */
+  /**
+   * 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ）。撃った直後 inkRegenDelaySec は回復しない。
+   * 回復の速さはグーの間 1/inkFistFullSec、それ以外 1/inkFullSec（クライアントの予測も同じ式: inkRegenPerSec）。
+   * グーの申告は FIST_STALE_MS で失効するので、区間がその境界をまたぐときは前後で速さを分けて積分する
+   */
   private refreshInk(id: string, now: number) {
     const st = this.inkState.get(id);
     if (!st) return;
     const regenFrom = Math.max(st.updatedMs, st.lastShotMs + this.config.inkRegenDelaySec * 1000);
-    const dt = Math.max(0, (now - regenFrom) / 1000);
     st.updatedMs = now;
-    if (dt <= 0) return;
-    st.ink = Math.min(1, st.ink + dt / this.config.inkFullSec);
+    if (now <= regenFrom) return;
+    const fistUntil = st.fist ? st.fistUpdatedMs + FIST_STALE_MS : -Infinity;
+    const fastEnd = Math.min(now, Math.max(regenFrom, fistUntil));
+    const fastSec = Math.max(0, (fastEnd - regenFrom) / 1000);
+    const slowSec = Math.max(0, (now - Math.max(regenFrom, fastEnd)) / 1000);
+    st.ink = Math.min(1, st.ink + fastSec * inkRegenPerSec(this.config, true) + slowSec * inkRegenPerSec(this.config, false));
   }
 
   /** いまのインク残量（0..1）。存在しない id は 0 */
@@ -187,12 +221,11 @@ export class SplatoonGame {
     return this.inkState.get(id)?.ink ?? 0;
   }
 
-  private startMatch(now: number): GameEvent[] {
-    this.phase = "play";
-    this.phaseEndsAt = now + this.config.matchSec * 1000;
+  /** 格子・インク・発射を新品にする（試合の開始と、練習に戻るとき） */
+  private resetField(now: number) {
     this.winners = null;
     this.winnerNames = null;
-    // 新しい試合では「今いる人の色」だけが使用中（退出者の色は再び新品として使える）
+    // 「今いる人の色」だけが使用中（退出者の色は再び新品として使える）
     this.usedColors.clear();
     for (const p of this.players.values()) this.usedColors.add(p.color);
     for (const g of this.grids.values()) g.clear();
@@ -203,11 +236,45 @@ export class SplatoonGame {
     }
     this.shots = [];
     this.seq++;
+  }
+
+  /**
+   * 俯瞰画面の「対戦開始」。練習中か結果表示中に受け付け、waitSec のカウントダウン（waiting）に入る。
+   * それ以外（カウントダウン中・試合中）は無視して空を返す
+   */
+  start(now: number): GameEvent[] {
+    if (this.phase !== "practice" && this.phase !== "result") {
+      this.lastRejectReason = `cannot start during ${this.phase}`;
+      return [];
+    }
+    if (this.players.size === 0) {
+      this.lastRejectReason = "no players";
+      return [];
+    }
+    this.phase = "waiting";
+    this.phaseEndsAt = now + this.config.waitSec * 1000;
+    // 結果表示中からの開始: 前の勝者の表示（🏆）はここで消す（格子は試合開始まで残す）
+    this.winners = null;
+    this.winnerNames = null;
+    this.seq++;
+    return [{ kind: "countdown" }];
+  }
+
+  private startMatch(now: number): GameEvent[] {
+    this.phase = "play";
+    this.phaseEndsAt = now + this.config.matchSec * 1000;
+    this.resetField(now);
     return [{ kind: "start" }];
   }
 
+  private enterPractice(now: number): GameEvent[] {
+    this.phase = "practice";
+    this.phaseEndsAt = Infinity;
+    this.resetField(now);
+    return [{ kind: "practice" }];
+  }
+
   tick(now: number): GameEvent[] {
-    if (!this.started) return [];
     // 古い発射は捨てる（描画に要らない）
     const keepAfter = now - this.config.maxFlightSec * 1000 - 500;
     if (this.shots.length > 0 && this.shots[0].launchedAt < keepAfter) {
@@ -226,7 +293,8 @@ export class SplatoonGame {
       this.seq++;
       return [{ kind: "result", winners: this.winners, winnerNames: this.winnerNames }];
     }
-    return this.startMatch(now);
+    if (this.phase === "result") return this.enterPractice(now);
+    return [];
   }
 
   /**
@@ -239,7 +307,8 @@ export class SplatoonGame {
       this.lastRejectReason = "unknown player";
       return null;
     }
-    if (this.phase !== "play") {
+    // 練習中と試合中だけ撃てる（カウントダウン中・結果表示中は撃てない）
+    if (this.phase !== "play" && this.phase !== "practice") {
       this.lastRejectReason = "not playing";
       return null;
     }
@@ -292,7 +361,7 @@ export class SplatoonGame {
       t: now,
       seq: this.seq,
       phase: this.phase,
-      phaseEndsAt: this.phaseEndsAt,
+      phaseEndsAt: Number.isFinite(this.phaseEndsAt) ? this.phaseEndsAt : null,
       players: [...this.players.values()],
       scores: this.scores(),
       totalCells: this.totalCells,
@@ -312,4 +381,9 @@ export class SplatoonGame {
     if (event) snap.event = event;
     return snap;
   }
+}
+
+/** 回復の速さ [1/s]（サーバーとクライアントの予測で共通）。グーの間は inkFistFullSec、それ以外は inkFullSec で満タン */
+export function inkRegenPerSec(cfg: FieldConfig, fist: boolean): number {
+  return 1 / (fist ? cfg.inkFistFullSec : cfg.inkFullSec);
 }

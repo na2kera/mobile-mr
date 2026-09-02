@@ -1,5 +1,8 @@
 // Phase 8 (08-splatoon) 用の対戦サーバー。接続の共通部分は server/room-server.ts、
-// ルールは src/shared/splatoon-game.ts の純粋クラス。ここは「Room 設定」「メッセージ」「状態と tick」だけ
+// ルールは src/shared/splatoon-game.ts の純粋クラス。ここは「Room 設定」「メッセージ」「状態と tick」だけ。
+// 接続には 2 つの役割がある: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview）。俯瞰画面はプレイヤーではない
+// （game.join しない・join / leave を配らない・welcome の peers にも入れない）が、room のメンバーとして
+// pose / shot / state を受け取り、唯一「start（対戦開始）」を送れる（issue #19 / #21）
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -8,6 +11,7 @@ import {
   SPLATOON_PATH,
   SPLATOON_PROTOCOL_VERSION,
   type ClientMessage,
+  type ClientRole,
   type PlayerPose,
   type ServerMessage,
   type SplatoonRoomConfig,
@@ -19,7 +23,10 @@ import { RateLimiter } from "../src/shared/surface-paint.ts";
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const TICK_MS = 100;
 const IDLE_BROADCAST_MS = 1000;
-const MAX_MEMBERS = 8;
+/** プレイヤーの上限（色の数） */
+const MAX_PLAYERS = 8;
+/** 俯瞰画面の上限（運営 + 予備）。役割は ?role= の自己申告（LAN デモ。URL を知っていれば誰でも開ける） */
+const MAX_OVERVIEWS = 2;
 const MAX_ROOMS = 64;
 /** クライアントの ?sendHz= の max 60 に余裕を持たせる */
 const POSE_RATE_PER_SEC = 90;
@@ -28,8 +35,17 @@ const EMPTY_ROOM_TTL_MS = 60 * 1000;
 /** 格子のセル数の上限（壁 + 床）。超える大きさは拒否（scores の走査と encode の転送量のため） */
 const MAX_CELLS = 250_000;
 
-type State = { game: SplatoonGame; lastBroadcastMs: number; poseRate: RateLimiter };
+type State = { game: SplatoonGame; lastBroadcastMs: number; poseRate: RateLimiter; overviews: Set<string> };
 type Ctx = RoomContext<SplatoonRoomConfig, State>;
+
+function roleOf(url: URL): ClientRole {
+  return url.searchParams.get("role") === "overview" ? "overview" : "player";
+}
+
+/** welcome の peers: プレイヤーだけ（俯瞰画面はアバターを持たないので相手に見せない） */
+function playerIds(room: Ctx, excludeId: string): string[] {
+  return [...room.members.keys()].filter((k) => k !== excludeId && !room.state.overviews.has(k));
+}
 
 function parseClientMessage(data: RawData): ClientMessage | null {
   let msg: unknown;
@@ -58,14 +74,17 @@ function parseClientMessage(data: RawData): ClientMessage | null {
       }
       hands = m.hands as number[][];
     }
+    if (m.fist !== undefined && typeof m.fist !== "boolean") return null;
     const pose: PlayerPose = {
       pos: m.pos as V3,
       quat: m.quat.map((v) => v / quatLen) as unknown as PlayerPose["quat"],
       tracking: m.tracking,
     };
     if (hands) pose.hands = hands;
+    if (m.fist === true) pose.fist = true;
     return { type: "pose", ...pose };
   }
+  if (m.type === "start") return { type: "start" };
   if (m.type === "shot") {
     if (!isVec(m.pos, 3) || !isVec(m.vel, 3)) return null;
     if (typeof m.radius !== "number" || !Number.isFinite(m.radius)) return null;
@@ -121,7 +140,15 @@ export function splatoonServer() {
     describeConfig,
     configErrorReason: "Room 設定 (markerId / markerMm / wallW / wallH / floorDrop / floorDepth / gravity / matchSec) が不正です（フィールドが大きすぎる場合も）",
     parseMessage: parseClientMessage,
-    maxMembers: MAX_MEMBERS,
+    // 役割ごとの上限（room-server の maxMembers は役割を区別しないので canJoin で数える）
+    canJoin(room: Ctx, url) {
+      const overviews = room.state.overviews.size;
+      if (roleOf(url) === "overview") {
+        return overviews >= MAX_OVERVIEWS ? `俯瞰画面は ${MAX_OVERVIEWS} 台までです` : null;
+      }
+      const players = room.members.size - overviews;
+      return players >= MAX_PLAYERS ? `room "${room.name}" は満員です (プレイヤー ${MAX_PLAYERS} 人まで)` : null;
+    },
     maxRooms: MAX_ROOMS,
     emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
     createState: (_name, c) => ({
@@ -136,6 +163,7 @@ export function splatoonServer() {
       }),
       lastBroadcastMs: -Infinity,
       poseRate: new RateLimiter(POSE_RATE_PER_SEC),
+      overviews: new Set(),
     }),
     tickMs: TICK_MS,
     onTick(room: Ctx, now) {
@@ -149,12 +177,27 @@ export function splatoonServer() {
     },
     onJoin(room: Ctx, id, url, now) {
       const { game } = room.state;
+      if (roleOf(url) === "overview") {
+        // 俯瞰画面: プレイヤーにはしない。全体の状態（格子込み）だけ渡す
+        room.state.overviews.add(id);
+        room.send(id, {
+          type: "welcome",
+          id,
+          role: "overview",
+          peers: playerIds(room, id),
+          config: game.config,
+          state: game.snapshot(now, true),
+        } satisfies ServerMessage);
+        console.log(`[splatoon] ${id} overview joined`);
+        return;
+      }
       const name = parseName(url, id, NAME_MAX_LENGTH);
       const events = game.join(id, name, now);
       room.send(id, {
         type: "welcome",
         id,
-        peers: [...room.members.keys()].filter((k) => k !== id),
+        role: "player",
+        peers: playerIds(room, id),
         config: game.config,
         state: game.snapshot(now, true, events[0]),
       } satisfies ServerMessage);
@@ -165,9 +208,27 @@ export function splatoonServer() {
     },
     onMessage(room: Ctx, id, msg, now) {
       const { game } = room.state;
+      const isOverview = room.state.overviews.has(id);
+      if (msg.type === "start") {
+        // 対戦開始は俯瞰画面だけ（issue #21「対戦開始はこちら側で制御」）。スマホからの start は拒否を返すだけ
+        if (!isOverview) {
+          room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
+          return;
+        }
+        const events = game.start(now);
+        if (events.length === 0) {
+          console.log(`[splatoon] ${id} start rejected: ${game.lastRejectReason}`);
+          room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
+          return;
+        }
+        console.log(`[splatoon] ${id} start → countdown ${game.config.waitSec}s`);
+        broadcastState(room, now, false, events[0]);
+        return;
+      }
+      if (isOverview) return; // 俯瞰画面は pose / shot を送らない（送ってきても捨てる）
       if (msg.type === "pose") {
         if (!room.state.poseRate.allow(id, now)) return;
-        game.updatePose(id, msg.pos, now);
+        game.updatePose(id, msg.pos, now, msg.fist === true);
         const { type: _type, ...pose } = msg;
         room.broadcast({ type: "pose", id, ...pose } satisfies ServerMessage, id);
       } else if (msg.type === "shot") {
@@ -185,6 +246,7 @@ export function splatoonServer() {
       }
     },
     onLeave(room: Ctx, id, now) {
+      if (room.state.overviews.delete(id)) return; // 俯瞰画面の退室は誰にも関係ない
       room.state.game.leave(id);
       room.state.poseRate.forget(id);
       room.broadcast({ type: "leave", id } satisfies ServerMessage);

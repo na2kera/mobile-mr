@@ -4,6 +4,7 @@ import {
   SPLATOON_PATH,
   SPLATOON_PROTOCOL_VERSION,
   type ClientMessage,
+  type ClientRole,
   type FieldConfig,
   type GameSnapshot,
   type PlayerPose,
@@ -17,8 +18,8 @@ const RECONNECT_DELAY_MS = 2000;
 
 export type GameClientEvents = {
   onStatus: (status: string) => void;
-  /** 入室完了。再接続でも毎回呼ばれ、そのたび自分の id は変わる */
-  onWelcome: (selfId: string, peerIds: string[], config: FieldConfig, state: GameSnapshot) => void;
+  /** 入室完了。再接続でも毎回呼ばれ、そのたび自分の id は変わる。peerIds はプレイヤーだけ */
+  onWelcome: (selfId: string, role: ClientRole, peerIds: string[], config: FieldConfig, state: GameSnapshot) => void;
   onPeerJoin: (id: string) => void;
   onPeerLeave: (id: string) => void;
   onPeerPose: (id: string, pose: PlayerPose) => void;
@@ -33,12 +34,21 @@ export type GameClient = {
   sendPose: (pose: PlayerPose) => boolean;
   /** 送れたら true */
   sendShot: (pos: V3, vel: V3, radius: number) => boolean;
+  /** 対戦開始（俯瞰画面だけ。送れたら true） */
+  sendStart: () => boolean;
   dispose: () => void;
 };
 
-export function connectGame(room: string, name: string, config: SplatoonRoomConfig, events: GameClientEvents): GameClient {
+export function connectGame(
+  room: string,
+  name: string,
+  config: SplatoonRoomConfig,
+  events: GameClientEvents,
+  role: ClientRole = "player",
+): GameClient {
   const query = new URLSearchParams({
     room,
+    role,
     v: String(SPLATOON_PROTOCOL_VERSION),
     markerId: String(config.markerId),
     markerMm: String(config.markerMm),
@@ -48,6 +58,7 @@ export function connectGame(room: string, name: string, config: SplatoonRoomConf
     floorDepth: String(config.floorDepth),
     gravity: String(config.gravity),
     matchSec: String(config.matchSec),
+    waitSec: String(config.waitSec),
   });
   if (name) query.set("name", name);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${SPLATOON_PATH}?${query}`;
@@ -63,7 +74,7 @@ export function connectGame(room: string, name: string, config: SplatoonRoomConf
     }
     switch (msg.type) {
       case "welcome":
-        events.onWelcome(msg.id, msg.peers, msg.config, msg.state);
+        events.onWelcome(msg.id, msg.role, msg.peers, msg.config, msg.state);
         break;
       case "join":
         events.onPeerJoin(msg.id);
@@ -84,7 +95,9 @@ export function connectGame(room: string, name: string, config: SplatoonRoomConf
         events.onState(msg.state);
         break;
       case "error":
-        disposed = true;
+        // バージョン・設定の不一致は再接続しても同じ結果なのでループを止める。
+        // 満員（役割別の上限）は、半切断した古い接続が heartbeat で消えれば入れるので再接続を続ける
+        if (!/満員|台まで/.test(msg.reason)) disposed = true;
         events.onError(msg.reason);
         break;
     }
@@ -119,6 +132,9 @@ export function connectGame(room: string, name: string, config: SplatoonRoomConf
     },
     sendShot(pos, vel, radius) {
       return send({ type: "shot", pos, vel, radius });
+    },
+    sendStart() {
+      return send({ type: "start" });
     },
     dispose() {
       disposed = true;

@@ -21,7 +21,7 @@ import {
   rayFrameHit,
   simulateInk,
 } from "../src/shared/splatoon-sim.ts";
-import { SHOT_RATE_PER_SEC, SplatoonGame } from "../src/shared/splatoon-game.ts";
+import { FIST_STALE_MS, SHOT_RATE_PER_SEC, SplatoonGame, inkRegenPerSec } from "../src/shared/splatoon-game.ts";
 import { handShape } from "../src/shared/hand-math.ts";
 import { centered, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SPLATOON_PATH, SPLATOON_PROTOCOL_VERSION } from "../src/shared/splatoon-protocol.ts";
@@ -123,14 +123,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ================= 3. game =================
 {
   const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1, waitSec: 1 });
-  check("開始前は tick しても何も起きない", g.tick(0).length === 0);
+  check("誰もいなくても tick は何も起こさない（練習のまま）", g.tick(0).length === 0 && g.phase === "practice");
+  check("プレイヤーがいないと start は拒否", g.start(0).length === 0 && g.lastRejectReason === "no players" && g.phase === "practice");
   const e1 = g.join("p1", "A", 1000);
-  check("最初の入室では待機フェーズ（waitSec 後に開始予定）", e1.length === 0 && g.players.get("p1").color === 1 && g.phase === "waiting" && g.phaseEndsAt === 2000);
+  check("入室しても練習のまま（自動では始まらない。issue #20）", e1.length === 0 && g.players.get("p1").color === 1 && g.phase === "practice" && g.phaseEndsAt === Infinity);
+  check("snapshot の phaseEndsAt は練習中 null（JSON に Infinity は載らない）", g.snapshot(1000).phaseEndsAt === null);
   g.updatePose("p1", [0, 0.1, 1], 1100);
-  check("待機中は撃てない", g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 1100) === null && g.lastRejectReason === "not playing");
-  check("待機時間の前は tick しても始まらない", g.tick(1500).length === 0 && g.phase === "waiting");
-  const es = g.tick(2000);
-  check("待機時間が過ぎると開始（matchSec の計測はここから）", es[0]?.kind === "start" && g.phase === "play" && g.phaseEndsAt === 32000);
+  // 壁の上端は床から wallH（この設定では y=-0.2）なので、下向きに撃って壁に当てる
+  const practiceShot = g.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 1100);
+  check("練習中は撃てて塗れる", practiceShot !== null && practiceShot.landing?.hit === true && g.scores().p1 > 0, g.lastRejectReason);
+  check("練習中はいくら tick しても始まらない", g.tick(100000).length === 0 && g.phase === "practice");
+  const ec = g.start(1200);
+  check("俯瞰画面の start でカウントダウン（waiting。waitSec 後に開始予定）", ec[0]?.kind === "countdown" && g.phase === "waiting" && g.phaseEndsAt === 2200);
+  check("カウントダウン中の start は無視", g.start(1300).length === 0 && /waiting/.test(g.lastRejectReason) && g.phase === "waiting");
+  check("カウントダウン中は撃てない", g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 1300) === null && g.lastRejectReason === "not playing");
+  check("カウントダウンの前は tick しても始まらない", g.tick(1500).length === 0 && g.phase === "waiting");
+  const es = g.tick(2200);
+  check("カウントダウンが過ぎると開始（matchSec の計測はここから）。練習の塗りは消える", es[0]?.kind === "start" && g.phase === "play" && g.phaseEndsAt === 32200 && g.scores().p1 === 0);
+  check("試合中の start は無視", g.start(2300).length === 0 && /play/.test(g.lastRejectReason));
   g.join("p2", "B", 2100);
   g.join("p3", "C", 2200);
   check("個人戦: 参加順に別の色（2, 3）", g.players.get("p2").color === 2 && g.players.get("p3").color === 3);
@@ -162,8 +172,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const miss = g.shoot("p4", [1.5, 0, 0.5], [3, 0, -1], 0.09, next());
   check("外れた発射も受理される（hit=false、塗らない）", miss && miss.landing?.hit === false && JSON.stringify(g.scores()) === scoreBefore);
 
-  check("ここまでの発射は試合時間内", tm < 32000, `${tm}`);
-  const ev = g.tick(32000);
+  check("ここまでの発射は試合時間内", tm < 32200, `${tm}`);
+  const ev = g.tick(32200);
   const sc = g.scores();
   const maxSc = Math.max(...Object.values(sc));
   check("時間切れで result（勝者 = 最多セルの人。同点は複数・名前つき）", ev[0]?.kind === "result" && g.phase === "result" && ev[0].winners.length >= 1 && ev[0].winners.every((id) => sc[id] === maxSc && maxSc > 0) && ev[0].winnerNames.length === ev[0].winners.length);
@@ -175,19 +185,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("勝者が退出しても winnerNames は確定時のまま", snapAfterLeave.winners.includes(winId) && snapAfterLeave.winnerNames[0] === winName);
   const survivor = [...g.players.keys()][0];
   check("result 中は発射できない", g.shoot(survivor, [0, 0, 2], [0, 0, -3], 0.09, 32500) === null && g.lastRejectReason === "not playing");
-  const ev2 = g.tick(34000);
-  check("結果表示が終わると次の試合（格子は消える）", ev2[0]?.kind === "start" && g.phase === "play" && Object.values(g.scores()).every((v) => v === 0));
-  const snap = g.snapshot(34000, true);
+  const ev2 = g.tick(34200);
+  check("結果表示が終わると練習に戻る（格子は消える・自動では次の試合にならない）", ev2[0]?.kind === "practice" && g.phase === "practice" && g.phaseEndsAt === Infinity && Object.values(g.scores()).every((v) => v === 0));
+  const snap = g.snapshot(34200, true);
   check("snapshot: grids は 5 枚、totalCells は全部の和", Object.keys(snap.grids).length === 5 && snap.totalCells === Object.values(snap.grids).reduce((a, gs) => a + gs.length, 0));
   const inks = Object.values(snap.ink);
   check("snapshot: ink に残っている全員の残量", Object.keys(snap.ink).length === g.players.size && inks.every((v) => typeof v === "number" && v <= 1));
-  check("新しい試合でインクは満タンに戻る", inks.every((v) => v === 1));
+  check("練習に戻るとインクは満タン", inks.every((v) => v === 1));
+  // 結果表示中にも start できる（次の対戦へ）
+  const g2 = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
+  g2.join("q1", "Q", 0);
+  g2.start(0);
+  g2.tick(1000);
+  g2.tick(11000);
+  check("result 中の start は受け付ける（結果表示を待たずに次の対戦へ）。勝者の表示は消える", g2.phase === "result" && g2.winners !== null && g2.start(12000)[0]?.kind === "countdown" && g2.phase === "waiting" && g2.winners === null && g2.snapshot(12000).winnerNames === null);
 }
 
 // ================= 3c. 全色使用時の再利用はセルを消す =================
 {
   const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
   for (let i = 1; i <= 8; i++) g.join(`p${i}`, `P${i}`, 0);
+  g.start(0);
   g.tick(1);
   g.updatePose("p1", [0, 0.1, 1], 10);
   // 壁の上端は床から wallH（この設定では y=-0.2）なので、下向きに撃って壁に当てる
@@ -199,10 +217,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("8 色使用済みなら退出者の色を再利用し、そのセルを消してから割り当てる", e.length === 0 && g.players.get("p9").color === 1 && g.lastJoinClearedColor && g.scores().p9 === 0);
 }
 
+// ================= 3d. 練習中の色の再利用 =================
+{
+  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+  g.join("p1", "A", 0);
+  g.updatePose("p1", [0, 0.1, 1], 10);
+  g.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 100);
+  check("練習中に p1 が塗った", g.scores().p1 > 0);
+  g.leave("p1");
+  g.join("p2", "B", 200);
+  check("練習中は退出者の色（1）をすぐ再利用し、その塗りは消す（再接続で色が増えていかない）", g.players.get("p2").color === 1 && g.lastJoinClearedColor && g.scores().p2 === 0);
+  g.leave("p2");
+  g.join("p3", "C", 300);
+  check("消すセルが無ければ格子の配り直しは要らない", g.players.get("p3").color === 1 && !g.lastJoinClearedColor);
+}
+
 // ================= 3b. インクタンク =================
 {
   const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
   g.join("p1", "A", 0);
+  g.start(0);
   g.tick(1);
   g.updatePose("p1", [0, 0.1, 1], 2);
   const cost = inkPerShot(g.config);
@@ -224,9 +258,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const e1 = g.inkOf("p1", t1);
   const e2 = g.inkOf("p1", t1 + 2000);
   check("回復（2 秒で 2/inkFullSec）", near(e2 - e1, 2 / g.config.inkFullSec, 0.01), (e2 - e1).toFixed(3));
+  // グーで補充（issue #20）: グーの間は inkFistFullSec で満タン。形の切り替えは pose で届く
+  const t2 = t1 + 2000;
+  g.updatePose("p1", [0, 0.1, 1], t2, true);
+  const f1 = g.inkOf("p1", t2);
+  const f2 = g.inkOf("p1", t2 + 500);
+  check("グーの間は速く回復（0.5 秒で 0.5/inkFistFullSec）", near(f2 - f1, 0.5 * inkRegenPerSec(g.config, true), 0.01) && inkRegenPerSec(g.config, true) > inkRegenPerSec(g.config, false), (f2 - f1).toFixed(3));
+  g.updatePose("p1", [0, 0.1, 1], t2 + 500, false);
+  const f3 = g.inkOf("p1", t2 + 1000);
+  check("グーをやめると元の速さに戻る", near(f3 - f2, 0.5 / g.config.inkFullSec, 0.01), (f3 - f2).toFixed(3));
+  check("グーでも満タンは超えない", g.inkOf("p1", t2 + 60000) === 1);
+  // グーの申告は pose が止まると FIST_STALE_MS で失効する（外部レビューの反例: 一度 true を送って黙るクライアント）
+  {
+    const gf = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+    gf.join("f1", "F", 0);
+    gf.start(0);
+    gf.tick(1);
+    gf.updatePose("f1", [0, 0.1, 1], 2);
+    for (let i = 0; i < 30; i++) gf.shoot("f1", [0, 0, 1], [0, 0, -5], 0.09, 100 + i * 200);
+    const tEmpty = 100 + 29 * 200;
+    const base = gf.inkOf("f1", tEmpty + 1000); // 回復の遅延（1s）が明けた時点
+    gf.updatePose("f1", [0, 0.1, 1], tEmpty + 1000, true); // ここで最後の pose（グー）
+    const after3 = gf.inkOf("f1", tEmpty + 4000); // 3 秒後: 最初の 1 秒だけ速く、残り 2 秒は通常
+    const expect = base + 1 * inkRegenPerSec(gf.config, true) + 2 * inkRegenPerSec(gf.config, false);
+    check(`pose が止まると ${FIST_STALE_MS}ms でグーが失効し通常速度に戻る（境界をまたぐ区間は分けて積分）`, near(after3, Math.min(1, expect), 0.01), `${after3.toFixed(3)} vs ${expect.toFixed(3)}`);
+    const gf2 = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+    gf2.join("f2", "F", 0);
+    gf2.start(0);
+    gf2.tick(1);
+    gf2.updatePose("f2", [0, 0.1, 1], 2);
+    // 45 発撃って残量 0.1 にしてから（満タンで頭打ちにならないように）、1 秒間 15Hz でグーを送り続ける
+    for (let i = 0; i < 45; i++) gf2.shoot("f2", [0, 0, 1], [0, 0, -5], 0.09, 100 + i * 200);
+    const tEmpty2 = 100 + 44 * 200;
+    const b2 = gf2.inkOf("f2", tEmpty2 + 1000);
+    for (let t = tEmpty2 + 1000; t <= tEmpty2 + 2000; t += 66) gf2.updatePose("f2", [0, 0.1, 1], t, true);
+    const a2 = gf2.inkOf("f2", tEmpty2 + 2000);
+    check("pose を送り続けていれば失効しない（1 秒ずっと速い）", b2 < 0.2 && near(a2 - b2, 1 * inkRegenPerSec(gf2.config, true), 0.02), `${b2.toFixed(3)} → ${a2.toFixed(3)}`);
+  }
   // コートを広げても奥から撃てる（発射位置の上限はコートの対角 + 1m）
   const wide = new SplatoonGame({ matchSec: 300, floorDepth: 8, waitSec: 0 });
   wide.join("w1", "W", 0);
+  wide.start(0);
   wide.tick(1);
   wide.updatePose("w1", [0, 0.1, 7.5], 10);
   check("広いコートの奥からも発射できる", wide.shoot("w1", [0, 0, 7.4], [0, 0, -5], 0.09, 100) !== null);
@@ -285,36 +357,125 @@ try {
   const cfg = { room: "test", markerId: "0", markerMm: "100", matchSec: "20", waitSec: "1" };
   const a = connect(cfg, "Alice");
   const wa = await a.waitFor((m) => m.type === "welcome");
-  check("welcome: id・config・格子付きの state・待機フェーズから", wa && wa.id === "p1" && wa.config.matchSec === 20 && wa.config.waitSec === 1 && wa.state.grids && wa.state.phase === "waiting" && wa.state.players[0].color === 1);
+  check("welcome: id・role・config・格子付きの state・練習フェーズから", wa && wa.id === "p1" && wa.role === "player" && wa.config.matchSec === 20 && wa.config.waitSec === 1 && wa.state.grids && wa.state.phase === "practice" && wa.state.phaseEndsAt === null && wa.state.players[0].color === 1);
   const b = connect(cfg, "Bob");
   const wb = await b.waitFor((m) => m.type === "welcome");
   check("2 人目は色 2・peers に p1", wb && wb.state.players.find((p) => p.id === wb.id).color === 2 && wb.peers.includes("p1"));
   const stA = await a.waitFor((m) => m.type === "state" && m.state.players.length === 2);
   check("入室で state が配られる", stA !== null);
-  const playSt = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.event?.kind === "start", 4000);
-  check("waitSec 後に start が配られ play になる", playSt !== null);
 
+  // 練習中に撃てる
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.09 });
   const rejNoPose = await b.waitFor((m) => m.type === "rejected");
   check("pose を送る前の shot は拒否（発射位置の検証に頭の位置が要る）", rejNoPose && /pose/.test(rejNoPose.reason));
-  b.send({ type: "pose", pos: [0, 0.1, 2.3], quat: [0, 0, 0, 1], tracking: true });
+  b.send({ type: "pose", pos: [0, 0.1, 2.3], quat: [0, 0, 0, 1], tracking: true, fist: false });
   await sleep(50);
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.09 });
   const sa = await a.waitFor((m) => m.type === "shot");
-  check("shot が全員に配られ、着弾（壁）と色が付く", sa && sa.shot.by === "p2" && sa.shot.color === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
+  check("練習中の shot が全員に配られ、着弾（壁）と色が付く", sa && sa.shot.by === "p2" && sa.shot.color === 2 && sa.shot.landing?.surfaceId === "wall" && typeof sa.t === "number");
+  const practiceScore = await a.waitFor((m) => m.type === "state" && (m.state.scores.p2 ?? 0) > 0, 2500);
+  check("練習中の塗りも state の得点に出る", practiceScore !== null && practiceScore.state.phase === "practice");
+
+  // 俯瞰画面（role=overview）: プレイヤーではない・join を配らない・start を送れる唯一の端末
+  const ov = connect({ ...cfg, role: "overview" });
+  const wov = await ov.waitFor((m) => m.type === "welcome");
+  check("俯瞰画面の welcome: role=overview・peers はプレイヤー 2 人・格子付き state", wov && wov.role === "overview" && wov.peers.length === 2 && wov.peers.includes("p1") && wov.state.grids && wov.state.players.length === 2);
+  await sleep(200);
+  check("俯瞰画面の入室で join は配られず、プレイヤー一覧にも入らない", !a.msgs.some((m) => m.type === "join" && m.id === wov.id) && !a.msgs.some((m) => m.type === "state" && m.state.players.some((p) => p.id === wov.id)));
+  const stBefore = a.msgs.filter((m) => m.type === "state").length;
+  b.send({ type: "start" });
+  await sleep(300);
+  check("スマホからの start は無視される（練習のまま）", !a.msgs.slice(stBefore).some((m) => m.type === "state" && m.state.phase !== "practice"));
+  ov.send({ type: "pose", pos: [0, 0, 1], quat: [0, 0, 0, 1], tracking: true });
+  await sleep(100);
+  check("俯瞰画面の pose は中継されない", !a.msgs.some((m) => m.type === "pose" && m.id === wov.id));
+  ov.send({ type: "start" });
+  const cd = await a.waitFor((m) => m.type === "state" && m.state.phase === "waiting" && m.state.event?.kind === "countdown");
+  check("俯瞰画面の start でカウントダウン（waiting）が全員に配られる", cd !== null && typeof cd.state.phaseEndsAt === "number");
+  ov.send({ type: "start" });
+  const rejStart = await ov.waitFor((m) => m.type === "rejected");
+  check("カウントダウン中の start は俯瞰画面に rejected", rejStart && /waiting/.test(rejStart.reason));
+  const playSt = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.event?.kind === "start", 4000);
+  check("waitSec 後に start が配られ play になる（格子付き・練習の得点は消える）", playSt !== null && playSt.state.grids && (playSt.state.scores.p2 ?? 0) === 0);
+  const ovPlay = await ov.waitFor((m) => m.type === "state" && m.state.phase === "play", 1000);
+  check("俯瞰画面にも state が届く", ovPlay !== null);
+  b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -5], radius: 0.09 });
+  const ovShot = await ov.waitFor((m) => m.type === "shot" && m.shot.by === "p2" && m.shot.launchedAt > playSt.state.t);
+  check("試合中の shot が俯瞰画面にも届く", ovShot !== null);
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.09 });
   const rej = await b.waitFor((m) => m.type === "rejected" && /velocity/.test(m.reason));
   check("不正な shot は本人に rejected", rej !== null);
   const bigField = connect({ ...cfg, room: "big", wallW: "20", wallH: "20", floorDepth: "20" });
   const errBig = await bigField.waitFor((m) => m.type === "error");
   check("格子が大きすぎるフィールドは拒否", errBig && /不正/.test(errBig.reason));
-  const st = await a.waitFor((m) => m.type === "state" && (m.state.scores.p2 ?? 0) > 0, 2500);
-  check("state に得点が反映される（p2 が塗った）", st !== null && (st.state.scores.p1 ?? 0) === 0);
+  // 練習中の state を拾わないよう、試合開始後の state に限定する
+  const st = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.t > playSt.state.t && (m.state.scores.p2 ?? 0) > 0, 2500);
+  check("試合中の state に得点が反映される（p2 が塗った。練習の分は消えている）", st !== null && (st.state.scores.p1 ?? 0) === 0);
   check("state にインク残量（B は 1 発ぶん減っている）", st && st.state.ink.p2 < 1 && st.state.ink.p1 === 1, JSON.stringify(st?.state.ink));
+  // fist を付けない pose は中継にも fist が付かない（true のときだけ載せる）
+  b.send({ type: "pose", pos: [0.25, 0, 1.5], quat: [0, 0, 0, 1], tracking: true });
+  const poseNoFist = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.25);
+  check("fist を付けない pose には fist が付かない", poseNoFist && poseNoFist.fist === undefined);
+  b.send({ type: "start" });
+  const rejPhone = await b.waitFor((m) => m.type === "rejected" && /overview/.test(m.reason));
+  check("スマホからの start には rejected: not overview が返る", rejPhone !== null);
+  // 俯瞰画面の再接続: 新しい id で welcome、peers に古い id は残らない
+  ov.ws.close();
+  await sleep(100);
+  const ov2 = connect({ ...cfg, role: "overview" });
+  const wov2 = await ov2.waitFor((m) => m.type === "welcome");
+  check("俯瞰画面の再接続: 新しい id・peers はプレイヤー 2 人だけ（古い俯瞰 id は残らない）", wov2 && wov2.id !== wov.id && wov2.role === "overview" && wov2.peers.length === 2 && !wov2.peers.includes(wov.id) && wov2.state.grids);
+  // 俯瞰だけの room で start → no players
+  const solo = connect({ ...cfg, room: "solo", role: "overview" });
+  await solo.waitFor((m) => m.type === "welcome");
+  solo.send({ type: "start" });
+  const rejSolo = await solo.waitFor((m) => m.type === "rejected");
+  check("プレイヤーがいない room の start は rejected: no players", rejSolo && /no players/.test(rejSolo.reason));
+  solo.ws.close();
+  // 試合 → 結果 → 練習の一周（サーバー経由。各境界で格子付きの state が配られる）。matchSec の下限 10 秒
+  {
+    const cyc = connect({ ...cfg, room: "cycle", matchSec: "10", waitSec: "0" }, "Cyc");
+    await cyc.waitFor((m) => m.type === "welcome");
+    const cycOv = connect({ ...cfg, room: "cycle", matchSec: "10", waitSec: "0", role: "overview" });
+    await cycOv.waitFor((m) => m.type === "welcome");
+    cyc.send({ type: "pose", pos: [0, 0.1, 1], quat: [0, 0, 0, 1], tracking: true });
+    await sleep(50);
+    cyc.send({ type: "shot", pos: [0, 0, 1], vel: [0, -2, -4.5], radius: 0.09 });
+    await cyc.waitFor((m) => m.type === "shot");
+    cycOv.send({ type: "start" });
+    const cStart = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "start", 2000);
+    check("一周: start（格子付き・練習の得点は 0）", cStart && cStart.state.grids && (cStart.state.scores[cStart.state.players[0].id] ?? 0) === 0);
+    const cResult = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "result", 13000);
+    check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && typeof cResult.state.phaseEndsAt === "number");
+    const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 10000);
+    check("一周: 結果表示のあと練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
+    check("一周: 俯瞰画面にも同じ event が届く", cycOv.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice"));
+    cyc.ws.close();
+    cycOv.ws.close();
+  }
+  // 役割別の上限: プレイヤー 8 人 / 俯瞰 2 台（room-server の canJoin）
+  const full = "full";
+  const fullPlayers = Array.from({ length: 8 }, (_, i) => connect({ ...cfg, room: full }, `F${i}`));
+  await Promise.all(fullPlayers.map((c) => c.waitFor((m) => m.type === "welcome")));
+  const ninth = connect({ ...cfg, room: full }, "Ninth");
+  const errNinth = await ninth.waitFor((m) => m.type === "error");
+  check("プレイヤー 9 人目は満員で拒否", errNinth && /満員/.test(errNinth.reason));
+  const fov1 = connect({ ...cfg, room: full, role: "overview" });
+  const wf1 = await fov1.waitFor((m) => m.type === "welcome");
+  check("満員でも俯瞰画面は入れる（役割別に数える）", wf1 && wf1.role === "overview" && wf1.peers.length === 8);
+  const fov2 = connect({ ...cfg, room: full, role: "overview" });
+  await fov2.waitFor((m) => m.type === "welcome");
+  const fov3 = connect({ ...cfg, room: full, role: "overview" });
+  const errOv3 = await fov3.waitFor((m) => m.type === "error");
+  check("俯瞰画面 3 台目は拒否", errOv3 && /俯瞰画面/.test(errOv3.reason));
+  for (const c of [...fullPlayers, fov1, fov2]) c.ws.close();
+  await sleep(100);
 
-  b.send({ type: "pose", pos: [0.5, 0, 1.5], quat: [0, 0, 0, 2], tracking: true });
+  b.send({ type: "pose", pos: [0.5, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, fist: true });
   const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
-  check("pose が中継され quat は正規化", pose && Math.abs(pose.quat[3] - 1) < 1e-9);
+  check("pose が中継され quat は正規化・fist も付く", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.fist === true);
+  const ovPose = await ov2.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
+  check("pose は俯瞰画面にも届く（再接続後の俯瞰画面）", ovPose !== null);
 
   const bad = connect({ ...cfg, gravity: "9.8" });
   const err = await bad.waitFor((m) => m.type === "error");
@@ -323,6 +484,10 @@ try {
   b.ws.close();
   const la = await a.waitFor((m) => m.type === "leave");
   check("leave が届く", la && la.id === "p2");
+  const leavesBefore = a.msgs.filter((m) => m.type === "leave").length;
+  ov2.ws.close();
+  await sleep(200);
+  check("俯瞰画面の退室で leave は配られない", a.msgs.filter((m) => m.type === "leave").length === leavesBefore);
   a.ws.close();
   await sleep(200);
 

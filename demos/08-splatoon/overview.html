@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>08. MR Splatoon 俯瞰画面 — Mobile MR</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100dvh;
+        overflow: hidden;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 左上の操作パネル（運営用。カメラもゴーグルも要らない） */
+      #panel {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 5;
+        width: 300px;
+        max-height: calc(100dvh - 24px);
+        overflow-y: auto;
+        box-sizing: border-box;
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: rgba(20, 22, 26, 0.88);
+        border: 1px solid #3c4043;
+        font-size: 0.85rem;
+      }
+      #panel h1 {
+        font-size: 1rem;
+        margin: 0 0 6px;
+      }
+      #panel .sub {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        margin: 0 0 10px;
+      }
+      #phase {
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin: 6px 0;
+      }
+      #start-match {
+        width: 100%;
+        font-size: 1rem;
+        font-weight: 700;
+        padding: 12px;
+        margin: 8px 0 12px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        cursor: pointer;
+      }
+      #start-match:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      #players {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 6px;
+      }
+      #players li {
+        display: grid;
+        grid-template-columns: 14px 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+      #players .swatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+      }
+      #players .ink {
+        font-family: ui-monospace, monospace;
+        font-size: 0.7rem;
+        color: #9aa0a6;
+      }
+      #status {
+        margin-top: 10px;
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        white-space: pre-wrap;
+      }
+      #panel a {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      /* 機械可読の 1 行（ヘッドレス確認用） */
+      #hud {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="panel">
+      <h1>08. MR Splatoon 俯瞰画面</h1>
+      <p class="sub">
+        コート全体・全員の位置と塗りをリアルタイムに表示します（PC 用。カメラ・マーカー不要）。
+        スマホと同じ room（既定 demo。?room=）と同じフィールド設定で入ります。
+        ドラッグで回転、ホイールで拡大。
+      </p>
+      <div id="phase">接続中…</div>
+      <button id="start-match" type="button" disabled>対戦開始</button>
+      <ul id="players"></ul>
+      <div id="status"></div>
+      <p><a href="./">← プレイヤー画面（スマホ用）</a> ／ <a href="/">デモ一覧</a></p>
+    </div>
+    <div id="hud"></div>
+    <script type="module" src="./overview.ts"></script>
+  </body>
+</html>

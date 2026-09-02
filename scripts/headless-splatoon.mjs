@@ -3,12 +3,12 @@
 // `npm run check:splatoon` で実行する。仕組みは headless-darts.mjs と同じ（CDP を ws で直接叩く。
 // Chrome が無ければスキップ）。
 //
-// 確認内容: フェイクカメラ（マーカー入り。2 つ目はマーカーの位置をずらす）+ 合成の手（グー → パーを繰り返す）で
-// 2 つのウィンドウを同じ room に入れ、
+// 確認内容: フェイクカメラ（マーカー入り。2 つ目はマーカーの位置をずらす）+ 合成の手（パー → グーを繰り返す）で
+// 2 つのウィンドウを同じ room に入れ、3 つ目のウィンドウで俯瞰画面（overview.html）を開いて、
 //   - 両方でマーカーが検出されている
-//   - 両方が別チーム（オレンジ / ブルー）に入っている
-//   - 両方で発射が送られ受理されている（形の判定 → チャージ → 発射 → サーバー検証）
-//   - 両チームの得点が入り、両ウィンドウの HUD で同じ得点が見えている（権威状態の配信）
+//   - 入室直後は練習（practice）で、両方の発射が受理されて得点が入る（issue #20「入室したら自由に塗れる」）
+//   - 俯瞰画面の「対戦開始」を押すと（issue #19 / #21）カウントダウン → 試合（play）になり、練習の塗りは消えて得点が入り直す
+//   - 両ウィンドウと俯瞰画面の HUD で同じ得点が見えている（権威状態の配信）
 //   - 例外が出ていない
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -20,11 +20,14 @@ const CHROME =
   process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 5189;
 const CDP_PORT = 9336;
-/** ページを開いてから HUD を読むまでの待ち [s]。起動 + 発射 5〜6 回（1 回 2.5s） */
-const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 20;
+/** ページを開いてから練習の HUD を読むまでの待ち [s]（起動 + 発射 2〜3 回） */
+const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 14;
+/** 対戦開始を押してから試合中の HUD を読むまでの待ち [s]（カウントダウン 1s + 発射 3〜4 回） */
+const PLAY_WAIT_SEC = Number(process.env.PLAY_WAIT_SEC ?? "") || 12;
 const BASE = `https://localhost:${PORT}/demos/08-splatoon/`;
 const COMMON =
   "fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check&waitSec=1";
+const OVERVIEW = `${BASE}overview.html?room=check&waitSec=1`;
 
 if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);
@@ -44,12 +47,14 @@ const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], {
 server.stderr.on("data", (d) => process.stderr.write(d));
 /** サーバーが決めた着弾（"[splatoon] p1 shot #3: wall uv=(0.61,0.72) t=0.12 ..."） */
 const landings = [];
+const serverLines = [];
 server.stdout.on("data", (d) => {
   for (const line of d.toString().split("\n")) {
     if (!line.startsWith("[splatoon]")) continue;
-    console.log(line);
+    serverLines.push(line);
     const m = line.match(/^\[splatoon\] (p\d+) shot #\d+: (\S+)/);
     if (m) landings.push({ by: m[1], where: m[2] });
+    else console.log(line);
   }
 });
 let serverExited = false;
@@ -147,6 +152,20 @@ function parseHud(hud) {
   };
 }
 
+/** 俯瞰画面の HUD（overview: room=check me=p3 ws=open phase=play left=170s players=p1:1,p2:2 scores=p1:12,p2:30 total=... starts=1） */
+function parseOverviewHud(hud) {
+  const scores = {};
+  for (const m of (hud.match(/scores=(\S*)/)?.[1] ?? "").matchAll(/(p\d+):(\d+)/g)) scores[m[1]] = Number(m[2]);
+  return {
+    me: hud.match(/\bme=(\S+)/)?.[1] ?? "-",
+    ws: hud.match(/ws=(\S+)/)?.[1] ?? "",
+    phase: hud.match(/phase=(\S+)/)?.[1] ?? "",
+    players: (hud.match(/players=(\S*)/)?.[1] ?? "").split(",").filter(Boolean),
+    scores,
+    starts: Number(hud.match(/starts=(\d+)/)?.[1] ?? -1),
+  };
+}
+
 const profile = mkdtempSync(join(tmpdir(), "mobile-mr-chrome-"));
 let chrome = null;
 let exitCode = 1;
@@ -182,28 +201,70 @@ try {
   const t2 = (await cdpJson("/json")).find((t) => t.id === created.result.targetId);
   const p2 = await openPage(t2, "2");
   await p2.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Two&fakeShift=40` });
-
-  await sleep(WAIT_SEC * 1000);
+  // 俯瞰画面（PC 用。カメラ無し）。同じ room に role=overview で入る
+  const created3 = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
+  const t3 = (await cdpJson("/json")).find((t) => t.id === created3.result.targetId);
+  const p3 = await openPage(t3, "3");
+  await p3.send("Page.navigate", { url: OVERVIEW });
 
   const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
+  // 3 ページの起動は CPU 次第で数秒ずれる（並走する他のテストや初回のシェーダ構築）。固定の待ちだけだと
+  // 遅い方のウィンドウが入室前で HUD が空のまま読んでしまうので、両方が入室してマーカーを検出するまで先に待つ
+  const t0 = Date.now();
+  while (Date.now() - t0 < 40000) {
+    const [h1, h2] = await Promise.all([readHud(p1), readHud(p2)]);
+    if (h1.me.startsWith("p") && h2.me.startsWith("p") && h1.marker.startsWith("id=") && h2.marker.startsWith("id=")) break;
+    await sleep(500);
+  }
+  console.log(`両ウィンドウの入室 + マーカー検出まで ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  await sleep(WAIT_SEC * 1000);
+
+  const readOverview = async () => parseOverviewHud((await p3.eval("document.querySelector('#hud')?.textContent")) ?? "");
+  const show = (h) => `me=${h.me} marker=${h.marker} phase=${h.phase} color=${h.color} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)}/${h.total} shots=${h.sent}/${h.accepted}`;
+  const showOv = (h) => `me=${h.me} ws=${h.ws} phase=${h.phase} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)} starts=${h.starts}`;
+
+  // ---- 練習（入室直後）----
+  const pr1 = await readHud(p1);
+  const pr2 = await readHud(p2);
+  const prOv = await readOverview();
+  console.log(`practice window1: ${show(pr1)}`);
+  console.log(`practice window2: ${show(pr2)}`);
+  console.log(`practice overview: ${showOv(prOv)}`);
+  check("両ウィンドウでマーカーが検出されている", pr1.marker.startsWith("id=") && pr2.marker.startsWith("id="));
+  check("両方が同じ room に入り 2 人になっている", pr1.players.length === 2 && pr2.players.length === 2);
+  check("個人戦: 別の色が割り当たっている", pr1.color > 0 && pr2.color > 0 && pr1.color !== pr2.color, `${pr1.color} vs ${pr2.color}`);
+  check("入室直後は練習（practice）で、俯瞰画面もそう見えている", pr1.phase === "practice" && pr2.phase === "practice" && prOv.phase === "practice");
+  check("練習中に連射が送られ受理されている（入室したら自由に塗れる）", pr1.sent >= 3 && pr1.accepted >= 3 && pr2.accepted >= 3, `${pr1.sent}/${pr1.accepted}, ${pr2.sent}/${pr2.accepted}`);
+  check("練習中の塗りが得点に出る", (pr1.scores[pr1.me] ?? 0) > 0 && (pr2.scores[pr2.me] ?? 0) > 0, JSON.stringify(pr1.scores));
+  check("俯瞰画面はプレイヤーではなく（players に含まれない）、2 人を見ている", prOv.me.startsWith("p") && !pr1.players.some((p) => p.startsWith(prOv.me + ":")) && prOv.players.length === 2, `${prOv.me} / ${prOv.players.join("|")}`);
+  const buttonEnabled = await p3.eval("(() => { const b = document.querySelector('#start-match'); return b && !b.disabled; })()");
+  check("俯瞰画面の「対戦開始」が押せる状態", buttonEnabled === true);
+
+  // ---- 対戦開始（俯瞰画面のボタン）----
+  await p3.eval("document.querySelector('#start-match').click()");
+  await sleep(PLAY_WAIT_SEC * 1000);
   const hud1 = await readHud(p1);
   const hud2 = await readHud(p2);
-  const show = (h) => `me=${h.me} marker=${h.marker} phase=${h.phase} color=${h.color} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)}/${h.total} shots=${h.sent}/${h.accepted}`;
-  console.log(`window1: ${show(hud1)}`);
-  console.log(`window2: ${show(hud2)}`);
-  check("両ウィンドウでマーカーが検出されている", hud1.marker.startsWith("id=") && hud2.marker.startsWith("id="));
-  check("両方が同じ room に入り 2 人になっている", hud1.players.length === 2 && hud2.players.length === 2);
-  check("個人戦: 別の色が割り当たっている", hud1.color > 0 && hud2.color > 0 && hud1.color !== hud2.color, `${hud1.color} vs ${hud2.color}`);
-  check("ウィンドウ 1 で連射が送られ受理されている（形の判定 → 連射 → サーバー検証）", hud1.sent >= 5 && hud1.accepted >= 5, `${hud1.sent}/${hud1.accepted}`);
-  check("ウィンドウ 2 でも連射が受理されている", hud2.sent >= 5 && hud2.accepted >= 5, `${hud2.sent}/${hud2.accepted}`);
+  const hudOv = await readOverview();
+  console.log(`play window1: ${show(hud1)}`);
+  console.log(`play window2: ${show(hud2)}`);
+  console.log(`play overview: ${showOv(hudOv)}`);
+  check("俯瞰画面の start が送られ、試合（play）になっている", hudOv.starts === 1 && hud1.phase === "play" && hud2.phase === "play" && hudOv.phase === "play");
+  check("試合の得点は練習の塗りが消えてから入り直している（練習より小さい）", (hud1.scores[hud1.me] ?? 0) > 0 && (hud1.scores[hud1.me] ?? 0) < (pr1.scores[pr1.me] ?? 0) + (hud1.sent - pr1.sent) * 200, JSON.stringify([pr1.scores, hud1.scores]));
+  check("ウィンドウ 1 で連射が受理され続けている（形の判定 → 連射 → サーバー検証）", hud1.accepted > pr1.accepted, `${pr1.accepted} → ${hud1.accepted}`);
+  check("ウィンドウ 2 でも連射が受理され続けている", hud2.accepted > pr2.accepted, `${pr2.accepted} → ${hud2.accepted}`);
   check("両プレイヤーが得点している（着弾と塗りが field 座標で合っている）", (hud1.scores[hud1.me] ?? 0) > 0 && (hud2.scores[hud2.me] ?? 0) > 0, JSON.stringify(hud1.scores));
   // 得点は 1 秒ごとの state で更新されるので、読み取りタイミングで少し違い得る
   const diff = Object.keys({ ...hud1.scores, ...hud2.scores }).reduce((a, k) => a + Math.abs((hud1.scores[k] ?? 0) - (hud2.scores[k] ?? 0)), 0);
   check("両ウィンドウの HUD でほぼ同じ得点が見えている（権威状態の配信）", diff <= Math.max(200, hud1.total * 0.02), `${JSON.stringify(hud1.scores)} vs ${JSON.stringify(hud2.scores)}`);
+  const diffOv = Object.keys({ ...hud1.scores, ...hudOv.scores }).reduce((a, k) => a + Math.abs((hud1.scores[k] ?? 0) - (hudOv.scores[k] ?? 0)), 0);
+  check("俯瞰画面でもほぼ同じ得点が見えている", diffOv <= Math.max(200, hud1.total * 0.02), `${JSON.stringify(hud1.scores)} vs ${JSON.stringify(hudOv.scores)}`);
   const hits = landings.filter((l) => l.where !== "miss");
   check("着弾のほとんどが壁か床に当たっている（外れが半分未満）", landings.length >= 6 && hits.length > landings.length / 2, `${hits.length}/${landings.length} hit`);
-  check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions].slice(0, 2).join(" | "));
-  for (const l of p1.logs.filter((l) => l.startsWith("[game] shot sent")).slice(0, 3)) console.log(`window1 log: ${l}`);
+  check("サーバーが start → countdown 1s を記録している（?waitSec= が room 設定として届いている）", serverLines.some((l) => /start → countdown 1s/.test(l)));
+  check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0 && p3.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions, ...p3.exceptions].slice(0, 2).join(" | "));
+  for (const l of p1.logs.filter((l) => l.startsWith("[game] shot sent")).slice(0, 2)) console.log(`window1 log: ${l}`);
+  for (const l of p3.logs.filter((l) => l.startsWith("[overview]")).slice(0, 4)) console.log(`overview log: ${l}`);
 
   const failed = results.filter(([, ok]) => !ok);
   console.log(failed.length === 0 ? "\nALL PASS" : `\n${failed.length} FAILED`);

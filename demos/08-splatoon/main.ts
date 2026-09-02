@@ -30,6 +30,7 @@ import {
   simulateInk,
 } from "../../src/shared/splatoon-sim";
 import type { FieldConfig, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
+import { inkRegenPerSec } from "../../src/shared/splatoon-game";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import { NAME_MAX_LENGTH } from "../../src/shared/splatoon-protocol";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
@@ -42,8 +43,10 @@ import { scriptedSplatHand } from "./fake-splat-hand";
 // 「チームと陣取り」を足した統合ゲーム第 3 弾。
 //   - フィールド: 壁のマーカー 1 枚で壁（Z=0）と床（Y=-floorDrop）の 2 枚の Surface を定義（splatoon-sim.ts）
 //   - 操作: パーの間、手のひらから連射（1 発 = タンクの 1/tankShots。空になると撃てない）。
-//     撃つのをやめると回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
+//     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
 //     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
+//   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
+//     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 3 分の試合 → 結果 → 練習に戻る
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
 //   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
@@ -97,7 +100,7 @@ const FLOOR_DROP = numParam("floorDrop", DEFAULT_FIELD.floorDrop, { min: 0.1, ma
 const FLOOR_DEPTH = numParam("floorDepth", DEFAULT_FIELD.floorDepth, { min: 0.2, max: 20 });
 const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
 const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
-/** 最初の 1 人が入ってから試合開始までの待機 [s]（全員がマーカーを読み取る時間） */
+/** 俯瞰画面で「対戦開始」を押してから試合が始まるまでのカウントダウン [s] */
 const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 });
 /** ペイント層の解像度 [px/m]（07 と同じ理由で控えめ） */
 const SURFACE_PX_PER_M = numParam("surfacePx", 384, { min: 64, max: 2048 });
@@ -536,6 +539,8 @@ function onState(state: GameSnapshot) {
   if (key && key !== lastEventKey) {
     lastEventKey = key;
     if (ev?.kind === "start") flash = { text: "スタート！ 塗れ！", untilMs: now + 2500 };
+    else if (ev?.kind === "countdown") flash = { text: "まもなく対戦開始！\n構えてください", untilMs: now + 2500 };
+    else if (ev?.kind === "practice") flash = { text: "練習に戻りました\n（開始は俯瞰画面から）", untilMs: now + 3000 };
     else if (ev?.kind === "result") {
       const text =
         ev.winners.length === 0
@@ -585,7 +590,7 @@ function connect() {
         netStatus = `error: ${reason}`;
         console.warn(`[game] rejected: ${reason}`);
       },
-      onWelcome: (id, peerIds, cfg, state) => {
+      onWelcome: (id, _role, peerIds, cfg, state) => {
         selfId = id;
         netStatus = "open";
         joined = true;
@@ -667,7 +672,13 @@ function sendPoseIfDue(now: number) {
     tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
   };
   if (hands.length > 0) pose.hands = hands;
+  if (isFist()) pose.fist = true;
   if (client.sendPose(pose)) posesSent++;
+}
+
+/** 見えている手のどれかがグーか（インクの回復が速くなる。サーバーにも送る） */
+function isFist(): boolean {
+  return handSlots.slots.some((s) => s.view.visible && s.ema && s.shape === "fist");
 }
 
 function round3(v: number): number {
@@ -676,9 +687,9 @@ function round3(v: number): number {
 
 // ---- 連射とインクタンク ----
 // パー（"open"）の間、手のひらから fireRatePerSec で連射。1 発 = タンクの 1/tankShots。
-// 撃つのをやめると回復する（撃った直後 inkRegenDelaySec は回復しない。場所には依存しない —
-// 3DoF では頭の位置がマーカーを見ている間しか更新できないため、位置ベースの回復はやめた）。
-// 残量の権威はサーバー（state.ink）。ローカルは同じ式で予測し、state が来るたび上書きされる。
+// 撃つのをやめると回復し、グー（"fist"）の間は速く回復する（撃った直後 inkRegenDelaySec は回復しない。
+// 場所には依存しない — 3DoF では頭の位置がマーカーを見ている間しか更新できないため、位置ベースの回復はやめた）。
+// 残量の権威はサーバー（state.ink）。ローカルは同じ式（inkRegenPerSec）で予測し、state が来るたび上書きされる。
 // 手が取れないときは画面 / Space の長押しで視界の中央へ連射
 let lastShotMs = -Infinity;
 let holdPressed = false;
@@ -688,8 +699,10 @@ let inkLocal = 1;
 let lastInkUpdateMs = performance.now();
 let lastNoInkFlashMs = -Infinity;
 
+/** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
 function canShoot(): boolean {
-  return joined && auth?.state.phase === "play" && anchor.visible && myColor !== null && posesSent > 0;
+  const phase = auth?.state.phase;
+  return joined && (phase === "play" || phase === "practice") && anchor.visible && myColor !== null && posesSent > 0;
 }
 
 const camWorldPos = new THREE.Vector3();
@@ -727,7 +740,7 @@ function updateFire(now: number) {
   const dt = Math.min(1, Math.max(0, (now - regenFrom) / 1000));
   lastInkUpdateMs = now;
   if (dt > 0) {
-    inkLocal = Math.min(1, inkLocal + dt / fieldCfg.inkFullSec);
+    inkLocal = Math.min(1, inkLocal + dt * inkRegenPerSec(fieldCfg, isFist()));
   }
 
   const openSlot = handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open");
@@ -845,7 +858,7 @@ function updateShots(now: number) {
 
 // ---- 視界内メッセージとスコアボード ----
 function remainingSec(now: number): number {
-  if (!auth) return 0;
+  if (!auth || auth.state.phaseEndsAt === null) return 0;
   return Math.max(0, (auth.state.phaseEndsAt - auth.state.t) / 1000 - (now - auth.recvMs) / 1000);
 }
 
@@ -859,7 +872,8 @@ function updateMessages(now: number) {
   if (s) {
     const total = Math.max(1, s.totalCells);
     const left = Math.ceil(remainingSec(now));
-    const head = s.phase === "result" ? "結果" : s.phase === "waiting" ? `開始まで ${left} 秒` : `残り ${left} 秒`;
+    const head =
+      s.phase === "result" ? "結果" : s.phase === "waiting" ? `開始まで ${left} 秒` : s.phase === "practice" ? "練習中（開始は俯瞰画面から）" : `残り ${left} 秒`;
     const ranking = [...s.players]
       .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
       .map((p, i) => {
@@ -905,8 +919,12 @@ function updateMessages(now: number) {
   } else if (auth.state.phase === "waiting") {
     text = `まもなく開始（${Math.ceil(remainingSec(now))} 秒）\nあなたは ${myColor ? inkColorName(myColor) : "-"}`;
     color = "#fdd663";
+  } else if (auth.state.phase === "practice") {
+    // チュートリアル（issue #20）: 練習中は操作の案内を出しっぱなしにする
+    text = `練習中（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充\n対戦は俯瞰画面の「開始」から`;
+    color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   } else {
-    text = `あなたは ${myColor ? inkColorName(myColor) : "-"}\nパーで連射（撃つのをやめると回復）`;
+    text = `あなたは ${myColor ? inkColorName(myColor) : "-"}\nパーで塗る ／ グーで補充`;
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
   message.set(text, color);
@@ -953,7 +971,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} ink=${inkLocal.toFixed(2)} held=${holdPressed ? "yes" : "no"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} ink=${inkLocal.toFixed(2)} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
       `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
