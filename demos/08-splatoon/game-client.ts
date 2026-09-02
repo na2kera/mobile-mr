@@ -58,6 +58,7 @@ export function connectGame(
     floorDepth: String(config.floorDepth),
     gravity: String(config.gravity),
     matchSec: String(config.matchSec),
+    waitSec: String(config.waitSec),
   });
   if (name) query.set("name", name);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${SPLATOON_PATH}?${query}`;

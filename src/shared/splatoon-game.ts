@@ -51,7 +51,7 @@ export type GameSnapshot = {
   t: number;
   seq: number;
   phase: Phase;
-  /** 今のフェーズが終わる権威時刻 [ms]（practice は Infinity → JSON では null になるので受信側は Infinity に戻す） */
+  /** 今のフェーズが終わる権威時刻 [ms]。practice は終わらないので null（Infinity は JSON に載らない。受信側は null = 時間表示なし） */
   phaseEndsAt: number | null;
   players: Player[];
   /** プレイヤーごとの塗ったセル数（四方の壁 + 床） */
@@ -127,22 +127,39 @@ export class SplatoonGame {
     return out;
   }
 
+  /** 色 c のセルを全部消す。消した数を返す */
+  private clearColor(c: InkColor): number {
+    let n = 0;
+    for (const g of this.grids.values()) {
+      for (let i = 0; i < g.cells.length; i++) {
+        if (g.cells[i] === c) {
+          g.cells[i] = 0;
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+
   /**
-   * 色の割当。この試合でまだ使っていない色を優先し、全色使用済みなら「今いない人」の色を再利用する。
-   * 再利用時はその色のセルを消す（退出者の塗りを新しい参加者が得点として引き継がないように）
+   * 色の割当。試合中はその試合でまだ使っていない色を優先し、全色使用済みなら「今いない人」の色を再利用する。
+   * 再利用時はその色のセルを消す（退出者の塗りを新しい参加者が得点として引き継がないように）。
+   * 練習中（終わらないので usedColors が積み上がる。iPhone の瞬断で再接続するたび新しい id になる）は
+   * 「今いない人」の色をすぐ再利用してよい（引き継ぎ防止は試合中だけの要件）
    */
   private pickColor(): InkColor {
     const active = new Set([...this.players.values()].map((p) => p.color));
     this.lastJoinClearedColor = false;
+    const reserved = this.phase === "practice" ? active : new Set([...this.usedColors, ...active]);
     for (let c = 1; c <= MAX_INK_COLORS; c++) {
-      if (!this.usedColors.has(c) && !active.has(c)) return c;
+      if (!reserved.has(c)) {
+        if (this.usedColors.has(c)) this.lastJoinClearedColor = this.clearColor(c) > 0;
+        return c;
+      }
     }
     let c: InkColor = 1;
     while (active.has(c) && c < MAX_INK_COLORS) c++;
-    for (const g of this.grids.values()) {
-      for (let i = 0; i < g.cells.length; i++) if (g.cells[i] === c) g.cells[i] = 0;
-    }
-    this.lastJoinClearedColor = true;
+    this.lastJoinClearedColor = this.clearColor(c) > 0;
     return c;
   }
 

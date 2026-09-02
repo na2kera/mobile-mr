@@ -403,7 +403,7 @@
 ## [2026-09-02] Phase 8 追加 / 08-splatoon 俯瞰画面: Room サーバーに「役割」が無く、観戦・運営の端末を入れるのに spec 側で除外を手書きした
 
 - **何が苦しかったか**: 俯瞰画面（PC。プレイヤーではなく、全員の pose / shot / state を受け取り「対戦開始」だけを送る）を同じ room に入れたかったが、`room-server.ts` は members を一律に「プレイヤー」として扱う（welcome の peers・join / leave の通知・maxMembers の数え方）。spec の `onJoin` / `onLeave` / `onMessage` で `?role=overview` を見て、`game.join` しない・join / leave を配らない・peers から除く・pose を捨てる・start だけ許す、を個別に書いた。プレイヤー側のクライアントも「welcome の peers に俯瞰画面が混ざるとアバターを作ってしまう」ので、サーバーで除く必要があった
-- **どう対処したか**: State に `overviews: Set<id>` を持ち、上記を spec 内で分岐。maxMembers は 8 → 9（プレイヤー 8 + 俯瞰 1）にしたが、room-server は役割ごとの上限を持てないので 9 台目のスマホも入れてしまう（色は使い回し）
+- **どう対処したか**: State に `overviews: Set<id>` を持ち、上記を spec 内で分岐。役割ごとの上限（プレイヤー 8 / 俯瞰 2）は room-server の maxMembers では数えられないので、spec に `canJoin(room, url)` フックを足して断る理由を返せるようにした（レビュー指摘: 9 台目のスマホで俯瞰画面が「満員」になる）。役割は `?role=` の自己申告のまま（LAN デモ。URL を知っていれば誰でも開始できる）
 - **SDK ならどう解決するか（案）**: `@mobile-mr/network` の Room に役割（player / spectator / admin）を一級で持たせ、「誰に何を配るか」「誰が何を送れるか」「役割ごとの上限」を spec の宣言で書けるようにする。観戦・運営画面はマルチプレイヤー MR の定番なので、毎デモで除外を手書きしない
 - **関連**: `server/splatoon.ts` の `roleOf` / `playerIds`、`server/room-server.ts`、`demos/08-splatoon/overview.ts`
 

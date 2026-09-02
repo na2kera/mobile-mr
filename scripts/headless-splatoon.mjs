@@ -261,7 +261,7 @@ try {
   check("俯瞰画面でもほぼ同じ得点が見えている", diffOv <= Math.max(200, hud1.total * 0.02), `${JSON.stringify(hud1.scores)} vs ${JSON.stringify(hudOv.scores)}`);
   const hits = landings.filter((l) => l.where !== "miss");
   check("着弾のほとんどが壁か床に当たっている（外れが半分未満）", landings.length >= 6 && hits.length > landings.length / 2, `${hits.length}/${landings.length} hit`);
-  check("サーバーが start → countdown を記録している", serverLines.some((l) => /start → countdown/.test(l)));
+  check("サーバーが start → countdown 1s を記録している（?waitSec= が room 設定として届いている）", serverLines.some((l) => /start → countdown 1s/.test(l)));
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0 && p3.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions, ...p3.exceptions].slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[game] shot sent")).slice(0, 2)) console.log(`window1 log: ${l}`);
   for (const l of p3.logs.filter((l) => l.startsWith("[overview]")).slice(0, 4)) console.log(`overview log: ${l}`);

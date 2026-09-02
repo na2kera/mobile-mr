@@ -23,8 +23,10 @@ import { RateLimiter } from "../src/shared/surface-paint.ts";
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const TICK_MS = 100;
 const IDLE_BROADCAST_MS = 1000;
-/** プレイヤー 8 人（色の数）+ 俯瞰画面 1 つ。9 台目のスマホは色を使い回す（SplatoonGame.pickColor） */
-const MAX_MEMBERS = 9;
+/** プレイヤーの上限（色の数） */
+const MAX_PLAYERS = 8;
+/** 俯瞰画面の上限（運営 + 予備）。役割は ?role= の自己申告（LAN デモ。URL を知っていれば誰でも開ける） */
+const MAX_OVERVIEWS = 2;
 const MAX_ROOMS = 64;
 /** クライアントの ?sendHz= の max 60 に余裕を持たせる */
 const POSE_RATE_PER_SEC = 90;
@@ -138,7 +140,15 @@ export function splatoonServer() {
     describeConfig,
     configErrorReason: "Room 設定 (markerId / markerMm / wallW / wallH / floorDrop / floorDepth / gravity / matchSec) が不正です（フィールドが大きすぎる場合も）",
     parseMessage: parseClientMessage,
-    maxMembers: MAX_MEMBERS,
+    // 役割ごとの上限（room-server の maxMembers は役割を区別しないので canJoin で数える）
+    canJoin(room: Ctx, url) {
+      const overviews = room.state.overviews.size;
+      if (roleOf(url) === "overview") {
+        return overviews >= MAX_OVERVIEWS ? `俯瞰画面は ${MAX_OVERVIEWS} 台までです` : null;
+      }
+      const players = room.members.size - overviews;
+      return players >= MAX_PLAYERS ? `room "${room.name}" は満員です (プレイヤー ${MAX_PLAYERS} 人まで)` : null;
+    },
     maxRooms: MAX_ROOMS,
     emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
     createState: (_name, c) => ({
@@ -200,9 +210,9 @@ export function splatoonServer() {
       const { game } = room.state;
       const isOverview = room.state.overviews.has(id);
       if (msg.type === "start") {
-        // 対戦開始は俯瞰画面だけ（issue #21「対戦開始はこちら側で制御」）。スマホからの start は無視
+        // 対戦開始は俯瞰画面だけ（issue #21「対戦開始はこちら側で制御」）。スマホからの start は拒否を返すだけ
         if (!isOverview) {
-          console.log(`[splatoon] ${id} start ignored (not overview)`);
+          room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
           return;
         }
         const events = game.start(now);

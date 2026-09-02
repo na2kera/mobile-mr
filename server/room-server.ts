@@ -62,6 +62,12 @@ export type RoomServerSpec<C, S, M> = {
   maxMembers?: number;
   /** maxMembers で断るときの理由 */
   fullReason?: string;
+  /**
+   * 役割ごとの上限など、spec 固有の入室可否（08 の「プレイヤー 8 人 + 俯瞰画面 2 台」）。
+   * 既存 Room に入るときだけ呼ばれ（本人はまだ members に入っていない）、断る理由の文字列を返すと拒否する。
+   * maxMembers より先に評価する
+   */
+  canJoin?(room: RoomContext<C, S>, url: URL): string | null;
   /** Room の総数上限（省略時は無制限）。emptyRoomTtlMs で空 Room を保持する spec は付けること */
   maxRooms?: number;
 };
@@ -210,6 +216,11 @@ function attach<C, S, M>(httpServer: HttpServer, spec: RoomServerSpec<C, S, M>) 
           ws,
           `room "${roomName}" の設定と不一致 (参加中: ${spec.describeConfig(room.config)} / あなた: ${spec.describeConfig(config)})`,
         );
+        return;
+      }
+      const denied = room ? spec.canJoin?.(room, url) : null;
+      if (room && denied) {
+        reject(ws, denied);
         return;
       }
       if (room && spec.maxMembers !== undefined && room.membersMut.size >= spec.maxMembers) {

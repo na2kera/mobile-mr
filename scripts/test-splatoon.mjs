@@ -217,6 +217,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("8 色使用済みなら退出者の色を再利用し、そのセルを消してから割り当てる", e.length === 0 && g.players.get("p9").color === 1 && g.lastJoinClearedColor && g.scores().p9 === 0);
 }
 
+// ================= 3d. 練習中の色の再利用 =================
+{
+  const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+  g.join("p1", "A", 0);
+  g.updatePose("p1", [0, 0.1, 1], 10);
+  g.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 100);
+  check("練習中に p1 が塗った", g.scores().p1 > 0);
+  g.leave("p1");
+  g.join("p2", "B", 200);
+  check("練習中は退出者の色（1）をすぐ再利用し、その塗りは消す（再接続で色が増えていかない）", g.players.get("p2").color === 1 && g.lastJoinClearedColor && g.scores().p2 === 0);
+  g.leave("p2");
+  g.join("p3", "C", 300);
+  check("消すセルが無ければ格子の配り直しは要らない", g.players.get("p3").color === 1 && !g.lastJoinClearedColor);
+}
+
 // ================= 3b. インクタンク =================
 {
   const g = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
@@ -366,15 +381,53 @@ try {
   const bigField = connect({ ...cfg, room: "big", wallW: "20", wallH: "20", floorDepth: "20" });
   const errBig = await bigField.waitFor((m) => m.type === "error");
   check("格子が大きすぎるフィールドは拒否", errBig && /不正/.test(errBig.reason));
-  const st = await a.waitFor((m) => m.type === "state" && (m.state.scores.p2 ?? 0) > 0, 2500);
-  check("state に得点が反映される（p2 が塗った）", st !== null && (st.state.scores.p1 ?? 0) === 0);
+  // 練習中の state を拾わないよう、試合開始後の state に限定する
+  const st = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.t > playSt.state.t && (m.state.scores.p2 ?? 0) > 0, 2500);
+  check("試合中の state に得点が反映される（p2 が塗った。練習の分は消えている）", st !== null && (st.state.scores.p1 ?? 0) === 0);
   check("state にインク残量（B は 1 発ぶん減っている）", st && st.state.ink.p2 < 1 && st.state.ink.p1 === 1, JSON.stringify(st?.state.ink));
+  // fist を付けない pose は中継にも fist が付かない（true のときだけ載せる）
+  b.send({ type: "pose", pos: [0.25, 0, 1.5], quat: [0, 0, 0, 1], tracking: true });
+  const poseNoFist = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.25);
+  check("fist を付けない pose には fist が付かない", poseNoFist && poseNoFist.fist === undefined);
+  b.send({ type: "start" });
+  const rejPhone = await b.waitFor((m) => m.type === "rejected" && /overview/.test(m.reason));
+  check("スマホからの start には rejected: not overview が返る", rejPhone !== null);
+  // 俯瞰画面の再接続: 新しい id で welcome、peers に古い id は残らない
+  ov.ws.close();
+  await sleep(100);
+  const ov2 = connect({ ...cfg, role: "overview" });
+  const wov2 = await ov2.waitFor((m) => m.type === "welcome");
+  check("俯瞰画面の再接続: 新しい id・peers はプレイヤー 2 人だけ（古い俯瞰 id は残らない）", wov2 && wov2.id !== wov.id && wov2.role === "overview" && wov2.peers.length === 2 && !wov2.peers.includes(wov.id) && wov2.state.grids);
+  // 俯瞰だけの room で start → no players
+  const solo = connect({ ...cfg, room: "solo", role: "overview" });
+  await solo.waitFor((m) => m.type === "welcome");
+  solo.send({ type: "start" });
+  const rejSolo = await solo.waitFor((m) => m.type === "rejected");
+  check("プレイヤーがいない room の start は rejected: no players", rejSolo && /no players/.test(rejSolo.reason));
+  solo.ws.close();
+  // 役割別の上限: プレイヤー 8 人 / 俯瞰 2 台（room-server の canJoin）
+  const full = "full";
+  const fullPlayers = Array.from({ length: 8 }, (_, i) => connect({ ...cfg, room: full }, `F${i}`));
+  await Promise.all(fullPlayers.map((c) => c.waitFor((m) => m.type === "welcome")));
+  const ninth = connect({ ...cfg, room: full }, "Ninth");
+  const errNinth = await ninth.waitFor((m) => m.type === "error");
+  check("プレイヤー 9 人目は満員で拒否", errNinth && /満員/.test(errNinth.reason));
+  const fov1 = connect({ ...cfg, room: full, role: "overview" });
+  const wf1 = await fov1.waitFor((m) => m.type === "welcome");
+  check("満員でも俯瞰画面は入れる（役割別に数える）", wf1 && wf1.role === "overview" && wf1.peers.length === 8);
+  const fov2 = connect({ ...cfg, room: full, role: "overview" });
+  await fov2.waitFor((m) => m.type === "welcome");
+  const fov3 = connect({ ...cfg, room: full, role: "overview" });
+  const errOv3 = await fov3.waitFor((m) => m.type === "error");
+  check("俯瞰画面 3 台目は拒否", errOv3 && /俯瞰画面/.test(errOv3.reason));
+  for (const c of [...fullPlayers, fov1, fov2]) c.ws.close();
+  await sleep(100);
 
   b.send({ type: "pose", pos: [0.5, 0, 1.5], quat: [0, 0, 0, 2], tracking: true, fist: true });
   const pose = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
   check("pose が中継され quat は正規化・fist も付く", pose && Math.abs(pose.quat[3] - 1) < 1e-9 && pose.fist === true);
-  const ovPose = await ov.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
-  check("pose は俯瞰画面にも届く", ovPose !== null);
+  const ovPose = await ov2.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.5);
+  check("pose は俯瞰画面にも届く（再接続後の俯瞰画面）", ovPose !== null);
 
   const bad = connect({ ...cfg, gravity: "9.8" });
   const err = await bad.waitFor((m) => m.type === "error");
@@ -384,7 +437,7 @@ try {
   const la = await a.waitFor((m) => m.type === "leave");
   check("leave が届く", la && la.id === "p2");
   const leavesBefore = a.msgs.filter((m) => m.type === "leave").length;
-  ov.ws.close();
+  ov2.ws.close();
   await sleep(200);
   check("俯瞰画面の退室で leave は配られない", a.msgs.filter((m) => m.type === "leave").length === leavesBefore);
   a.ws.close();
