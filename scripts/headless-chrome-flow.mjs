@@ -18,8 +18,8 @@ import WebSocket from "ws";
 
 const CHROME =
   process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 5191;
-const CDP_PORT = 9338;
+const PORT = 5193;
+const CDP_PORT = 9340;
 const BASE = `https://localhost:${PORT}/demos/08-splatoon/`;
 const COMMON = "fov=70&camZoom=1&fakecam=1&fakehands=1&room=chromeflow";
 
