@@ -15,6 +15,17 @@ export type SplatDrop = {
 
 export type SplatWave = { k: number; amp: number; phase: number };
 
+/** 壁の垂れ（本体の下端から v 方向 = 下へ伸びる帯 + 先端の玉）。得点にも含める */
+export type SplatDrip = {
+  /** 根元の位置（着弾点からのオフセット [m]） */
+  du: number;
+  dv: number;
+  /** 長さ [m] */
+  len: number;
+  /** 根元の太さ [m]（判定は幅 0.7w の帯 + 先端に半径 0.55w の玉） */
+  w: number;
+};
+
 export type SplatShape = {
   /** 本体の基準半径 [m] */
   r: number;
@@ -25,7 +36,14 @@ export type SplatShape = {
   /** 縁の凹凸（角度 θ での半径倍率 = 1 + Σ amp·sin(kθ + phase)） */
   waves: SplatWave[];
   drops: SplatDrop[];
+  /** 壁のときだけ 1〜3 本（床は空） */
+  drips: SplatDrip[];
 };
+
+/** 面が壁（法線が水平）か。壁だけ垂れる。サーバーとクライアントで同じ判定を使う */
+export function isWallSurface(surface: SurfaceFrame): boolean {
+  return Math.abs(surface.normal[1]) < 1e-6;
+}
 
 /** 決定的な乱数（mulberry32）。同じ種なら全端末で同じ列 */
 export function mulberry32(seed: number): () => number {
@@ -59,12 +77,14 @@ export function impactDirUv(landing: InkLanding, vel: V3, surface: SurfaceFrame,
 }
 
 /**
- * 飛沫の形を作る。
+ * 飛沫の形を作る。同じ入力（seed・半径・向き・壁か）なら全端末とサーバーで同じ形になる
+ * （数学関数の最終ビットまでは処理系間で保証されないが、セル境界の 1〜2 セルの差は許容する近似一致）。
  * @param seed shot.seq（全端末で同じ）
  * @param radiusM 玉の半径（本体の基準半径）
  * @param dir 面内の進行方向（impactDirUv）。null なら向きなし（伸びなし・滴は全方向）
+ * @param wall 壁なら下へ垂れる（isWallSurface）
  */
-export function splatShape(seed: number, radiusM: number, dir: V2 | null): SplatShape {
+export function splatShape(seed: number, radiusM: number, dir: V2 | null, wall = false): SplatShape {
   const rand = mulberry32(seed * 2654435761 + 7);
   const waves: SplatWave[] = [
     { k: 2, amp: 0.1 + rand() * 0.1, phase: rand() * Math.PI * 2 },
@@ -84,14 +104,24 @@ export function splatShape(seed: number, radiusM: number, dir: V2 | null): Splat
     const r = radiusM * (0.12 + rand() * 0.3);
     drops.push({ du: Math.cos(angle) * dist, dv: Math.sin(angle) * dist, r });
   }
-  // 後ろ側にも小さいのを 1〜2 個（跳ね返り）
+  // 後ろ側にも小さいのを 1〜2 個（跳ね返り）。向きが無ければこれも全方向
   const back = 1 + Math.floor(rand() * 2);
   for (let i = 0; i < back; i++) {
-    const angle = base + Math.PI + (rand() - 0.5) * Math.PI * 0.6;
+    const angle = dir ? base + Math.PI + (rand() - 0.5) * Math.PI * 0.6 : rand() * Math.PI * 2;
     const dist = radiusM * (1.2 + rand() * 0.6);
     drops.push({ du: Math.cos(angle) * dist, dv: Math.sin(angle) * dist, r: radiusM * (0.08 + rand() * 0.14) });
   }
-  return { r: radiusM, dir: d, stretch, waves, drops };
+  const shape: SplatShape = { r: radiusM, dir: d, stretch, waves, drops, drips: [] };
+  if (wall) {
+    // 本体の下端（v 方向 = 下）から 1〜3 本。根元は縁の少し内側
+    const n = 1 + Math.floor(rand() * 3);
+    const thetaDown = Math.atan2(d[0], d[1]);
+    for (let i = 0; i < n; i++) {
+      const [du, dv] = edgePoint(shape, thetaDown + (rand() - 0.5) * 0.9);
+      shape.drips.push({ du, dv: dv - radiusM * 0.15, len: radiusM * (0.6 + rand() * 1.4), w: radiusM * (0.16 + rand() * 0.16) });
+    }
+  }
+  return shape;
 }
 
 /** 本体の縁の半径倍率（形のローカル角 θ。θ=0 が進行方向） */
@@ -125,13 +155,22 @@ export function insideCore(shape: SplatShape, du: number, dv: number): boolean {
   return dist <= shape.r * edgeScale(shape, theta);
 }
 
-/** 着弾点からのオフセットが本体か滴のどれかの中か */
+/** 着弾点からのオフセットが本体・滴・垂れのどれかの中か */
 export function insideSplat(shape: SplatShape, du: number, dv: number): boolean {
   if (insideCore(shape, du, dv)) return true;
   for (const d of shape.drops) {
     const dx = du - d.du;
     const dy = dv - d.dv;
     if (dx * dx + dy * dy <= d.r * d.r) return true;
+  }
+  for (const d of shape.drips) {
+    // 帯（幅 0.7w、根元から先端まで）+ 先端の玉（半径 0.55w）
+    const half = d.w * 0.35;
+    if (Math.abs(du - d.du) <= half && dv >= d.dv && dv <= d.dv + d.len) return true;
+    const dx = du - d.du;
+    const dy = dv - (d.dv + d.len);
+    const rb = d.w * 0.55;
+    if (dx * dx + dy * dy <= rb * rb) return true;
   }
   return false;
 }
@@ -140,5 +179,6 @@ export function insideSplat(shape: SplatShape, du: number, dv: number): boolean 
 export function splatExtent(shape: SplatShape): number {
   let e = shape.r * shape.stretch * MAX_EDGE_SCALE;
   for (const d of shape.drops) e = Math.max(e, Math.hypot(d.du, d.dv) + d.r);
+  for (const d of shape.drips) e = Math.max(e, Math.hypot(d.du, d.dv + d.len) + d.w);
   return e;
 }

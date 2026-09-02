@@ -13,7 +13,7 @@ import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
-import { impactDirUv, splatShape } from "../../src/shared/splat-shape";
+import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
 import { createSplatSound } from "./splat-sound";
 
 // Phase 8 / issue #19・#21: PC の俯瞰画面。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
@@ -77,7 +77,7 @@ let fieldCfg: FieldConfig = {
 const surfaces: SurfaceFrame[] = fieldSurfaces(fieldCfg);
 const inkViews = new Map<string, InkView>();
 for (const s of surfaces) {
-  const view = new InkView(s, SURFACE_PX_PER_M);
+  const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
   field.add(view.group);
   inkViews.set(s.id, view);
 }
@@ -364,7 +364,10 @@ const shots = new Map<number, LiveShot>();
 const splatted = new Set<number>();
 
 const splatSound = createSplatSound(SOUND);
-addEventListener("pointerdown", () => splatSound.unlock(), { once: true });
+addEventListener("pointerdown", () => splatSound.unlock());
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") splatSound.unlock();
+});
 
 function addShot(shot: Shot, serverT: number, recvMs: number) {
   const mesh = new THREE.Mesh(inkGeometry, inkMaterialOf(shot.color));
@@ -400,7 +403,7 @@ function splatLanding(shot: Shot, now: number) {
   const surface = surfaces.find((s) => s.id === landing.surfaceId);
   const view = inkViews.get(landing.surfaceId);
   if (!surface || !view) return;
-  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity));
+  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity), isWallSurface(surface));
   const overwrote = view.splat(landing.uv, shape, shot.color, now);
   splatSound.play(0.25, overwrote);
 }

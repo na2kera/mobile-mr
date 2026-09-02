@@ -32,6 +32,7 @@ import {
   impactDirUv,
   insideCore,
   insideSplat,
+  isWallSurface,
   splatExtent,
   splatShape,
 } from "../src/shared/splat-shape.ts";
@@ -149,6 +150,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("中心は中、遠くは外", insideCore(a, 0, 0) && !insideSplat(a, 1, 1));
   const d0 = a.drops[0];
   check("滴の中は insideSplat で中", insideSplat(a, d0.du, d0.dv) && splatExtent(a) >= Math.hypot(d0.du, d0.dv) + d0.r);
+  // 垂れ: 壁のときだけ 1〜3 本。帯と先端の玉が insideSplat に入り、extent にも含まれる
+  const aw = splatShape(42, 0.09, [0, 1], true);
+  check("壁なら垂れが 1〜3 本、床（wall=false）なら無し", aw.drips.length >= 1 && aw.drips.length <= 3 && a.drips.length === 0);
+  const dr = aw.drips[0];
+  check("垂れの帯と先端の玉は insideSplat で中、帯の横は外", insideSplat(aw, dr.du, dr.dv + dr.len * 0.5) && insideSplat(aw, dr.du, dr.dv + dr.len + dr.w * 0.5) && !insideSplat(aw, dr.du + dr.w * 2 + aw.r * 2, dr.dv + dr.len * 0.5));
+  check("垂れは extent に含まれる", splatExtent(aw) >= Math.hypot(dr.du, dr.dv + dr.len) + dr.w);
+  check("壁の形は垂れ以外は床と同じ（seed が同じなら本体・滴が一致）", JSON.stringify(aw.drops) === JSON.stringify(a.drops) && JSON.stringify(aw.waves) === JSON.stringify(a.waves));
+  check("向きなしの後方滴も上に偏らない（全方向）", (() => { let up = 0, n = 0; for (let sd = 1; sd <= 40; sd++) for (const d of splatShape(sd, 0.09, null).drops) { n++; if (d.dv < 0) up++; } return up > n * 0.3 && up < n * 0.7; })());
+  check("isWallSurface: 壁は true、床は false", isWallSurface(wall) && !isWallSurface(floor));
   // 進行方向: 壁に正面から撃つと重力で下向き成分だけが残り、壁の yAxis（下）方向 = [0, 1]
   const lw = simulateInk([0, 0, 2], [0, 0, -5], [wall, floor], cfg);
   const dirW = impactDirUv(lw, [0, 0, -5], wall, cfg.gravity);
@@ -167,6 +177,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nSplat = g2.stampSplat([0.5, 0.5], a, 1);
   check("stampSplat は円の 0.7〜4 倍のセルを塗る", nSplat > nCircle * 0.7 && nSplat < nCircle * 4, `${nSplat} vs ${nCircle}`);
   check("stampSplat: 同じ色で塗り直しは 0", g2.stampSplat([0.5, 0.5], a, 1) === 0);
+  const stats = { overwritten: 0 };
+  const nOver = g2.stampSplat([0.5, 0.5], a, 2, stats);
+  check("stampSplat: 他の色を塗り替えたセル数が stats に入る（クライアントのフラッシュ判定）", stats.overwritten === nOver && nOver > 0);
+  const stats2 = { overwritten: 0 };
+  new InkGrid(wall, 0.02).stampSplat([0.5, 0.5], a, 2, stats2);
+  check("stampSplat: 未塗装なら overwritten は 0", stats2.overwritten === 0);
   check("stampSplat: 角（UV 0,0）でもはみ出さない", new InkGrid(wall, 0.02).stampSplat([0, 0], a, 2) > 0);
   // サーバー側: shoot で同じ形が格子に入る（shot.seq を種にする）
   const game = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
@@ -174,10 +190,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   game.updatePose("s1", [0, 0.1, 1], 10);
   const sh = game.shoot("s1", [0, 0, 1], [0, -2, -4.5], 0.09, 100);
   const sf = game.surfaces.find((x) => x.id === sh.landing.surfaceId);
-  const expectShape = splatShape(sh.seq, sh.radius, impactDirUv(sh.landing, sh.vel, sf, game.config.gravity));
+  const expectShape = splatShape(sh.seq, sh.radius, impactDirUv(sh.landing, sh.vel, sf, game.config.gravity), isWallSurface(sf));
   const g3 = new InkGrid(sf, game.config.cellM);
   const nExpect = g3.stampSplat(sh.landing.uv, expectShape, sh.color);
-  check("サーバーの格子は shot.seq 由来の飛沫の形で塗られている（クライアントと同じ形 = 得点）", game.scores().s1 === nExpect && nExpect > 0, `${game.scores().s1} vs ${nExpect}`);
+  check("サーバーの格子は shot.seq 由来の飛沫の形（壁なので垂れ込み）で塗られている（クライアントと同じ形 = 得点）", game.scores().s1 === nExpect && nExpect > 0 && expectShape.drips.length > 0, `${game.scores().s1} vs ${nExpect}`);
 }
 
 // ================= 2. hand shape =================

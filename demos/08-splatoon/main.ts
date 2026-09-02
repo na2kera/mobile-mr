@@ -38,7 +38,7 @@ import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
 import { scriptedSplatHand } from "./fake-splat-hand";
-import { impactDirUv, splatShape } from "../../src/shared/splat-shape";
+import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
 import { createSplatSound } from "./splat-sound";
 
 // Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
@@ -163,7 +163,7 @@ let fieldCfg: FieldConfig = {
 const surfaces: SurfaceFrame[] = fieldSurfaces(fieldCfg);
 const inkViews = new Map<string, InkView>();
 for (const s of surfaces) {
-  const view = new InkView(s, SURFACE_PX_PER_M);
+  const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
   field.add(view.group);
   inkViews.set(s.id, view);
 }
@@ -198,6 +198,12 @@ function createInkMesh(color: InkColor, radius: number): THREE.Mesh {
   return m;
 }
 const splatSound = createSplatSound(SOUND);
+// iOS はバックグラウンド移行や音声割り込みで AudioContext が suspended に戻るので、タッチのたびと復帰時に resume を試す
+addEventListener("pointerdown", () => splatSound.unlock());
+addEventListener("pageshow", () => splatSound.unlock());
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") splatSound.unlock();
+});
 
 // ---- ピア（他のプレイヤー）: 頭 + 手（06-2 と同じ）。チーム色 ----
 type Peer = {
@@ -852,7 +858,7 @@ function splatLanding(shot: Shot, now: number) {
   const surface = surfaces.find((s) => s.id === landing.surfaceId);
   const view = inkViews.get(landing.surfaceId);
   if (!surface || !view) return;
-  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity));
+  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity), isWallSurface(surface));
   const overwrote = view.splat(landing.uv, shape, shot.color, now);
   splatSound.play(shot.by === selfId ? 0.5 : 0.3, overwrote);
 }

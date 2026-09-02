@@ -2,10 +2,13 @@
 // 07 の SurfaceView（壁面 Z=0 前提）の向き付き版。着弾は飛沫の形（splat-shape.ts。全端末とサーバーで同じ形）で描き、
 // snapshot（格子）が来たら格子から描き直す（格子は 2cm セルなので少し粗いが、再接続と試合の切り替え時だけ）。
 // 見た目の遊び（Phase 8 追加 A 案）: 本体はツヤのあるグラデーション + ハイライト、着弾から 150ms で広がり、
-// 壁では 1.2 秒かけて下に垂れる。相手の色を塗り替えたときは一瞬白く光る
+// 壁では下に垂れる（垂れも形の一部で得点に入る）。相手の色を塗り替えたときは一瞬白く光る。
+// 塗りは蓄積する canvas なので、アニメーション（広がり・フラッシュ）は短く（≤ 220ms）し、新しい着弾が来たら
+// 同じ面の進行中の着弾を先に確定して着弾順（= サーバーの格子の順）を保つ。
+// 「塗り替えたか」は描画色ではなく、サーバーと同じ格子（InkGrid）をクライアントにも持って判定する
 import * as THREE from "three";
 import { InkGrid, MAX_INK_COLORS, type InkColor, type SurfaceFrame, type V2 } from "../../src/shared/splatoon-sim";
-import { edgePoint, mulberry32 } from "../../src/shared/splat-shape";
+import { edgePoint } from "../../src/shared/splat-shape";
 import type { SplatShape } from "../../src/shared/splat-shape";
 
 /** プレイヤーの色（個人戦。色番号 1.. の順） */
@@ -29,23 +32,10 @@ const MAX_PX = 1024;
 const GROW_MS = 150;
 /** 塗り替えのフラッシュ [ms] */
 const FLASH_MS = 220;
-/** 垂れが伸びきる時間 [ms]（壁だけ） */
-const DRIP_MS = 1200;
-/** 垂れが始まるまで [ms] */
-const DRIP_DELAY_MS = 120;
+/** アニメーション中のテクスチャ更新の間隔 [ms]（全面転送なので 30Hz に抑える） */
+const ANIM_INTERVAL_MS = 1000 / 30;
 /** 本体の縁の分割数 */
 const EDGE_STEPS = 48;
-
-type Drip = {
-  x: number;
-  y: number;
-  /** 伸びきったときの長さ [px] */
-  len: number;
-  /** 根元の太さ [px] */
-  w: number;
-  /** ここまで描いた長さ [px] */
-  drawn: number;
-};
 
 type ActiveSplat = {
   cx: number;
@@ -54,8 +44,6 @@ type ActiveSplat = {
   color: InkColor;
   startMs: number;
   overwrote: boolean;
-  drips: Drip[];
-  grown: boolean;
 };
 
 function hexToRgb(hex: number): [number, number, number] {
@@ -78,19 +66,19 @@ export class InkView {
   private readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   private readonly frameMaterial: THREE.LineBasicMaterial;
   private readonly pxPerM: number;
-  /** 壁（法線が水平）なら垂れる。床は垂れない */
-  private readonly isWall: boolean;
+  /** サーバーと同じ格子（塗り替えの判定用。snapshot が来たら上書きされる） */
+  private readonly grid: InkGrid;
   private readonly active: ActiveSplat[] = [];
+  private lastAnimMs = -Infinity;
 
-  constructor(frame: SurfaceFrame, pxPerM = DEFAULT_PX_PER_M) {
+  constructor(frame: SurfaceFrame, pxPerM = DEFAULT_PX_PER_M, cellM = 0.02) {
     this.frame = frame;
     const scale = Math.min(pxPerM, MAX_PX / Math.max(frame.widthM, frame.heightM));
     this.pxPerM = scale;
-    this.isWall = Math.abs(frame.normal[1]) < 1e-6;
+    this.grid = new InkGrid(frame, cellM);
     this.canvas.width = Math.max(8, Math.round(frame.widthM * scale));
     this.canvas.height = Math.max(8, Math.round(frame.heightM * scale));
-    // 上書きの判定で着弾点の色を読むので読み戻し前提の canvas にする
-    this.ctx = this.canvas.getContext("2d", { willReadFrequently: true })!;
+    this.ctx = this.canvas.getContext("2d")!;
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.generateMipmaps = false;
@@ -134,6 +122,7 @@ export class InkView {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "rgba(138, 180, 248, 0.08)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    this.grid.clear();
     this.active.length = 0;
     this.texture.needsUpdate = true;
   }
@@ -143,105 +132,61 @@ export class InkView {
   }
 
   /**
-   * 着弾: UV を中心に飛沫の形で塗る。広がり・フラッシュ・垂れのアニメーションは update(now) で進める。
-   * @returns 相手の色を塗り替えたか（音の出し分け用）
+   * 着弾: UV を中心に飛沫の形で塗る。広がりとフラッシュのアニメーションは update(now) で進める。
+   * 同じ面で進行中の着弾があれば先に確定する（着弾順 = サーバーの格子の順を保つ）
+   * @returns 相手の色を塗り替えたか（格子で判定。音とフラッシュに使う）
    */
   splat(uv: V2, shape: SplatShape, color: InkColor, now: number): boolean {
-    const cx = uv[0] * this.canvas.width;
-    const cy = uv[1] * this.canvas.height;
-    const overwrote = this.isOtherInkAt(cx, cy, color);
-    const rpx = shape.r * this.pxPerM;
-    const drips: Drip[] = [];
-    if (this.isWall) {
-      // 本体の下端（canvas の +y = 壁の下）から 1〜3 本。形は shape から決定的に
-      const rand = mulberry32(Math.floor(shape.waves[0].phase * 1e6) + shape.drops.length);
-      const n = 1 + Math.floor(rand() * 3);
-      const thetaDown = Math.atan2(shape.dir[0], shape.dir[1]);
-      for (let i = 0; i < n; i++) {
-        const [du, dv] = edgePoint(shape, thetaDown + (rand() - 0.5) * 0.9);
-        drips.push({
-          x: cx + du * this.pxPerM,
-          y: cy + dv * this.pxPerM - rpx * 0.15,
-          len: rpx * (0.6 + rand() * 1.4),
-          w: rpx * (0.16 + rand() * 0.16),
-          drawn: 0,
-        });
-      }
-    }
-    const a: ActiveSplat = { cx, cy, shape, color, startMs: now, overwrote, drips, grown: false };
+    for (const a of this.active) this.drawBlob(a, 1, true);
+    this.active.length = 0;
+    const stats = { overwritten: 0 };
+    this.grid.stampSplat(uv, shape, color, stats);
+    const a: ActiveSplat = {
+      cx: uv[0] * this.canvas.width,
+      cy: uv[1] * this.canvas.height,
+      shape,
+      color,
+      startMs: now,
+      overwrote: stats.overwritten > 0,
+    };
     this.active.push(a);
     this.drawFrame(a, now);
-    return overwrote;
+    this.lastAnimMs = now;
+    this.texture.needsUpdate = true;
+    return a.overwrote;
   }
 
-  /** アニメーション中の着弾を進める。毎フレーム呼ぶ */
+  /** アニメーション中の着弾を進める。毎フレーム呼ぶ（テクスチャの更新は ANIM_INTERVAL_MS に間引く） */
   update(now: number) {
-    if (this.active.length === 0) return;
-    for (let i = this.active.length - 1; i >= 0; i--) {
+    if (this.active.length === 0 || now - this.lastAnimMs < ANIM_INTERVAL_MS) return;
+    this.lastAnimMs = now;
+    // 着弾順（古い方が先）に描く
+    let i = 0;
+    while (i < this.active.length) {
       if (this.drawFrame(this.active[i], now)) this.active.splice(i, 1);
+      else i++;
     }
     this.texture.needsUpdate = true;
   }
 
-  /** 着弾点にいまある色が別のインクか（未塗装の薄い背景は alpha が小さい） */
-  private isOtherInkAt(cx: number, cy: number, color: InkColor): boolean {
-    const x = Math.min(this.canvas.width - 1, Math.max(0, Math.floor(cx)));
-    const y = Math.min(this.canvas.height - 1, Math.max(0, Math.floor(cy)));
-    const d = this.ctx.getImageData(x, y, 1, 1).data;
-    if (d[3] < 200) return false;
-    const [r, g, b] = hexToRgb(inkColorHex(color));
-    return Math.abs(d[0] - r) + Math.abs(d[1] - g) + Math.abs(d[2] - b) > 60;
-  }
-
-  /** 1 フレームぶん描く。終わったら true */
+  /** 1 フレームぶん描く。完成したら true */
   private drawFrame(a: ActiveSplat, now: number): boolean {
     const { ctx } = this;
     const t = now - a.startMs;
     const grow = easeOut(t / GROW_MS);
-    if (!a.grown) {
-      // 広がっている間は本体だけ（滴を途中の大きさで描くと、動いた跡が点線として残る）
-      this.drawBlob(a, grow, false);
-      if (a.overwrote && t < FLASH_MS) {
-        this.blobPath(a, grow);
-        ctx.fillStyle = `rgba(255, 255, 255, ${(0.75 * (1 - t / FLASH_MS)).toFixed(3)})`;
-        ctx.fill();
-      }
-      if (grow >= 1 && (!a.overwrote || t >= FLASH_MS)) {
-        // 最後にフラッシュ無しの完成形（滴込み）を描いて確定
-        this.drawBlob(a, 1, true);
-        a.grown = true;
-      }
+    // 広がっている間は本体だけ（滴や垂れを途中の大きさで描くと動いた跡が残る）
+    this.drawBlob(a, grow, false);
+    if (a.overwrote && t < FLASH_MS) {
+      this.blobPath(a, grow);
+      ctx.fillStyle = `rgba(255, 255, 255, ${(0.75 * (1 - t / FLASH_MS)).toFixed(3)})`;
+      ctx.fill();
     }
-    let dripping = false;
-    if (a.drips.length > 0 && t > DRIP_DELAY_MS) {
-      const p = easeOut((t - DRIP_DELAY_MS) / DRIP_MS);
-      const base = hexToRgb(inkColorHex(a.color));
-      ctx.strokeStyle = mix(base, [0, 0, 0], 0.12);
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.lineCap = "round";
-      for (const d of a.drips) {
-        const target = d.len * p;
-        if (target <= d.drawn) continue;
-        // 先へ行くほど細く
-        ctx.lineWidth = Math.max(1, d.w * (1 - (target / d.len) * 0.6));
-        ctx.beginPath();
-        ctx.moveTo(d.x, d.y + d.drawn);
-        ctx.lineTo(d.x, d.y + target);
-        ctx.stroke();
-        d.drawn = target;
-        if (p >= 1) {
-          // 先端の玉
-          ctx.beginPath();
-          ctx.arc(d.x, d.y + d.len, Math.max(1, d.w * 0.55), 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      dripping = p < 1;
-    } else if (a.drips.length > 0) {
-      dripping = true;
+    if (grow >= 1 && (!a.overwrote || t >= FLASH_MS)) {
+      // 最後にフラッシュ無しの完成形（滴・垂れ込み）を描いて確定
+      this.drawBlob(a, 1, true);
+      return true;
     }
-    this.texture.needsUpdate = true;
-    return a.grown && !dripping;
+    return false;
   }
 
   private blobPath(a: ActiveSplat, scale: number) {
@@ -257,11 +202,34 @@ export class InkView {
     ctx.closePath();
   }
 
-  /** 本体（ツヤのグラデーション + ハイライト）と滴（withDrops のときだけ） */
-  private drawBlob(a: ActiveSplat, scale: number, withDrops: boolean) {
+  /** 本体（ツヤのグラデーション + ハイライト）。complete なら滴と垂れも */
+  private drawBlob(a: ActiveSplat, scale: number, complete: boolean) {
     const { ctx, pxPerM } = this;
     const base = hexToRgb(inkColorHex(a.color));
     const rpx = a.shape.r * pxPerM * scale;
+    if (complete) {
+      // 垂れ（本体より先に描き、根元が本体に隠れるように）: 先へ行くほど細い帯 + 先端の玉
+      ctx.fillStyle = mix(base, [0, 0, 0], 0.12);
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineCap = "round";
+      for (const d of a.shape.drips) {
+        const x = a.cx + d.du * pxPerM;
+        const y0 = a.cy + d.dv * pxPerM;
+        const len = d.len * pxPerM;
+        const w = d.w * pxPerM;
+        const segs = 3;
+        for (let k = 0; k < segs; k++) {
+          ctx.lineWidth = Math.max(1, w * (1 - ((k + 0.5) / segs) * 0.6));
+          ctx.beginPath();
+          ctx.moveTo(x, y0 + (len * k) / segs);
+          ctx.lineTo(x, y0 + (len * (k + 1)) / segs);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(x, y0 + len, Math.max(1, w * 0.55), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
     const grad = ctx.createRadialGradient(a.cx - rpx * 0.35, a.cy - rpx * 0.35, rpx * 0.1, a.cx, a.cy, rpx * a.shape.stretch * 1.35);
     grad.addColorStop(0, mix(base, [255, 255, 255], 0.28));
     grad.addColorStop(0.55, this.color(a.color));
@@ -269,8 +237,8 @@ export class InkView {
     ctx.fillStyle = grad;
     this.blobPath(a, scale);
     ctx.fill();
-    // 滴（本体より少し濃い）
-    if (withDrops) {
+    if (complete) {
+      // 滴（本体より少し濃い）
       ctx.fillStyle = mix(base, [0, 0, 0], 0.06);
       for (const d of a.shape.drops) {
         ctx.beginPath();
@@ -291,9 +259,9 @@ export class InkView {
 
   /** 格子（サーバーの権威状態）から描き直す。cellM はサーバーと同じ値（FieldConfig.cellM） */
   redrawFromGrid(encoded: string, cellM: number) {
-    const grid = new InkGrid(this.frame, cellM);
-    grid.decode(encoded);
+    const grid = this.grid.cellM === cellM ? this.grid : new InkGrid(this.frame, cellM);
     this.clear();
+    grid.decode(encoded);
     const { ctx, canvas } = this;
     const cw = canvas.width / grid.cols;
     const ch = canvas.height / grid.rows;
