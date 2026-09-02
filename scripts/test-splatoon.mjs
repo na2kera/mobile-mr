@@ -21,7 +21,7 @@ import {
   rayFrameHit,
   simulateInk,
 } from "../src/shared/splatoon-sim.ts";
-import { SHOT_RATE_PER_SEC, SplatoonGame, inkRegenPerSec } from "../src/shared/splatoon-game.ts";
+import { FIST_STALE_MS, SHOT_RATE_PER_SEC, SplatoonGame, inkRegenPerSec } from "../src/shared/splatoon-game.ts";
 import { handShape } from "../src/shared/hand-math.ts";
 import { centered, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SPLATOON_PATH, SPLATOON_PROTOCOL_VERSION } from "../src/shared/splatoon-protocol.ts";
@@ -268,6 +268,33 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const f3 = g.inkOf("p1", t2 + 1000);
   check("グーをやめると元の速さに戻る", near(f3 - f2, 0.5 / g.config.inkFullSec, 0.01), (f3 - f2).toFixed(3));
   check("グーでも満タンは超えない", g.inkOf("p1", t2 + 60000) === 1);
+  // グーの申告は pose が止まると FIST_STALE_MS で失効する（外部レビューの反例: 一度 true を送って黙るクライアント）
+  {
+    const gf = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+    gf.join("f1", "F", 0);
+    gf.start(0);
+    gf.tick(1);
+    gf.updatePose("f1", [0, 0.1, 1], 2);
+    for (let i = 0; i < 30; i++) gf.shoot("f1", [0, 0, 1], [0, 0, -5], 0.09, 100 + i * 200);
+    const tEmpty = 100 + 29 * 200;
+    const base = gf.inkOf("f1", tEmpty + 1000); // 回復の遅延（1s）が明けた時点
+    gf.updatePose("f1", [0, 0.1, 1], tEmpty + 1000, true); // ここで最後の pose（グー）
+    const after3 = gf.inkOf("f1", tEmpty + 4000); // 3 秒後: 最初の 1 秒だけ速く、残り 2 秒は通常
+    const expect = base + 1 * inkRegenPerSec(gf.config, true) + 2 * inkRegenPerSec(gf.config, false);
+    check(`pose が止まると ${FIST_STALE_MS}ms でグーが失効し通常速度に戻る（境界をまたぐ区間は分けて積分）`, near(after3, Math.min(1, expect), 0.01), `${after3.toFixed(3)} vs ${expect.toFixed(3)}`);
+    const gf2 = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+    gf2.join("f2", "F", 0);
+    gf2.start(0);
+    gf2.tick(1);
+    gf2.updatePose("f2", [0, 0.1, 1], 2);
+    // 45 発撃って残量 0.1 にしてから（満タンで頭打ちにならないように）、1 秒間 15Hz でグーを送り続ける
+    for (let i = 0; i < 45; i++) gf2.shoot("f2", [0, 0, 1], [0, 0, -5], 0.09, 100 + i * 200);
+    const tEmpty2 = 100 + 44 * 200;
+    const b2 = gf2.inkOf("f2", tEmpty2 + 1000);
+    for (let t = tEmpty2 + 1000; t <= tEmpty2 + 2000; t += 66) gf2.updatePose("f2", [0, 0.1, 1], t, true);
+    const a2 = gf2.inkOf("f2", tEmpty2 + 2000);
+    check("pose を送り続けていれば失効しない（1 秒ずっと速い）", b2 < 0.2 && near(a2 - b2, 1 * inkRegenPerSec(gf2.config, true), 0.02), `${b2.toFixed(3)} → ${a2.toFixed(3)}`);
+  }
   // コートを広げても奥から撃てる（発射位置の上限はコートの対角 + 1m）
   const wide = new SplatoonGame({ matchSec: 300, floorDepth: 8, waitSec: 0 });
   wide.join("w1", "W", 0);
@@ -405,6 +432,27 @@ try {
   const rejSolo = await solo.waitFor((m) => m.type === "rejected");
   check("プレイヤーがいない room の start は rejected: no players", rejSolo && /no players/.test(rejSolo.reason));
   solo.ws.close();
+  // 試合 → 結果 → 練習の一周（サーバー経由。各境界で格子付きの state が配られる）。matchSec の下限 10 秒
+  {
+    const cyc = connect({ ...cfg, room: "cycle", matchSec: "10", waitSec: "0" }, "Cyc");
+    await cyc.waitFor((m) => m.type === "welcome");
+    const cycOv = connect({ ...cfg, room: "cycle", matchSec: "10", waitSec: "0", role: "overview" });
+    await cycOv.waitFor((m) => m.type === "welcome");
+    cyc.send({ type: "pose", pos: [0, 0.1, 1], quat: [0, 0, 0, 1], tracking: true });
+    await sleep(50);
+    cyc.send({ type: "shot", pos: [0, 0, 1], vel: [0, -2, -4.5], radius: 0.09 });
+    await cyc.waitFor((m) => m.type === "shot");
+    cycOv.send({ type: "start" });
+    const cStart = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "start", 2000);
+    check("一周: start（格子付き・練習の得点は 0）", cStart && cStart.state.grids && (cStart.state.scores[cStart.state.players[0].id] ?? 0) === 0);
+    const cResult = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "result", 13000);
+    check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && typeof cResult.state.phaseEndsAt === "number");
+    const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 10000);
+    check("一周: 結果表示のあと練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
+    check("一周: 俯瞰画面にも同じ event が届く", cycOv.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice"));
+    cyc.ws.close();
+    cycOv.ws.close();
+  }
   // 役割別の上限: プレイヤー 8 人 / 俯瞰 2 台（room-server の canJoin）
   const full = "full";
   const fullPlayers = Array.from({ length: 8 }, (_, i) => connect({ ...cfg, room: full }, `F${i}`));

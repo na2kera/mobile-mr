@@ -76,6 +76,11 @@ export const SHOT_RATE_PER_SEC = 9;
 export const MAX_SHOT_DIST_M = 6;
 /** 発射位置は直近の頭の位置からこの距離 [m] 以内（腕の長さ + 手トラッキングの誤差） */
 export const MAX_SHOT_FROM_HEAD_M = 1.2;
+/**
+ * グー（fist）の申告が有効な時間 [ms]。pose（15Hz）が止まったら（タブ停止・通信停滞・一度だけ true を送る
+ * クライアント）この時間で通常の回復速度に戻す（外部レビュー指摘: 申告が無期限に効くと高速回復が続く）
+ */
+export const FIST_STALE_MS = 1000;
 
 export class SplatoonGame {
   readonly config: FieldConfig;
@@ -91,8 +96,8 @@ export class SplatoonGame {
   private readonly shotTimes = new Map<string, number[]>();
   /** 直近の頭の位置（発射位置の検証用） */
   private readonly headPos = new Map<string, V3>();
-  /** インク残量（0..1）・最後に撃った時刻（回復の遅延用）・グーにしているか（回復の速さ） */
-  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number; fist: boolean }>();
+  /** インク残量（0..1）・最後に撃った時刻（回復の遅延用）・グーにしているか（回復の速さ）とその申告時刻 */
+  private readonly inkState = new Map<string, { ink: number; updatedMs: number; lastShotMs: number; fist: boolean; fistUpdatedMs: number }>();
   /** この試合で一度でも使った色（退出者の塗りを新しい参加者が引き継がないように、未使用の色を優先する） */
   private readonly usedColors = new Set<InkColor>();
   /** 直近の join で色を再利用してその色のセルを消したか（サーバーはこれを見て格子を配り直す） */
@@ -167,7 +172,7 @@ export class SplatoonGame {
     const color = this.pickColor();
     this.usedColors.add(color);
     this.players.set(id, { id, name, color });
-    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity, fist: false });
+    this.inkState.set(id, { ink: 1, updatedMs: now, lastShotMs: -Infinity, fist: false, fistUpdatedMs: -Infinity });
     // 入室しても試合は始めない（練習のまま）。開始は俯瞰画面の start()
     return [];
   }
@@ -186,21 +191,28 @@ export class SplatoonGame {
     this.refreshInk(id, now);
     this.headPos.set(id, pos);
     const st = this.inkState.get(id);
-    if (st) st.fist = fist;
+    if (st) {
+      st.fist = fist;
+      st.fistUpdatedMs = now;
+    }
   }
 
   /**
    * 経過時間ぶんの回復を反映する（撃つ前・snapshot 前に呼ぶ）。撃った直後 inkRegenDelaySec は回復しない。
-   * 回復の速さはグーの間 1/inkFistFullSec、それ以外 1/inkFullSec（クライアントの予測も同じ式: inkRegenPerSec）
+   * 回復の速さはグーの間 1/inkFistFullSec、それ以外 1/inkFullSec（クライアントの予測も同じ式: inkRegenPerSec）。
+   * グーの申告は FIST_STALE_MS で失効するので、区間がその境界をまたぐときは前後で速さを分けて積分する
    */
   private refreshInk(id: string, now: number) {
     const st = this.inkState.get(id);
     if (!st) return;
     const regenFrom = Math.max(st.updatedMs, st.lastShotMs + this.config.inkRegenDelaySec * 1000);
-    const dt = Math.max(0, (now - regenFrom) / 1000);
     st.updatedMs = now;
-    if (dt <= 0) return;
-    st.ink = Math.min(1, st.ink + dt * inkRegenPerSec(this.config, st.fist));
+    if (now <= regenFrom) return;
+    const fistUntil = st.fist ? st.fistUpdatedMs + FIST_STALE_MS : -Infinity;
+    const fastEnd = Math.min(now, Math.max(regenFrom, fistUntil));
+    const fastSec = Math.max(0, (fastEnd - regenFrom) / 1000);
+    const slowSec = Math.max(0, (now - Math.max(regenFrom, fastEnd)) / 1000);
+    st.ink = Math.min(1, st.ink + fastSec * inkRegenPerSec(this.config, true) + slowSec * inkRegenPerSec(this.config, false));
   }
 
   /** いまのインク残量（0..1）。存在しない id は 0 */

@@ -250,6 +250,8 @@ let auth: { state: GameSnapshot; recvMs: number } | null = null;
 let lastEventKey = "";
 let startsSent = 0;
 let lastRejectReason = "";
+/** 「対戦開始」を送ってから state / rejected / 切断のいずれかが来るまで（二重送信の防止） */
+let startPending = false;
 
 function colorOf(id: string): InkColor | null {
   return auth?.state.players.find((p) => p.id === id)?.color ?? null;
@@ -268,6 +270,10 @@ function localTimeOf(serverT: number, refServerT: number, refLocalMs: number): n
 function onState(state: GameSnapshot) {
   const now = performance.now();
   auth = { state, recvMs: now };
+  if (state.phase === "waiting" || state.phase === "play") {
+    startPending = false;
+    lastRejectReason = "";
+  }
   const ev = state.event;
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
@@ -301,7 +307,10 @@ function connect() {
     {
       onStatus: (status) => {
         netStatus = status;
-        if (status !== "open") joined = false;
+        if (status !== "open") {
+          joined = false;
+          startPending = false;
+        }
         renderPanel();
       },
       onError: (reason) => {
@@ -335,6 +344,7 @@ function connect() {
       onShot: (shot, serverT) => addShot(shot, serverT, performance.now()),
       onRejected: (reason) => {
         lastRejectReason = reason;
+        startPending = false;
         console.log(`[overview] start rejected by server: ${reason}`);
         renderPanel();
       },
@@ -403,9 +413,10 @@ function gauge(c: number): string {
 }
 
 startButton.addEventListener("click", () => {
-  if (!client) return;
+  if (!client || startPending) return;
   if (client.sendStart()) {
     startsSent++;
+    startPending = true;
     lastRejectReason = "";
     console.log("[overview] start sent");
   }
@@ -427,20 +438,29 @@ function renderPanel() {
     const w = s.winnerNames ?? [];
     phaseText = w.length === 0 ? "結果: だれも塗れず…" : `結果: ${w.join("・")} の勝ち！`;
   }
-  const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0;
+  const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0 && !startPending;
   const total = Math.max(1, s?.totalCells ?? 1);
   const ranking = s
     ? [...s.players]
         .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
         .map((p) => ({ p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id) }))
     : [];
-  const key = JSON.stringify([phaseText, canStart, ranking, netStatus, lastRejectReason, peers.size]);
+  const key = JSON.stringify([phaseText, canStart, startPending, ranking, netStatus, lastRejectReason, peers.size]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   startButton.disabled = !canStart;
-  startButton.textContent =
-    s?.phase === "play" ? "対戦中" : s?.phase === "waiting" ? "カウントダウン中" : s && s.players.length === 0 ? "プレイヤー待ち" : s?.phase === "result" ? "次の対戦を開始" : "対戦開始";
+  startButton.textContent = startPending
+    ? "送信中…"
+    : s?.phase === "play"
+      ? "対戦中"
+      : s?.phase === "waiting"
+        ? "カウントダウン中"
+        : s && s.players.length === 0
+          ? "プレイヤー待ち"
+          : s?.phase === "result"
+            ? "次の対戦を開始"
+            : "対戦開始";
   playersEl.replaceChildren(
     ...ranking.map(({ p, pct, ink, win }) => {
       const li = document.createElement("li");

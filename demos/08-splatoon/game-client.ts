@@ -95,7 +95,9 @@ export function connectGame(
         events.onState(msg.state);
         break;
       case "error":
-        disposed = true;
+        // バージョン・設定の不一致は再接続しても同じ結果なのでループを止める。
+        // 満員（役割別の上限）は、半切断した古い接続が heartbeat で消えれば入れるので再接続を続ける
+        if (!/満員|台まで/.test(msg.reason)) disposed = true;
         events.onError(msg.reason);
         break;
     }
