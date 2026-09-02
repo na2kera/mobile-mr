@@ -1,6 +1,6 @@
-// MediaPipe のモデル（hand_landmarker.task, 約 7.8MB）を public/models/ に取得する。
-// `npm run fetch:models` で実行する。バイナリなので git には入れない（.gitignore 済み）。
-// 取得していなくてもデモは動く（demos/05・06 は公式 URL にフォールバックする）が、
+// MediaPipe のモデル（hand_landmarker.task 約 7.8MB / pose_landmarker_lite.task 約 5.8MB）を
+// public/models/ に取得する。`npm run fetch:models` で実行する。バイナリなので git には入れない（.gitignore 済み）。
+// 取得していなくてもデモは動く（各デモは公式 URL にフォールバックする）が、
 // ローカルにあれば iPhone 側が Google のストレージに出て行かずに済み、
 // 電波の弱い場所やオフラインの LAN でも確認できる
 import { mkdir, stat, writeFile } from "node:fs/promises";
@@ -10,6 +10,12 @@ const MODELS = [
   {
     file: "hand_landmarker.task",
     url: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+  },
+  {
+    // Phase 9（09-person-id）の全身検出。lite は 3 種（lite / full / heavy）で最軽量。
+    // 相手の体は 2〜3m 先で画面の大部分を占めるので lite で足りる想定（実機で足りなければ full に）
+    file: "pose_landmarker_lite.task",
+    url: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   },
 ];
 

@@ -21,8 +21,9 @@
 | [07. Surface Mapping](./demos/07-surface-mapping/) | 壁のマーカーを原点に「Surface」を定義し、指差しでUV座標を指してペイント。Surface ID + UVで全員が同じ場所を見る | スマートフォン1台以上、壁に貼ったマーカー |
 | [08. MR Splatoon](./demos/08-splatoon/) | 四方の壁と床の箱型コートに、パーの間、手からインクを連射。全員が自分の色で塗り合う個人戦 | スマートフォン1台以上、壁に貼ったマーカー |
 | [ex8-1. ゴッドハンド](./demos/ex8-1-god-hand/) | 番外編: パーの手を突き出すと巨大な金色の手が実体化し、飛んでくるシュートをキャッチする1人用ミニゲーム（通信なし） | スマートフォン1台、壁に貼ったマーカー |
+| [09. Person ID](./demos/09-person-id/) | カメラに映っている人をMediaPipe Poseで検出し、ネットワーク上のPlayerの位置と照合して「この人 = Player B」と名札を付ける（顔認識なし） | スマートフォン2台、壁に貼ったマーカー |
 
-Phase 1〜8は完了しています（MRバレーボール・Surface Mapping・MRスプラトゥーンはiPhone実機で確認済み。Phase 6-2のMRダーツのみ実機未確認）。次は現実の人物との対応、SDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
+Phase 1〜8は完了しています（MRバレーボール・Surface Mapping・MRスプラトゥーンはiPhone実機で確認済み。Phase 6-2のMRダーツのみ実機未確認）。Phase 9（現実の人物との対応）はPCでの確認まで済んでいて、実機は未確認です。次はその実機確認とSDK化へ進む予定です。詳しい構想とロードマップは[docs/CONCEPT.md](./docs/CONCEPT.md)を参照してください。
 
 ## 技術構成
 
@@ -30,7 +31,7 @@ Phase 1〜8は完了しています（MRバレーボール・Surface Mapping・M
 - Three.js / three-stdlib
 - DeviceOrientation API / MediaDevices API
 - js-aruco2（マーカー検出）
-- MediaPipe Tasks Vision（手の追跡）
+- MediaPipe Tasks Vision（手の追跡、全身の姿勢検出）
 - WebSocket（Room内の姿勢共有）
 
 ReactなどのUIフレームワークやWebXRを前提にせず、iPhoneのSafariを中心に検証しています。
@@ -72,7 +73,7 @@ Viteが表示したURLをブラウザで開きます。
 
 ## デモ別の追加準備
 
-### マーカーを使うデモ（03 / 04 / 06 / 06-2 / 07 / 08）
+### マーカーを使うデモ（03 / 04 / 06 / 06-2 / 07 / 08 / 09）
 
 1. 開発サーバーを起動します。
 2. `https://localhost:5173/demos/03-marker-anchor/marker.html` を開き、マーカーを倍率100%で印刷します。
@@ -81,15 +82,15 @@ Viteが表示したURLをブラウザで開きます。
 
 04で同じRoomに入る端末は、同じURLを開いてください。既定のRoom名は `demo` です。別のRoomを使う場合は、両端末に同じクエリ（例: `?room=my-room`）を指定します。中継用WebSocketサーバーはViteと同じプロセスで起動するため、別途サーバーを立ち上げる必要はありません。
 
-### Hand Interaction（05）/ MR Volleyball（06）/ MR Darts（06-2）/ Surface Mapping（07）/ MR Splatoon（08）
+### Hand Interaction（05）/ MR Volleyball（06）/ MR Darts（06-2）/ Surface Mapping（07）/ MR Splatoon（08）/ Person ID（09）
 
-MediaPipeのWasmは依存パッケージから配信されます。手の検出モデルは未取得でも公式URLへフォールバックしますが、次のコマンドでローカルへ取得しておくと、実機から外部サイトへアクセスせずに試せます。
+MediaPipeのWasmは依存パッケージから配信されます。検出モデルは未取得でも公式URLへフォールバックしますが、次のコマンドでローカルへ取得しておくと、実機から外部サイトへアクセスせずに試せます。
 
 ```bash
 npm run fetch:models
 ```
 
-モデルファイルは約7.8MBで、`public/models/hand_landmarker.task` に保存されます（Git管理外）。
+モデルファイルは手が約7.8MB（`public/models/hand_landmarker.task`）、全身が約5.8MB（`public/models/pose_landmarker_lite.task`、09で使用）で、いずれもGit管理外です。
 
 ### MR Volleyball（06）
 
@@ -135,6 +136,15 @@ npm run fetch:models
 
 着弾・塗りの格子・得点はViteに同居するサーバー（`server/splatoon.ts`）が持ちます。フィールドの大きさ・重力（`?gravity=`、既定4）・試合時間はroom内で一致している必要があります。1 roomは8人まで。
 
+### Person ID（09）
+
+1. マーカーを壁に貼り、参加する全員が同じURLを開いて開始し、まず壁のマーカーを見ます（共通座標系の原点。表示名は `?name=`）。参加順に色が割り当てられ、相手の頭の位置に半透明のアバターと名札が出ます（04と同じ仕組み）。
+2. 相手の方を向くと、カメラに映った相手の体をMediaPipe Poseで検出して骨格を重ね、**検出した頭の位置とアバターの位置が「視線方向のずれ12°以内（`?matchAngle=`）かつ距離のずれ1.0m以内（`?matchDepth=`）」なら「この人 = その相手」**と判定して、骨格に相手の名前と色の名札を付けます。顔認識は使いません。対応が取れない人は「？」のままです。アバターの頭と検出した頭は線で結ばれ、ずれの大きさが見えます。
+3. 判定した結果（誰をどこで見たか）はサーバー経由で相手に届き、相手の視界には「あなたから見えています（ずれ 0.2m）」と出ます。自分の体はゴーグル装着時に映らないので、確認は2台で互いを見合って行います。1台だけなら映った人は「？」のまま（検出の確認になります）。
+4. 名札が付かないときはHUDの `tracks=`（角度・距離のずれ）を見て許容を広げるか、`?bodyScale=`（05の `handScale` と同じ実寸の較正。MediaPipeの申告が実際より小さければ1より大きく）で深度を合わせます。同時に検出する人数は `?poses=`（既定2）です。
+
+Player一覧と姿勢の中継はViteに同居するサーバー（`server/person.ts`）が持ちます。人物との対応づけは各端末が自分のカメラ座標系で行い、サーバーは判断しません。マーカーの設定はroom内で一致している必要があります。1 roomは8人まで。
+
 ## コマンド
 
 | コマンド | 内容 |
@@ -154,15 +164,17 @@ npm run fetch:models
 | `npm run check:splatoon` | MR Splatoonのブラウザ経路（マーカー→field変換・グー→パーの発射・着弾と得点・2ウィンドウ）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
 | `npm run test:godhand` | ゴッドハンドのゲーム進行（予告→発射→キャッチ/失点・クールダウン・リザルト）の回帰テスト |
 | `npm run check:godhand` | ゴッドハンドのブラウザ経路（突き出し検出→実体化→キャッチ）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
-| `npm run fetch:models` | Hand Landmarkerモデルをローカルへ取得 |
+| `npm run test:person` | Person IDの体の3D化・人物とPlayerの対応づけ（ヒステリシス込み）・サーバーの回帰テスト |
+| `npm run check:person` | Person IDのブラウザ経路（マーカー→共通座標・合成の体の3D化→対応づけ→seenの中継・本物のPoseLandmarkerの初期化）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
+| `npm run fetch:models` | Hand Landmarker / Pose Landmarkerモデルをローカルへ取得 |
 
 ## ディレクトリ構成
 
 ```text
 mobile-mr/
 ├── demos/                  # フェーズごとの独立したデモページ
-├── src/shared/             # デモ間で共有する処理（マーカー、手トラッキング、パススルー、開始フロー、通信プロトコル、バレーボール／ダーツ／スプラトゥーンの物理・ルール、Surface/ペイント）
-├── server/                 # Viteに同居するWebSocketサーバー（04の中継、06/06-2/08の対戦サーバー、07のペイントサーバー、共通部分の room-server）
+├── src/shared/             # デモ間で共有する処理（マーカー、手／全身トラッキング、パススルー、開始フロー、通信プロトコル、バレーボール／ダーツ／スプラトゥーンの物理・ルール、Surface/ペイント、人物の対応づけ）
+├── server/                 # Viteに同居するWebSocketサーバー（04の中継、06/06-2/08の対戦サーバー、07のペイントサーバー、09のPlayer中継、共通部分の room-server）
 ├── scripts/                # 回帰テスト、モデル取得
 ├── public/                 # 静的アセット
 ├── docs/CONCEPT.md         # 構想、技術方針、ロードマップ

@@ -371,3 +371,31 @@
 - **どう対処したか**: `HandSlot.shape / shapeSinceMs` を追加（`handShape()` は `hand-math.ts`）。合成の手（`fake-hands.ts` の "fist" / "open"）で Node テストとヘッドレスの両方を回した。グーが実機で安定して取れるかは未確認
 - **SDK ならどう解決するか（案）**: `@mobile-mr/hands` にジェスチャ層（`onShape(shape, since)` / `onRelease` / `onSwing`）を持たせ、ヒステリシスと時刻をそこで扱う。06 の hit・06-2 の throw・07 の point・08 の fist → open がすべてこの層に載る
 - **関連**: `src/shared/hand-slots.ts`、`src/shared/hand-math.ts`（isFistPose / isOpenPose / handShape）、`demos/08-splatoon/main.ts`（updateCharge）
+
+## [2026-09-02] Phase 9 / 09-person-id: HandLandmarker と PoseLandmarker で同じ「回す手順」が 2 本目になり、骨格描画も 3 本目のパターンになった
+
+- **何が苦しかったか**: 人物検出に PoseLandmarker を足そうとしたら、05 の `hand-tracker.ts` にある「wasm を Vite アセットで配信・モデルをローカル → 公式 URL の順に fetch・GPU で初期化できなければ CPU・同じフレームを二度渡さない・VIDEO モードの単調増加タイムスタンプ・CPU のときだけ縮小」の全部が姿勢でもそのまま必要だった。MediaPipe 側の差は `HandLandmarker.createFromOptions` と `PoseLandmarker.createFromOptions` のオプション名（numHands / numPoses、minHandDetectionConfidence / minPoseDetectionConfidence）だけ。骨格の描画（InstancedMesh + LineSegments + 半透明 + depthTest オフ）も点数と接続表が違うだけで同じ
+- **どう対処したか**: 共通部分を `src/shared/landmarker-tracker.ts`（`create` コールバックでタスク固有のオプションを足す）と `src/shared/skeleton-view.ts`（点数と接続を引数に）へ抽出し、`hand-tracker.ts` / `hand-view.ts` は API を変えずに薄い皮にした（06〜08・ex8-1 は無変更で通る。`check:*` で回帰確認）
+- **SDK ならどう解決するか（案）**: `@mobile-mr/tracking` は「Landmarker を video に対して回す」ランナーを 1 つ持ち、Hand / Pose / Face はそのアダプタにする。結果の型（正規化 2D + 実寸 3D + visibility）も共通の `Landmarks` にそろえる（MediaPipe は手の visibility が 0 固定で、体だけ意味を持つという非対称があり、利用側が `visibility ?? 1` で吸収している）
+- **関連**: `src/shared/landmarker-tracker.ts`、`src/shared/skeleton-view.ts`、`src/shared/pose-tracker.ts`、PAIN_POINTS「MediaPipe の wasm 配信がバンドラ前提になっておらず…」（Phase 5）
+
+## [2026-09-02] Phase 9 / 09-person-id: 人物の「カメラからの距離」も MediaPipe は返さず、手と同じ最小二乗に頼る。体は手より「見えていない点」が多い
+
+- **何が苦しかったか**: PoseLandmarker も手と同じく「画像上の位置（正規化 2D）」と「腰の中点を原点にした実寸 3D（worldLandmarks）」を返すだけで、カメラからの絶対距離は返さない。05 の `solveHandPlacement`（実寸の形を画像上の見え方に当てはめて並進を解く）を 33 点に流用できたが、体は画面外・遮蔽で座標が当てにならない点が手より多く、`visibility` で除いてから解かないと深度が暴れる。実寸申告の精度も未知（手は実際の約半分だった。PAIN_POINTS Phase 5）で、体の `?bodyScale=` は実機で決めるしかない
+- **どう対処したか**: `src/shared/body-math.ts` で visibility ≥ 0.5 の点だけを最小二乗に使う（6 点未満は捨てる）。頭の比較点は「両目の中点」（見えなければ両耳 → 鼻）。深度の粗さは対応づけ側で「角度は 12°、距離は 1.0m」と非対称な許容で吸収した（画像上の方向は正確、深度は粗い）。実寸は `?bodyScale=` で較正（未較正）
+- **SDK ならどう解決するか（案）**: 人物・手の 3D 位置は「値 + 不確かさ（視線方向に細く、深度方向に太い楕円）」で返し、対応づけやゲームの当たり判定はその不確かさで重み付けする（PAIN_POINTS Phase 6「当たり判定の誤差は視線方向に偏るのに、手の座標に不確かさが付いてこない」の再発）。実寸のスケール較正はトラッカーの設定として持つ
+- **関連**: `src/shared/body-math.ts` の `solveBodyPlacement` / `bodyHeadPoint`、`src/shared/person-match.ts` の `matchPersons`
+
+## [2026-09-02] Phase 9 / 09-person-id: 対応づけの「正解」がそもそも 2 つの推定のずれ（相手の自己申告位置 vs こちらの検出）で、どちらが悪いか分からない
+
+- **何が苦しかったか**: 「この人 = Player B」の判定は、B が申告してくる頭の位置（B のマーカー検出 + 3DoF。マーカーを失っていれば古い位置のまま）と、こちらのカメラで検出した B の頭（深度は粗い最小二乗）の比較になる。どちらも誤差を持ち、さらに B の申告位置は「スマホ（カメラ）」でこちらの検出は「目」なので、ゴーグル込みで 5〜10cm の系統誤差がある。名札が「？」のとき、B の位置が古いのか、深度較正が悪いのか、許容が狭いのかを切り分ける手段が HUD の角度・距離のずれしか無い
+- **どう対処したか**: 許容（`?matchAngle=` / `?matchDepth=`）を広めに取り、3 回連続で最良のときだけ切り替え、対応が取れなくなっても 1.5s は名札を保持するヒステリシス（`PersonTracks`）で「ちらつき」を抑えた。切り分け用に、対応づけた相手の端末へ「どこで見えたか（seen）」を送り返し、相手側に「あなたから見えています（ずれ 0.2m）」と出す。ネットワーク上の頭（アバター）と検出した頭を線で結んで、ずれを目で見えるようにした。相手の `tracking=false`（マーカーロスト中）は今は無視している
+- **SDK ならどう解決するか（案）**: Player の pose に「鮮度と不確かさ」（最後にマーカーで補正した時刻・推定誤差）を必ず載せ、対応づけの許容をそれに応じて広げる。逆方向の情報（A が B を見た位置）は B の位置推定の補正材料になる（複数端末の相互観測で位置を合わせる = 6DoF の穴を埋める道）。カメラと目の系統オフセットは「ゴーグルプロファイル」として `@mobile-mr/stereo` が持つ
+- **関連**: `src/shared/person-match.ts`、`server/person.ts`（seen の中継）、`demos/09-person-id/main.ts` の `onPeerPose`、PAIN_POINTS Phase 6「見上げるとマーカーを失う競技で 3DoF の限界がそのまま実害になった」
+
+## [2026-09-02] Phase 9 / 09-person-id: 人物検出も PC で再現できず「合成の体」を作った。2 ウィンドウで「相手が自分の前に立つ」幾何は camFov で無理やり作った
+
+- **何が苦しかったか**: 05 の手と同じで、PoseLandmarker はフェイクカメラ（チェッカーボード）に人を返さないので、検出後の経路（3D 化 → 追跡 → 対応づけ → seen の送信 → 相手側の表示）は合成の体（`fake-body.ts`）でしか PC 検証できない（2 回目なので記録）。さらにヘッドレスの 2 ウィンドウは同じフェイクカメラでマーカーを同じ大きさに見るため、両者ともマーカーから同じ距離に立ってしまい「相手が自分の 1〜2m 前に居る」幾何が作れない。フェイクカメラのマーカーの大きさ（`fakeMarkerPx`）は 60 未満で検出できず、`fakeShift` は最大 ±200px で 0.25m しか動かない
+- **どう対処したか**: 片方のウィンドウに `?camFov=25`（実カメラの FOV の申告値）を入れて焦点距離を変え、同じ 80px のマーカーを「遠く（約 1.8m）」と解釈させた。表示 FOV は `fov=70` 固定なのでそちらは変わらない。合成の体は「相手のアバターの頭の位置 + 0.15m」に立たせ、1.5m 横にもう 1 人置いて「？」の経路も通す。本物の PoseLandmarker はヘッドレスで初期化まで確認（GPU デリゲートが SwiftShader で通った）
+- **SDK ならどう解決するか（案）**: フェイクカメラ / 合成トラッカーを SDK の標準デバッグ機能にし、「マーカー座標系でカメラをこの姿勢に置く」「この位置に人 / 手を置く」を直接指定できるようにする（今は画像上のマーカーの位置と大きさから逆算するしかない）
+- **関連**: `src/shared/fake-body.ts`、`scripts/headless-person.mjs`、PAIN_POINTS Phase 5「手トラッキングは PC で再現できず…」
