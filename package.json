@@ -19,6 +19,8 @@
     "check:splatoon": "node scripts/headless-splatoon.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
+    "test:person": "node scripts/test-person.mjs",
+    "check:person": "node scripts/headless-person.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {
