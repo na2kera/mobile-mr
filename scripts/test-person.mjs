@@ -15,7 +15,7 @@ import {
   scaleBody,
   solveBodyPlacement,
 } from "../src/shared/body-math.ts";
-import { PersonTracks, angleBetween, matchPersons } from "../src/shared/person-match.ts";
+import { PersonTracks, angleBetween, assignOptimal, matchPersons, nearestCandidate } from "../src/shared/person-match.ts";
 import { eyesAboveHip, fakePoseResult, syntheticBodyShape } from "../src/shared/fake-body.ts";
 import { MAX_PLAYERS, PERSON_PATH, PERSON_PROTOCOL_VERSION } from "../src/shared/person-protocol.ts";
 
@@ -194,10 +194,38 @@ const deg = (d) => (d * Math.PI) / 180;
   check("検出が途切れた追跡は lostMs で消える", tracks.live(2300).length === 1 && tracks.live(2300)[0].key === 2 && tracks.tracks.length === 1);
   tracks.update(3000);
   check("全部消える", tracks.live(3000).length === 0 && tracks.tracks.length === 0);
-  // maxTracks
+  // maxTracks と退避
   const t3 = new PersonTracks({ maxTracks: 1, smooth: 1, lostMs: 500, trackDistM: 0.5, idHoldMs: 1000, idStreak: 1 });
   t3.apply([det(0, -2), det(1.5, -2), det(-1.5, -2)], 0);
-  check("maxTracks を超える検出は捨てる", t3.live(0).length === 1);
+  check("maxTracks を超える検出は捨てる", t3.live(0).length === 1 && t3.live(0)[0].key === 1);
+  t3.apply([det(1.5, -2)], 66);
+  check("枠が保持中の追跡で埋まっていたら退避して、いま映っている人を優先する", t3.live(66).length === 1 && t3.live(66)[0].key === 2 && near(t3.live(66)[0].head.x, 1.5) && t3.tracks.length === 1);
+  t3.apply([det(1.5, -2), det(-1.5, -2)], 132);
+  check("全部が今回更新された追跡なら退避しない", t3.live(132).length === 1 && t3.live(132)[0].key === 2);
+  // 追跡の継続も交差で取りこぼさない: 前回 x=0 / 0.4、今回 x=-0.4 / 0.1（閾値 0.5）。貪欲なら 0→0.1 だけ
+  const t4 = new PersonTracks({ maxTracks: 2, smooth: 1, lostMs: 500, trackDistM: 0.5, idHoldMs: 1000, idStreak: 1 });
+  t4.apply([det(0, -2), det(0.4, -2)], 0);
+  const [k1, k2] = t4.live(0).map((t) => t.key);
+  t4.apply([det(-0.4, -2), det(0.1, -2)], 66);
+  const after = t4.live(66);
+  check("交差する 2 人の継続: 両方とも同じ追跡が続く（0→-0.4, 0.4→0.1）", after.length === 2 && near(after.find((t) => t.key === k1)?.head.x ?? NaN, -0.4, 1e-9) && near(after.find((t) => t.key === k2)?.head.x ?? NaN, 0.1, 1e-9), JSON.stringify(after.map((t) => [t.key, t.head.x])));
+  // 最寄り候補（許容外でも診断用に残る）
+  const t5 = new PersonTracks({ maxTracks: 2, smooth: 1, lostMs: 500, trackDistM: 0.5, idHoldMs: 1000, idStreak: 1 });
+  t5.apply([det(0, -2)], 0);
+  t5.match([{ id: "p2", pos: { x: 1, y: 0.75, z: -2 } }], 0, opts);
+  const t5a = t5.live(0)[0];
+  const expectAngle = angleBetween({ x: 0, y: 0.75, z: -2 }, { x: 1, y: 0.75, z: -2 });
+  check("許容外なら id は付かないが nearest にずれが残る（約 25°）", t5a.id === null && t5a.nearest?.id === "p2" && near(t5a.nearest.angleRad, expectAngle, 1e-9) && expectAngle > opts.angleTolRad, `${t5a.nearest?.angleRad}`);
+  check("nearestCandidate: 候補なしは null", nearestCandidate({ x: 0, y: 0, z: -1 }, []) === null);
+  // assignOptimal 単体: 同数ならコスト最小、打ち切りで見落とさない
+  const a1 = assignOptimal([
+    [{ ukey: "x", cost: 1 }, { ukey: "y", cost: 5 }],
+    [{ ukey: "x", cost: 2 }],
+  ]);
+  check("assignOptimal: 数が最大の割当（0→y, 1→x）を選ぶ", a1[0] === 1 && a1[1] === 0);
+  const a3 = assignOptimal([[{ ukey: "x", cost: -0.2 }], [{ ukey: "x", cost: 0.1 }, { ukey: "y", cost: 0.9 }]]);
+  check("assignOptimal: 負のコスト（keepBonus）でも数が最大の割当（0→x, 1→y）", a3[0] === 0 && a3[1] === 1);
+  check("assignOptimal: 候補なし", assignOptimal([[], []]).every((v) => v === null));
 }
 
 // ================= 3. server =================

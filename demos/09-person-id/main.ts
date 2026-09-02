@@ -598,7 +598,9 @@ function applyPoseResult(result: PoseResultLike, now: number) {
     });
   }
   tracks.apply(detections, now);
-  tracks.match(peerCandidates(now), now, matchOpts);
+  // 厳密モードでは自分がマーカーロスト中（位置が凍結）は照合しない（候補なし = 保持と期限切れだけ進む）
+  const localTracking = markerAnchor?.isTracking(now, MARKER_LOST_MS) ?? false;
+  tracks.match(STRICT_TRACKING && !localTracking ? [] : peerCandidates(now), now, matchOpts);
 }
 
 // ---- 通信 ----
@@ -685,7 +687,9 @@ function describeTrack(t: ReturnType<PersonTracks["live"]>[number]): string {
     const stale = peer.tracking ? "" : "・相手はマーカーを見失い中";
     return `${peer.info.name}（${peer.info.id}・${playerColorName(peer.info.color)}） ずれ ${THREE.MathUtils.radToDeg(t.lastMatch.angleRad).toFixed(1)}° / ${t.lastMatch.depthDiffM.toFixed(2)}m${stale}`;
   }
-  return `？ 不明（${t.depth.toFixed(1)}m 先）`;
+  const n = t.nearest ? peers.get(t.nearest.id) : undefined;
+  const hint = t.nearest && n ? `。最寄り ${n.info.name} まで ${THREE.MathUtils.radToDeg(t.nearest.angleRad).toFixed(0)}° / ${t.nearest.depthDiffM.toFixed(2)}m` : "";
+  return `？ 不明（${t.depth.toFixed(1)}m 先${hint}）`;
 }
 
 function updateMessages(now: number) {
@@ -777,7 +781,8 @@ function renderHud() {
           (t) =>
             `${t.id ?? "?"}:${t.depth.toFixed(2)}m` +
             (t.lastMatch ? `/${THREE.MathUtils.radToDeg(t.lastMatch.angleRad).toFixed(1)}deg/${t.lastMatch.depthDiffM.toFixed(2)}m` : "") +
-            `/vis${t.used}/res${t.residual.toFixed(3)}`,
+            `/vis${t.used}/res${t.residual.toFixed(3)}` +
+            (!t.lastMatch && t.nearest ? `/near=${t.nearest.id}@${THREE.MathUtils.radToDeg(t.nearest.angleRad).toFixed(1)}deg/${t.nearest.depthDiffM.toFixed(2)}m` : ""),
         )
         .join(",")}] infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
     `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${[...peers.values()].map((p) => `${p.info.id}${p.group.visible ? "" : "(hidden)"}`).join(",") || "-"} ws=${netStatus} sent=${posesSent} seenBy=${seenBy || "-"}`,

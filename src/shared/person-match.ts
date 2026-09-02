@@ -47,10 +47,50 @@ export function angleBetween(a: Vec3, b: Vec3): number {
   return Math.acos(Math.min(1, Math.max(-1, c)));
 }
 
+/** 行ごとの候補（同じ ukey の候補は全体で 1 回しか選べない） */
+export type AssignOption = { ukey: string; cost: number };
+
+/**
+ * 1 対 1 の割当を全探索で選ぶ: 「割り当てる行の数が最大」→「その中で総コストが最小」。
+ * 行 ≤ 4 × 候補 ≤ 8 程度を想定（対応づけ・追跡の継続の両方で使う。貪欲だと局所最小が
+ * 別の行の唯一の候補を奪って、交差する 2 人のどちらかを取りこぼす）。
+ * @returns 行ごとに選んだ候補の index（選ばなければ null）
+ */
+export function assignOptimal(options: readonly (readonly AssignOption[])[]): (number | null)[] {
+  const n = options.length;
+  let bestCount = -1;
+  let bestCost = Infinity;
+  let best: (number | null)[] = new Array(n).fill(null);
+  const chosen: (number | null)[] = new Array(n).fill(null);
+  const used = new Set<string>();
+  const search = (i: number, count: number, cost: number) => {
+    if (i === n) {
+      if (count > bestCount || (count === bestCount && cost < bestCost)) {
+        bestCount = count;
+        bestCost = cost;
+        best = [...chosen];
+      }
+      return;
+    }
+    // 残り全部を割り当てても現在の最良の数に届かないなら打ち切り（同数のときはコストで勝ち得るので続ける）
+    if (count + (n - i) < bestCount) return;
+    for (const [k, o] of options[i].entries()) {
+      if (used.has(o.ukey)) continue;
+      used.add(o.ukey);
+      chosen[i] = k;
+      search(i + 1, count + 1, cost + o.cost);
+      used.delete(o.ukey);
+    }
+    chosen[i] = null;
+    search(i + 1, count, cost);
+  };
+  search(0, 0, 0);
+  return best;
+}
+
 /**
  * 検出した人（key で識別）とピアを 1 対 1 で対応づける。
- * 許容内の組の中で「対応する組の数が最大」→「その中で総コストが最小」の割当を全探索で選ぶ
- * （検出 ≤ 4 人 × ピア ≤ 7 人なので探索は数百通り。貪欲だと局所最小が別の検出の唯一の候補を奪う）。
+ * 許容内の組の中で「対応する組の数が最大」→「その中で総コストが最小」の割当（assignOptimal）。
  * currentIds を渡すと、いま付いている id と同じ組のコストを keepBonus だけ下げる。
  * カメラの後ろにいるピア（角度が 90° を超える）は許容内に入らないので自然に除外される
  */
@@ -62,49 +102,39 @@ export function matchPersons<K>(
 ): Map<K, MatchResult> {
   const keepBonus = opts.keepBonus ?? 0.25;
   // 検出ごとの許容内の候補
-  const options: { result: MatchResult; effective: number }[][] = detected.map((d) => {
+  const options = detected.map((d) => {
     const dd = len(d.pos);
     const cur = currentIds?.get(d.key) ?? null;
-    const out: { result: MatchResult; effective: number }[] = [];
+    const out: (AssignOption & { result: MatchResult })[] = [];
     for (const p of peers) {
       const angleRad = angleBetween(d.pos, p.pos);
       const depthDiffM = Math.abs(dd - len(p.pos));
       if (angleRad > opts.angleTolRad || depthDiffM > opts.depthTolM) continue;
       const cost = angleRad / opts.angleTolRad + depthDiffM / opts.depthTolM;
-      out.push({ result: { id: p.id, angleRad, depthDiffM, cost }, effective: cost - (p.id === cur ? keepBonus : 0) });
+      out.push({ ukey: p.id, cost: cost - (p.id === cur ? keepBonus : 0), result: { id: p.id, angleRad, depthDiffM, cost } });
     }
     return out;
   });
-  let bestCount = -1;
-  let bestCost = Infinity;
-  let best: (MatchResult | null)[] = [];
-  const chosen: (MatchResult | null)[] = new Array(detected.length).fill(null);
-  const usedIds = new Set<string>();
-  const search = (i: number, count: number, cost: number) => {
-    if (i === detected.length) {
-      if (count > bestCount || (count === bestCount && cost < bestCost)) {
-        bestCount = count;
-        bestCost = cost;
-        best = [...chosen];
-      }
-      return;
-    }
-    // 残り全部が対応しても現在の最良に届かないなら打ち切り
-    if (count + (detected.length - i) < bestCount) return;
-    for (const o of options[i]) {
-      if (usedIds.has(o.result.id)) continue;
-      usedIds.add(o.result.id);
-      chosen[i] = o.result;
-      search(i + 1, count + 1, cost + o.effective);
-      usedIds.delete(o.result.id);
-    }
-    chosen[i] = null;
-    search(i + 1, count, cost);
-  };
-  search(0, 0, 0);
+  const chosen = assignOptimal(options);
   const out = new Map<K, MatchResult>();
-  for (const [i, r] of best.entries()) if (r) out.set(detected[i].key, r);
+  for (const [i, k] of chosen.entries()) if (k !== null) out.set(detected[i].key, options[i][k].result);
   return out;
+}
+
+export type NearestInfo = { id: string; angleRad: number; depthDiffM: number };
+
+/**
+ * 許容に関係なく、視線方向が最も近いピアとのずれ（診断用。名札が「？」のときに、
+ * 角度と距離のどちらの許容を広げるべきかを HUD で見るため）
+ */
+export function nearestCandidate(pos: Vec3, peers: readonly MatchCandidate[]): NearestInfo | null {
+  let best: NearestInfo | null = null;
+  const d = len(pos);
+  for (const p of peers) {
+    const angleRad = angleBetween(pos, p.pos);
+    if (!best || angleRad < best.angleRad) best = { id: p.id, angleRad, depthDiffM: Math.abs(d - len(p.pos)) };
+  }
+  return best;
 }
 
 // ---- フレームをまたぐ追跡（人のスロット）と、対応づけのヒステリシス ----
@@ -146,6 +176,8 @@ export type PersonTrack = {
   /** id に対する直近の対応結果（HUD 用）と、その時刻 */
   lastMatch: MatchResult | null;
   lastMatchMs: number;
+  /** 直近の推論で視線方向が最も近かったピアとのずれ（許容外でも入る。診断用） */
+  nearest: NearestInfo | null;
 };
 
 export type PersonTracksOptions = {
@@ -198,25 +230,31 @@ export class PersonTracks {
     const o = this.opts;
     for (const t of this.tracks) t.fresh = false;
     const live = this.live(now);
-    const pairs: { track: PersonTrack; det: PersonDetection; dist: number }[] = [];
-    for (const track of live) {
-      for (const det of detections) {
-        pairs.push({ track, det, dist: dist3(track.head, det.head) });
-      }
-    }
-    pairs.sort((a, b) => a.dist - b.dist);
-    const assigned = new Map<PersonTrack, PersonDetection>();
+    // 継続の割当も「継続する数が最大 → 総距離が最小」（交差する 2 人で片方の追跡が凍結・再生成されないように）
+    const options = live.map((track) =>
+      detections
+        .map((det, k) => ({ ukey: String(k), cost: dist3(track.head, det.head), det }))
+        .filter((x) => x.cost <= o.trackDistM),
+    );
+    const chosen = assignOptimal(options);
     const taken = new Set<PersonDetection>();
-    for (const { track, det, dist } of pairs) {
-      if (dist > o.trackDistM) break;
-      if (assigned.has(track) || taken.has(det)) continue;
-      assigned.set(track, det);
+    for (const [i, k] of chosen.entries()) {
+      if (k === null) continue;
+      const det = options[i][k].det;
+      this.updateTrack(live[i], det, now, true);
       taken.add(det);
     }
-    for (const [track, det] of assigned) this.updateTrack(track, det, now, true);
     for (const det of detections) {
       if (taken.has(det)) continue;
-      if (this.live(now).length >= o.maxTracks) break;
+      if (this.live(now).length >= o.maxTracks) {
+        // 枠が埋まっているとき、今回更新されなかった（保持中の）追跡があれば古い方から退避して、
+        // いま映っている人を優先する。全部が今回更新された追跡なら諦める
+        const stale = this.live(now)
+          .filter((t) => !t.fresh)
+          .sort((a, b) => a.lastSeenMs - b.lastSeenMs)[0];
+        if (!stale) break;
+        this.tracks.splice(this.tracks.indexOf(stale), 1);
+      }
       const track: PersonTrack = {
         key: this.nextKey++,
         points: null,
@@ -233,6 +271,7 @@ export class PersonTracks {
         candidateStreak: 0,
         lastMatch: null,
         lastMatchMs: -Infinity,
+        nearest: null,
       };
       this.tracks.push(track);
       this.updateTrack(track, det, now, false);
@@ -282,6 +321,7 @@ export class PersonTracks {
       currentIds,
     );
     for (const track of live) {
+      if (track.fresh) track.nearest = nearestCandidate(track.head, peers);
       const r = track.fresh ? results.get(track.key) : undefined;
       if (r && r.id === track.id) {
         track.lastMatch = r;
