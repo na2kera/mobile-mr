@@ -23,6 +23,18 @@ import {
 } from "../src/shared/splatoon-sim.ts";
 import { FIST_STALE_MS, SHOT_RATE_PER_SEC, SplatoonGame, inkRegenPerSec } from "../src/shared/splatoon-game.ts";
 import { handShape } from "../src/shared/hand-math.ts";
+import {
+  MAX_DROPS,
+  MAX_EDGE_SCALE,
+  MIN_DROPS,
+  edgePoint,
+  edgeScale,
+  impactDirUv,
+  insideCore,
+  insideSplat,
+  splatExtent,
+  splatShape,
+} from "../src/shared/splat-shape.ts";
 import { centered, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SPLATOON_PATH, SPLATOON_PROTOCOL_VERSION } from "../src/shared/splatoon-protocol.ts";
 
@@ -110,6 +122,62 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   g2.decode(enc);
   check("encode / decode で同じ格子", enc.length === 200 && g2.counts().join() === g.counts().join());
   check("角（UV 0,0）を塗ってもはみ出さない", g.counts()[1] > 0);
+}
+
+// ================= 1b. splat shape（飛沫の形）=================
+{
+  const cfg = { ...DEFAULT_FIELD, wallW: 2, wallH: 1, floorDrop: 1, floorDepth: 1.5 };
+  const [wall, floor] = fieldSurfaces(cfg);
+  const a = splatShape(42, 0.09, [0, 1]);
+  const b = splatShape(42, 0.09, [0, 1]);
+  const c = splatShape(43, 0.09, [0, 1]);
+  check("同じ seed なら同じ形（全端末とサーバーで一致する）", JSON.stringify(a) === JSON.stringify(b));
+  check("seed が違えば形が違う", JSON.stringify(a) !== JSON.stringify(c));
+  check(`滴は ${MIN_DROPS + 1}〜${MAX_DROPS + 2} 個（後ろ側の 1〜2 個込み）`, a.drops.length >= MIN_DROPS + 1 && a.drops.length <= MAX_DROPS + 2, `${a.drops.length}`);
+  check("向きがあれば進行方向に伸びる（stretch > 1）", a.stretch > 1 && splatShape(42, 0.09, null).stretch === 1);
+  let edgeOk = true;
+  let coreOk = true;
+  for (let i = 0; i < 36; i++) {
+    const th = (i / 36) * Math.PI * 2;
+    const es = edgeScale(a, th);
+    if (es < 0.6 || es > MAX_EDGE_SCALE) edgeOk = false;
+    const [du, dv] = edgePoint(a, th);
+    if (!insideCore(a, du * 0.98, dv * 0.98) || insideCore(a, du * 1.02, dv * 1.02)) coreOk = false;
+  }
+  check("縁の倍率は 0.6〜1.4 の範囲", edgeOk);
+  check("insideCore は edgePoint と同じパラメータ化（縁のすぐ内側は中、すぐ外側は外）", coreOk);
+  check("中心は中、遠くは外", insideCore(a, 0, 0) && !insideSplat(a, 1, 1));
+  const d0 = a.drops[0];
+  check("滴の中は insideSplat で中", insideSplat(a, d0.du, d0.dv) && splatExtent(a) >= Math.hypot(d0.du, d0.dv) + d0.r);
+  // 進行方向: 壁に正面から撃つと重力で下向き成分だけが残り、壁の yAxis（下）方向 = [0, 1]
+  const lw = simulateInk([0, 0, 2], [0, 0, -5], [wall, floor], cfg);
+  const dirW = impactDirUv(lw, [0, 0, -5], wall, cfg.gravity);
+  check("壁に正面から当たると飛沫は下向き（[0, 1]）", dirW && near(dirW[0], 0) && near(dirW[1], 1));
+  // 斜め（右へ）に撃つと右下
+  const lw2 = simulateInk([-0.5, 0, 2], [1.2, 0, -5], [wall, floor], cfg);
+  const dirW2 = impactDirUv(lw2, [1.2, 0, -5], wall, cfg.gravity);
+  check("右へ撃つと飛沫は右下", dirW2 && dirW2[0] > 0.4 && dirW2[1] > 0.4);
+  // 真下に落とすと面内成分が無い → null（向きなし）
+  const lf = simulateInk([0, 0, 1], [0, -3, 0], [wall, floor], cfg);
+  check("床に真上から落ちると向きなし（null）", lf && impactDirUv(lf, [0, -3, 0], floor, cfg.gravity) === null);
+  // 格子: 円より広く塗れる（滴の分）が、極端に広くはない
+  const g1 = new InkGrid(wall, 0.02);
+  const nCircle = g1.stamp([0.5, 0.5], 0.09, 1);
+  const g2 = new InkGrid(wall, 0.02);
+  const nSplat = g2.stampSplat([0.5, 0.5], a, 1);
+  check("stampSplat は円の 0.7〜4 倍のセルを塗る", nSplat > nCircle * 0.7 && nSplat < nCircle * 4, `${nSplat} vs ${nCircle}`);
+  check("stampSplat: 同じ色で塗り直しは 0", g2.stampSplat([0.5, 0.5], a, 1) === 0);
+  check("stampSplat: 角（UV 0,0）でもはみ出さない", new InkGrid(wall, 0.02).stampSplat([0, 0], a, 2) > 0);
+  // サーバー側: shoot で同じ形が格子に入る（shot.seq を種にする）
+  const game = new SplatoonGame({ matchSec: 300, wallW: 2, wallH: 1, waitSec: 0 });
+  game.join("s1", "S", 0);
+  game.updatePose("s1", [0, 0.1, 1], 10);
+  const sh = game.shoot("s1", [0, 0, 1], [0, -2, -4.5], 0.09, 100);
+  const sf = game.surfaces.find((x) => x.id === sh.landing.surfaceId);
+  const expectShape = splatShape(sh.seq, sh.radius, impactDirUv(sh.landing, sh.vel, sf, game.config.gravity));
+  const g3 = new InkGrid(sf, game.config.cellM);
+  const nExpect = g3.stampSplat(sh.landing.uv, expectShape, sh.color);
+  check("サーバーの格子は shot.seq 由来の飛沫の形で塗られている（クライアントと同じ形 = 得点）", game.scores().s1 === nExpect && nExpect > 0, `${game.scores().s1} vs ${nExpect}`);
 }
 
 // ================= 2. hand shape =================

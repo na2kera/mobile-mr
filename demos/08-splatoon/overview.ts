@@ -13,6 +13,8 @@ import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
+import { impactDirUv, splatShape } from "../../src/shared/splat-shape";
+import { createSplatSound } from "./splat-sound";
 
 // Phase 8 / issue #19・#21: PC の俯瞰画面。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
 // コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」を送る唯一の端末。
@@ -34,6 +36,8 @@ const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 }
 const SURFACE_PX_PER_M = numParam("surfacePx", 384, { min: 64, max: 2048 });
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
+/** 着弾の音（?sound=0 で無効。PC は最初のクリックで有効になる） */
+const SOUND = params.get("sound") !== "0";
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -359,6 +363,9 @@ type LiveShot = { shot: Shot; launchLocalMs: number; mesh: THREE.Mesh };
 const shots = new Map<number, LiveShot>();
 const splatted = new Set<number>();
 
+const splatSound = createSplatSound(SOUND);
+addEventListener("pointerdown", () => splatSound.unlock(), { once: true });
+
 function addShot(shot: Shot, serverT: number, recvMs: number) {
   const mesh = new THREE.Mesh(inkGeometry, inkMaterialOf(shot.color));
   mesh.scale.setScalar(shot.radius * 0.45);
@@ -366,26 +373,46 @@ function addShot(shot: Shot, serverT: number, recvMs: number) {
   shots.set(shot.seq, { shot, launchLocalMs: localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
 }
 
-function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null): boolean {
+const inkLookAt = new THREE.Vector3();
+/** 飛んでいる玉を進行方向に少し伸ばす（main.ts と同じ） */
+function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null, radius: number): boolean {
   const hitT = landing?.hitT ?? fieldCfg.maxFlightSec;
   if (elapsed >= hitT) {
     mesh.visible = false;
     return true;
   }
-  const p = inkAt(pos, vel, Math.max(0, elapsed), fieldCfg.gravity);
+  const t = Math.max(0, elapsed);
+  const p = inkAt(pos, vel, t, fieldCfg.gravity);
   mesh.position.set(p[0], p[1], p[2]);
+  inkLookAt.set(p[0] + vel[0], p[1] + vel[1] - fieldCfg.gravity * t, p[2] + vel[2]);
+  field.localToWorld(inkLookAt);
+  mesh.lookAt(inkLookAt);
+  const base = radius * 0.45;
+  mesh.scale.set(base * 0.85, base * 0.85, base * 1.35);
   mesh.visible = true;
   return false;
+}
+
+/** 着弾を飛沫の形で塗る（main.ts と同じ形。サーバーの格子とも同じ） */
+function splatLanding(shot: Shot, now: number) {
+  const landing = shot.landing;
+  if (!landing?.hit) return;
+  const surface = surfaces.find((s) => s.id === landing.surfaceId);
+  const view = inkViews.get(landing.surfaceId);
+  if (!surface || !view) return;
+  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity));
+  const overwrote = view.splat(landing.uv, shape, shot.color, now);
+  splatSound.play(0.25, overwrote);
 }
 
 function updateShots(now: number) {
   for (const [seq, live] of shots) {
     const { shot } = live;
     const elapsed = (now - live.launchLocalMs) / 1000;
-    const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing);
+    const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing, shot.radius);
     if (landed && shot.landing?.hit && !splatted.has(seq)) {
       splatted.add(seq);
-      inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.color);
+      splatLanding(shot, now);
     }
     if (elapsed > fieldCfg.maxFlightSec + 1) {
       live.mesh.removeFromParent();
@@ -519,6 +546,7 @@ renderer.setAnimationLoop(() => {
   controls.update();
   updatePeers(now);
   updateShots(now);
+  for (const v of inkViews.values()) v.update(now);
   if (now - lastPanelMs > 250) {
     lastPanelMs = now;
     renderPanel();

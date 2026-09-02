@@ -38,6 +38,8 @@ import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
 import { scriptedSplatHand } from "./fake-splat-hand";
+import { impactDirUv, splatShape } from "../../src/shared/splat-shape";
+import { createSplatSound } from "./splat-sound";
 
 // Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
 // 「チームと陣取り」を足した統合ゲーム第 3 弾。
@@ -106,6 +108,9 @@ const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 }
 const SURFACE_PX_PER_M = numParam("surfacePx", 384, { min: 64, max: 2048 });
 /** 発射後、サーバーの確認が来るまで予測を出す上限 [ms] */
 const PREDICT_MAX_MS = 1500;
+
+/** 着弾の音（?sound=0 で無効） */
+const SOUND = params.get("sound") !== "0";
 
 // デバッグ
 const FAKE_CAM = params.has("fakecam");
@@ -192,6 +197,7 @@ function createInkMesh(color: InkColor, radius: number): THREE.Mesh {
   field.add(m);
   return m;
 }
+const splatSound = createSplatSound(SOUND);
 
 // ---- ピア（他のプレイヤー）: 頭 + 手（06-2 と同じ）。チーム色 ----
 type Peer = {
@@ -819,26 +825,46 @@ function addShot(shot: Shot, serverT: number, recvMs: number, launchLocalMs?: nu
   shots.set(shot.seq, { shot, launchLocalMs: launchLocalMs ?? localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
 }
 
-function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null): boolean {
+const inkLookAt = new THREE.Vector3();
+/** 飛んでいる玉を進行方向に少し伸ばす（スクワッシュ）。玉は field の子なので lookAt の目標はワールドに直す */
+function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null, radius: number): boolean {
   const hitT = landing?.hitT ?? fieldCfg.maxFlightSec;
   if (elapsed >= hitT) {
     mesh.visible = false;
     return true;
   }
-  const p = inkAt(pos, vel, Math.max(0, elapsed), fieldCfg.gravity);
+  const t = Math.max(0, elapsed);
+  const p = inkAt(pos, vel, t, fieldCfg.gravity);
   mesh.position.set(p[0], p[1], p[2]);
+  inkLookAt.set(p[0] + vel[0], p[1] + vel[1] - fieldCfg.gravity * t, p[2] + vel[2]);
+  field.localToWorld(inkLookAt);
+  mesh.lookAt(inkLookAt);
+  const base = radius * 0.45;
+  mesh.scale.set(base * 0.85, base * 0.85, base * 1.35);
   mesh.visible = true;
   return false;
+}
+
+/** 着弾を飛沫の形で塗る（形はサーバーと同じ seq 由来。見た目 = 得点）。音も鳴らす */
+function splatLanding(shot: Shot, now: number) {
+  const landing = shot.landing;
+  if (!landing?.hit) return;
+  const surface = surfaces.find((s) => s.id === landing.surfaceId);
+  const view = inkViews.get(landing.surfaceId);
+  if (!surface || !view) return;
+  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity));
+  const overwrote = view.splat(landing.uv, shape, shot.color, now);
+  splatSound.play(shot.by === selfId ? 0.5 : 0.3, overwrote);
 }
 
 function updateShots(now: number) {
   for (const [seq, live] of shots) {
     const { shot } = live;
     const elapsed = (now - live.launchLocalMs) / 1000;
-    const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing);
+    const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing, shot.radius);
     if (landed && shot.landing?.hit && !splatted.has(seq)) {
       splatted.add(seq);
-      inkViews.get(shot.landing.surfaceId)?.splat(shot.landing.uv, shot.radius, shot.color);
+      splatLanding(shot, now);
     }
     if (elapsed > fieldCfg.maxFlightSec + 1) {
       live.mesh.removeFromParent();
@@ -851,7 +877,7 @@ function updateShots(now: number) {
       clearPredicted();
     } else {
       if (!predicted.mesh) predicted.mesh = createInkMesh(myColor ?? 1, predicted.radius);
-      placeInk(predicted.mesh, predicted.pos, predicted.vel, (now - predicted.sinceMs) / 1000, predicted.landing);
+      placeInk(predicted.mesh, predicted.pos, predicted.vel, (now - predicted.sinceMs) / 1000, predicted.landing, predicted.radius);
     }
   }
 }
@@ -1006,6 +1032,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
+  splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
   hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} wall=${WALL_W}x${WALL_H} floor=${FLOOR_DROP}/${FLOOR_DEPTH} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect();
   if (FAKE_HANDS) {
@@ -1074,6 +1101,7 @@ renderer.setAnimationLoop(() => {
   updateFire(now);
   updatePeers(now);
   updateShots(now);
+  for (const v of inkViews.values()) v.update(now);
   sendPoseIfDue(now);
   updateMessages(now);
   if (document.body.classList.contains("started")) renderHud();
