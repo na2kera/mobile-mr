@@ -166,6 +166,7 @@ Player一覧と姿勢の中継はViteに同居するサーバー（`server/perso
 | `npm run check:godhand` | ゴッドハンドのブラウザ経路（突き出し検出→実体化→キャッチ）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
 | `npm run test:person` | Person IDの体の3D化・人物とPlayerの対応づけ（ヒステリシス込み）・サーバーの回帰テスト |
 | `npm run check:person` | Person IDのブラウザ経路（マーカー→共通座標・合成の体の3D化→対応づけ→seenの中継・本物のPoseLandmarkerの初期化）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
+| `npm run check:chrome-flow` | Chromeでの開始導線（タッチ端末模擬: センサーのイベント有無・全画面と横向き固定・Wake Lock・長押しの抑止 / PCの縦長ウィンドウで案内が出ない）をヘッドレスChromeで確認（Chromeが無ければスキップ） |
 | `npm run fetch:models` | Hand Landmarker / Pose Landmarkerモデルをローカルへ取得 |
 
 ## ディレクトリ構成

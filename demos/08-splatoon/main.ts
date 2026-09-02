@@ -769,6 +769,8 @@ function updateFire(now: number) {
 
 if (touch) {
   const appEl = document.querySelector<HTMLDivElement>("#app")!;
+  // Android Chrome は長押しで contextmenu が出て押し続けが切れるので抑止する
+  appEl.addEventListener("contextmenu", (e) => e.preventDefault());
   appEl.addEventListener("pointerdown", () => {
     if (document.body.classList.contains("started")) holdPressed = true;
   });
@@ -956,7 +958,7 @@ function startControls() {
 
 // ---- HUD（デバッグ用） ----
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
-const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "" };
+const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "", wake: "" };
 let lastHudText = "";
 function renderHud() {
   const s = auth?.state;
@@ -967,6 +969,7 @@ function renderHud() {
     hudState.cam && `cam=${hudState.cam}`,
     hudState.fsResult && `fs=${hudState.fsResult}`,
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
+    hudState.wake && `wake=${hudState.wake}`,
     `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (holding last pose)" : ""}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
@@ -1032,6 +1035,9 @@ startButton.addEventListener("click", () => {
       }
     },
     tryEnterFullscreen,
+    onWakeLock: (status) => {
+      hudState.wake = status;
+    },
   });
 });
 
