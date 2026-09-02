@@ -86,6 +86,13 @@ const MATCH_ANGLE_DEG = numParam("matchAngle", 12, { min: 1, max: 90 });
 const MATCH_DEPTH_M = numParam("matchDepth", 1.0, { min: 0.05, max: 10 });
 const ID_HOLD_MS = numParam("idHoldMs", 1500, { min: 0, max: 30000 });
 const ID_STREAK = Math.round(numParam("idStreak", 3, { min: 1, max: 30 }));
+/**
+ * マーカーを見失っている間（3DoF: 位置は最後にマーカーを見た所で凍結）の扱い。
+ * 既定（0）は 06〜08 と同じく凍結した位置を使い続ける: 相手を見るとマーカーは視界から外れるのが普通で、
+ * その場で回るだけなら凍結した位置は正しい。歩くとずれるが、ずれは角度のゲートで「？」になるだけで別人には付きにくい。
+ * 1 にすると、自分がロスト中は seen を送らず、ロスト中の相手は対応の候補にせず、相手のロスト中の seen も捨てる（厳密だが名札が付く機会は減る）
+ */
+const STRICT_TRACKING = params.get("strictTracking") === "1";
 
 const OFFICIAL_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -167,6 +174,8 @@ type Peer = {
   seesMeMs: number;
   /** 相手が見た自分の位置と、自分の申告位置の距離 [m] */
   seesMeDist: number;
+  /** 相手がそれを見たとき、相手側でマーカーが追従していたか（false なら相手の位置が古い可能性） */
+  seesMeTracking: boolean;
 };
 const peers = new Map<string, Peer>();
 const peerHeadGeometry = new THREE.SphereGeometry(0.09, 24, 16);
@@ -200,6 +209,7 @@ function createPeer(info: PlayerInfo): Peer {
     seesMe: null,
     seesMeMs: -Infinity,
     seesMeDist: 0,
+    seesMeTracking: true,
   };
   peers.set(info.id, peer);
   return peer;
@@ -245,13 +255,17 @@ function onPeerPose(id: string, pose: PersonPose) {
     peer.group.quaternion.copy(peer.targetQuat);
   }
   peer.lastPoseMs = now;
-  // 相手が自分を見ていたら、相手の推定と自分の申告位置のずれを測る
+  // 相手が自分を見ていたら、相手の推定と自分の申告位置のずれを測る。
+  // 相手がマーカーロスト中（tracking=false）の seen は位置が古い可能性があるので、厳密モードでは捨てる
   const me = pose.seen?.find((s) => s.id === selfId);
-  if (me && markerAnchor?.everDetected) {
+  if (me && markerAnchor?.everDetected && (pose.tracking || !STRICT_TRACKING)) {
     peer.seesMe = (peer.seesMe ?? new THREE.Vector3()).set(...me.pos);
     peer.seesMeMs = now;
+    peer.seesMeTracking = pose.tracking;
     computeMyPose();
     peer.seesMeDist = peer.seesMe.distanceTo(posePos);
+  } else if (STRICT_TRACKING && !pose.tracking) {
+    peer.seesMeMs = -Infinity;
   }
 }
 
@@ -283,11 +297,12 @@ function updatePeers(now: number) {
   }
 }
 
-/** 対応づけの候補: いま表示しているピアの頭を自分のカメラ座標系で */
+/** 対応づけの候補: いま表示しているピアの頭を自分のカメラ座標系で（厳密モードではマーカーロスト中の相手を除く） */
 function peerCandidates(now: number): MatchCandidate[] {
   const out: MatchCandidate[] = [];
   for (const [id, peer] of peers) {
     if (peer.lastPoseMs === -Infinity || now - peer.lastPoseMs > PEER_STALE_MS || !anchor.visible) continue;
+    if (STRICT_TRACKING && !peer.tracking) continue;
     peer.group.getWorldPosition(tmpVec);
     camera.worldToLocal(tmpVec);
     out.push({ id, pos: { x: tmpVec.x, y: tmpVec.y, z: tmpVec.z } });
@@ -359,14 +374,15 @@ function syncTrackViews(now: number) {
     v.view.setColor(color);
     v.view.update(t.points);
     v.label.set(peer ? `${peer.info.name}（${peer.info.id}）` : "？", cssColor(color));
-    // 名札は頭の上。遠いほど小さく見えるので、距離に応じて実寸を変えて見かけの大きさを保つ
-    const depth = Math.max(0.3, -t.head.z);
-    v.label.mesh.position.set(t.head.x, t.head.y + 0.12 * depth, t.head.z);
+    // 名札は頭の上（表示用の座標。骨格と同じ視線に沿う）。遠いほど小さく見えるので、距離に応じて実寸を変えて見かけの大きさを保つ
+    const h = t.displayHead;
+    const depth = Math.max(0.3, -h.z);
+    v.label.mesh.position.set(h.x, h.y + 0.12 * depth, h.z);
     v.label.mesh.scale.setScalar(THREE.MathUtils.clamp(depth / 1.5, 0.5, 4));
     // ネットワーク上の頭（アバター）→ 検出した頭 の線（対応の誤差を見せる）
     if (peer && peer.group.visible) {
       peer.group.getWorldPosition(tmpVec);
-      tmpVec2.set(t.head.x, t.head.y, t.head.z);
+      tmpVec2.set(h.x, h.y, h.z);
       camera.localToWorld(tmpVec2);
       v.linkPositions.set([tmpVec.x, tmpVec.y, tmpVec.z, tmpVec2.x, tmpVec2.y, tmpVec2.z]);
       v.link.geometry.attributes.position.needsUpdate = true;
@@ -553,6 +569,11 @@ function updateBodies(now: number) {
   syncTrackViews(now);
 }
 
+// 2 つの写像を使い分ける（05 の手と同じ）:
+//   - 表示用（mapping）: 仮想カメラの FOV。この視線に沿って置いた点は背景の人に重なる（骨格・名札・線）
+//   - 実寸用（depthMapping）: 実カメラの FOV。深度を解くのと、追跡・対応づけ・seen に使う頭の位置はこちら。
+//     ピアの位置（マーカー由来）も実カメラの FOV で解いた座標なので、同じ系で比べないと ?fov= を変えたときに
+//     角度のゲートが別の系同士の比較になる（fov=auto なら両者は一致する）
 function applyPoseResult(result: PoseResultLike, now: number) {
   if (!passthrough) return;
   const mapping = passthrough.displayViewMapping(camera.fov);
@@ -566,9 +587,11 @@ function applyPoseResult(result: PoseResultLike, now: number) {
     const placement = solveBodyPlacement(landmarks, world, depthMapping, MIN_VIS);
     if (!placement || placement.depth > MAX_BODY_DEPTH_M) continue;
     const points = placeBodyLandmarks(landmarks, world, placement, mapping);
+    const metricPoints = depthMapping === mapping ? points : placeBodyLandmarks(landmarks, world, placement, depthMapping);
     detections.push({
       points,
-      head: bodyHeadPoint(points, landmarks, MIN_VIS),
+      head: bodyHeadPoint(metricPoints, landmarks, MIN_VIS),
+      displayHead: bodyHeadPoint(points, landmarks, MIN_VIS),
       depth: placement.depth,
       residual: placement.residual,
       used: placement.used,
@@ -634,17 +657,22 @@ function sendPoseIfDue(now: number) {
   if (now - lastSendMs < SEND_INTERVAL_MS) return;
   lastSendMs = now;
   computeMyPose();
+  const tracking = markerAnchor.isTracking(now, MARKER_LOST_MS);
+  // seen は直近の推論で実際に検出された人だけ（保持中の凍結した骨格は送らない）。
+  // 厳密モードでは自分がマーカーロスト中（位置が凍結）の間は送らない
   const seen: Sighting[] = [];
-  for (const t of tracks.live(now)) {
-    tmpVec.set(t.head.x, t.head.y, t.head.z);
-    camera.localToWorld(tmpVec);
-    field.worldToLocal(tmpVec);
-    seen.push({ id: t.id, pos: [round3(tmpVec.x), round3(tmpVec.y), round3(tmpVec.z)] });
+  if (tracking || !STRICT_TRACKING) {
+    for (const t of tracks.detected(now)) {
+      tmpVec.set(t.head.x, t.head.y, t.head.z);
+      camera.localToWorld(tmpVec);
+      field.worldToLocal(tmpVec);
+      seen.push({ id: t.id, pos: [round3(tmpVec.x), round3(tmpVec.y), round3(tmpVec.z)] });
+    }
   }
   const pose: PersonPose = {
     pos: [round3(posePos.x), round3(posePos.y), round3(posePos.z)],
     quat: [poseQuat.x, poseQuat.y, poseQuat.z, poseQuat.w],
-    tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
+    tracking,
   };
   if (seen.length > 0) pose.seen = seen;
   if (client.sendPose(pose)) posesSent++;
@@ -654,7 +682,8 @@ function sendPoseIfDue(now: number) {
 function describeTrack(t: ReturnType<PersonTracks["live"]>[number]): string {
   const peer = t.id ? peers.get(t.id) : undefined;
   if (peer && t.lastMatch) {
-    return `${peer.info.name}（${peer.info.id}・${playerColorName(peer.info.color)}） ずれ ${THREE.MathUtils.radToDeg(t.lastMatch.angleRad).toFixed(1)}° / ${t.lastMatch.depthDiffM.toFixed(2)}m`;
+    const stale = peer.tracking ? "" : "・相手はマーカーを見失い中";
+    return `${peer.info.name}（${peer.info.id}・${playerColorName(peer.info.color)}） ずれ ${THREE.MathUtils.radToDeg(t.lastMatch.angleRad).toFixed(1)}° / ${t.lastMatch.depthDiffM.toFixed(2)}m${stale}`;
   }
   return `？ 不明（${t.depth.toFixed(1)}m 先）`;
 }
@@ -698,7 +727,7 @@ function updateMessages(now: number) {
     }
     for (const peer of peers.values()) {
       if (peer.seesMe && now - peer.seesMeMs <= SEEN_STALE_MS) {
-        lines.push(`${peer.info.name} から見えています（ずれ ${peer.seesMeDist.toFixed(2)}m）`);
+        lines.push(`${peer.info.name} から見えています（ずれ ${peer.seesMeDist.toFixed(2)}m${peer.seesMeTracking ? "" : "・相手はマーカーを見失い中"}）`);
       }
     }
     text = lines.join("\n");
@@ -784,7 +813,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms poses=${POSES} delegate=${DELEGATE} bodyDetW=${BODY_DET_W} bodyScale=${BODY_SCALE} minVis=${MIN_VIS} match=${MATCH_ANGLE_DEG}deg/${MATCH_DEPTH_M}m mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms poses=${POSES} delegate=${DELEGATE} bodyDetW=${BODY_DET_W} bodyScale=${BODY_SCALE} minVis=${MIN_VIS} match=${MATCH_ANGLE_DEG}deg/${MATCH_DEPTH_M}m strict=${STRICT_TRACKING ? 1 : 0} mode=${touch ? "gyro" : "orbit"}`;
   connect();
   if (FAKE_BODY) {
     trackerStatus = "fake (synthetic body, MediaPipe 未使用)";

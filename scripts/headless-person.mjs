@@ -217,7 +217,8 @@ try {
     hud3 = await readHud(p3);
   }
   console.log(`window3: tracker=${hud3.tracker} bodies=${hud3.bodies}`);
-  check("本物の PoseLandmarker が初期化できる（ローカルのモデル）", /^ready (GPU|CPU) model=local/.test(hud3.tracker), hud3.tracker);
+  // モデルは Git 管理外（npm run fetch:models）なので、未取得の環境では公式 URL へのフォールバック（model=remote）も正常
+  check("本物の PoseLandmarker が初期化できる（ローカルのモデル、無ければ公式 URL）", /^ready (GPU|CPU) model=(local|remote)/.test(hud3.tracker), hud3.tracker);
   check("人が映っていないので検出 0", hud3.bodies === 0 && hud3.tracks.length === 0);
   check("ウィンドウ 3 でも例外なし", p3.exceptions.length === 0, p3.exceptions.slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[person]")).slice(0, 3)) console.log(`window1 log: ${l}`);
