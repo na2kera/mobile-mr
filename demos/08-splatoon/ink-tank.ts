@@ -1,8 +1,10 @@
 // 手元のインクタンク（issue #31）。スプラトゥーンの背中のタンクのような「黒い枠 + ガラスの窓 + 自分の色のインク」を
 // Canvas に描いて板に貼る（TextPanel と同じ CanvasTexture 方式。文字ではなく水位で残量を見せる）。
 // 板はカメラの子として使う想定（常に正面を向き、水位は常に鉛直）。置き場所は main.ts が決める
-// （見えている手の手首の前腕側 / 手が無いときは視界の下）。
-// 描き直すのは水位（px 単位）・色・空の状態が変わったときだけ。空のときの脈動は板の大きさで出し、テクスチャは描き直さない
+// （見えている手のそば。既定は手のひらの親指側 / 手が無いときは視界の下）。
+// 描き直すのは水位（px 単位）・色・空の状態が変わったときだけで、さらに MIN_DRAW_INTERVAL_MS に間引く
+// （回復中は水位が毎フレーム 1〜3px 動くので、間引かないと 60fps で影付きの塗り + テクスチャ転送になる）。
+// 空のときの脈動は板の大きさで出し、テクスチャは描き直さない
 import * as THREE from "three";
 
 /** 板の幅 / 高さ（縦長の筒） */
@@ -12,6 +14,8 @@ const PULSE_HZ = 3;
 const PULSE_AMP = 0.06;
 /** 空のときの枠の色（08 の「インク切れ」と同じ黄色） */
 const LOW_COLOR = "#fdd663";
+/** 描き直しの最短間隔 [ms]（ink-view のアニメと同じ発想で 20Hz に抑える） */
+const MIN_DRAW_INTERVAL_MS = 50;
 
 type Rgb = [number, number, number];
 function hexToRgb(hex: number): Rgb {
@@ -33,6 +37,9 @@ export class InkTankView {
   private readonly texture: THREE.CanvasTexture;
   private last = "";
   private low = false;
+  /** set で変わったがまだ描いていない内容（update で MIN_DRAW_INTERVAL_MS ごとに描く） */
+  private pending: { fillPx: number; ink: Rgb; low: boolean } | null = null;
+  private lastDrawMs = -Infinity;
   /** 板の高さ [m]（幅は TANK_ASPECT 倍） */
   readonly heightM: number;
 
@@ -61,7 +68,7 @@ export class InkTankView {
   }
 
   /**
-   * 残量を反映する（変わっていなければ描き直さない）
+   * 残量を反映する（変わっていなければ描き直さない。実際に描くのは update）
    * @param level 残量 0..1
    * @param colorHex インクの色
    * @param low 1 発ぶんも無い（枠を黄色にして update で脈動させる）
@@ -72,11 +79,16 @@ export class InkTankView {
     if (key === this.last) return;
     this.last = key;
     this.low = low;
-    this.draw(fillPx, hexToRgb(colorHex), low);
+    this.pending = { fillPx, ink: hexToRgb(colorHex), low };
   }
 
-  /** 毎フレーム: 空のときの脈動（板の大きさだけ変える） */
+  /** 毎フレーム: 溜まっている描き直し（間引き）と、空のときの脈動（板の大きさだけ変える） */
   update(now: number) {
+    if (this.pending && now - this.lastDrawMs >= MIN_DRAW_INTERVAL_MS) {
+      this.draw(this.pending.fillPx, this.pending.ink, this.pending.low);
+      this.pending = null;
+      this.lastDrawMs = now;
+    }
     const pulse = this.low ? 1 + PULSE_AMP * (0.5 + 0.5 * Math.sin((now / 1000) * 2 * Math.PI * PULSE_HZ)) : 1;
     this.mesh.scale.setScalar(this.baseScale * pulse);
   }
@@ -116,8 +128,8 @@ export class InkTankView {
     ctx.roundRect(frame.x, frame.y, frame.w, frame.h, frameR);
     ctx.fill();
     ctx.restore();
-    // 外縁のベベル（少し青みのある灰色）と、空のときは黄色の太い縁
-    ctx.lineWidth = low ? w * 0.03 : w * 0.015;
+    // 外縁のベベル（少し青みのある灰色）と、空のときは黄色の太い縁（手元では 2 倍ほど縮小されるので太めに）
+    ctx.lineWidth = low ? w * 0.05 : w * 0.02;
     ctx.strokeStyle = low ? LOW_COLOR : "rgba(150, 170, 190, 0.35)";
     ctx.beginPath();
     ctx.roundRect(frame.x + ctx.lineWidth / 2, frame.y + ctx.lineWidth / 2, frame.w - ctx.lineWidth, frame.h - ctx.lineWidth, frameR);

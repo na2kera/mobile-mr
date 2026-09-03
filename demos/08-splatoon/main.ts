@@ -121,6 +121,8 @@ const tankPlaceRaw = params.get("tankPlace") ?? "thumb";
 const TANK_PLACE: "thumb" | "pinky" | "arm" = tankPlaceRaw === "pinky" || tankPlaceRaw === "arm" ? tankPlaceRaw : "thumb";
 /** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない） */
 const TANK_FALLBACK = params.get("tankFallback") !== "0";
+/** 手が消えてから視界の下へ落とすまで最後の手の位置に留める時間 [ms]（MediaPipe の一瞬の取りこぼしで往復しないように） */
+const TANK_HOLD_MS = numParam("tankHoldMs", 800, { min: 0, max: 5000 });
 
 // デバッグ
 const FAKE_CAM = params.has("fakecam");
@@ -741,6 +743,11 @@ let inkLocal = 1;
 let lastInkUpdateMs = performance.now();
 let lastNoInkFlashMs = -Infinity;
 
+/** いまの残量で 1 発撃てるか（発射と、タンクの「空」表示で同じ判定。減算の丸め誤差ぶんの余裕を持つ） */
+function hasInkForShot(): boolean {
+  return inkLocal + 1e-9 >= inkPerShot(fieldCfg);
+}
+
 /** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
 function canShoot(): boolean {
   const phase = auth?.state.phase;
@@ -791,7 +798,7 @@ function updateFire(now: number) {
   const wantHand = openSlot && canShoot();
   const wantGaze = !openSlot && holdPressed && canShoot();
   if ((wantHand || wantGaze) && now - lastShotMs >= interval) {
-    if (inkLocal + 1e-9 < inkPerShot(fieldCfg)) {
+    if (!hasInkForShot()) {
       if (now - lastNoInkFlashMs > 2000) {
         lastNoInkFlashMs = now;
         flash = { text: "インク切れ！\n少し待つと回復します", untilMs: now + 2000 };
@@ -993,9 +1000,11 @@ function updateMessages(now: number) {
 // 見えている手（パーを優先）のそばに置く。既定は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ
 // TANK_OFFSET ずらした位置（?tankPlace= で小指側・手首の先にもできる。向きは手の 3D 点から取るので手を回しても同じ側に付く）。
 // 板はカメラの子なので常に正面を向き、水位は手の向きによらず鉛直（残量を読むため。手に貼り付ける見た目より読みやすさ）。
-// 手が見えないとき（視線連射・手を下ろしたとき）は視界の下に大きめに出す。置き場所が変わるときは TANK_GLIDE_MS で滑らせる
-const TANK_FALLBACK_POS = new THREE.Vector3(0, -0.5, -1.2);
-/** 視界の下に出すときの高さ [m]（1.2m 先なので手元より大きく。視界内メッセージの下端 -0.40 に重ならない位置） */
+// 手が見えないとき（視線連射・手を下ろしたとき）は視界の下に大きめに出す。ただし消えてから TANK_HOLD_MS は最後の位置に留める
+// （一瞬の取りこぼしで往復しないように）。置き場所が変わるときは TANK_GLIDE_MS で滑らせる
+/** 視界の下の位置（1.2m 先）。上端が視界内メッセージの下端 -0.40 より下（脈動 ×1.06 ぶんも含めて）になる高さ */
+const TANK_FALLBACK_POS = new THREE.Vector3(0, -0.51, -1.2);
+/** 視界の下に出すときの高さ [m]（1.2m 先なので手元より大きく） */
 const TANK_FALLBACK_H = 0.2;
 const TANK_GLIDE_MS = 250;
 const tankTarget = new THREE.Vector3();
@@ -1003,6 +1012,8 @@ const tankFrom = new THREE.Vector3();
 let tankFromScale = 1;
 let tankGlideStartMs = -Infinity;
 let tankSlot: HandSlot | null = null;
+/** 最後に手のそばに置いた時刻 [ms]（TANK_HOLD_MS の判定） */
+let tankLastHandMs = -Infinity;
 /** いまの置き場所（HUD 用）: hand = 手元、view = 視界の下、- = 非表示 */
 let tankPlace: "hand" | "view" | "-" = "-";
 
@@ -1036,6 +1047,11 @@ function updateInkTank(now: number) {
     if (tmpVec.lengthSq() < 1e-8) tmpVec.set(0, -1, 0);
     else tmpVec.normalize();
     tankTarget.addScaledVector(tmpVec, TANK_OFFSET);
+    tankLastHandMs = now;
+    targetScale = 1;
+    place = "hand";
+  } else if (tankPlace === "hand" && now - tankLastHandMs < TANK_HOLD_MS) {
+    // 手が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
     targetScale = 1;
     place = "hand";
   } else if (TANK_FALLBACK) {
@@ -1069,7 +1085,7 @@ function updateInkTank(now: number) {
     inkTank.mesh.position.lerpVectors(tankFrom, tankTarget, k);
     inkTank.baseScale = tankFromScale + (targetScale - tankFromScale) * k;
   }
-  inkTank.set(inkLocal, inkColorHex(myColor), inkLocal < inkPerShot(fieldCfg));
+  inkTank.set(inkLocal, inkColorHex(myColor), !hasInkForShot());
   inkTank.update(now);
   inkTank.mesh.visible = true;
 }

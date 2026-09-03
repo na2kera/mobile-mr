@@ -175,7 +175,7 @@
         マーカーは ?markerMm=100&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100（手用は handDetW / handSmooth / handLostMs）。
         飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
         （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。
-        手元のインクタンクは ?tankPlace=thumb（親指側。pinky = 小指側、arm = 手首の先）&amp;tankH=0.12（板の高さ [m]）&amp;tankOffset=0.09（手からずらす距離 [m]）、手が見えないときに視界の下に出さないなら ?tankFallback=0。
+        手元のインクタンクは ?tankPlace=thumb（親指側。pinky = 小指側、arm = 手首の先）&amp;tankH=0.12（板の高さ [m]）&amp;tankOffset=0.09（手からずらす距離 [m]）&amp;tankHoldMs=800（手が消えてから視界の下へ落とすまでの猶予 [ms]）、手が見えないときに視界の下に出さないなら ?tankFallback=0。
         PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1 で、合成の手がパー → グーを繰り返して撃ち続け、
         別ウィンドウで同じ URL を開くと別の色の相手として同じフィールドを塗り合います（裏タブは描画が止まるので別ウィンドウで）。
         俯瞰画面（overview.html）も同じ room 名で開くと、全体が見えて対戦を開始できます
