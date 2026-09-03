@@ -49,7 +49,8 @@ import { createSplatSound } from "./splat-sound";
 //   - 操作: パーの間、手のひらから連射（1 発 = タンクの 1/tankShots。空になると撃てない）。
 //     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
 //     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
-//   - インクの残量は手元のタンク（issue #31。ink-tank.ts）: 見えている手のそば（既定は手のひらの親指側）に水位で出す。手が無いときは視界の下
+//   - インクの残量は手元のタンク（issue #31。ink-tank.ts）: グーで補充している間だけ、そのグーの手のそば（既定は手のひらの親指側）に
+//     水位で出す（パーで撃っている間は消す。?tankShow=always なら従来どおり見えている手のそば / 手が無いときは視界の下に常に出す）
 //   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
 //     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 → 練習に戻る。
 //     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
@@ -121,9 +122,17 @@ const TANK_OFFSET = numParam("tankOffset", 0.09, { min: 0, max: 0.5 });
 /** タンクの置き場所: thumb = 手のひらの親指側（既定）、pinky = 小指側、arm = 手首の先（前腕側）。手が低いと arm は視界の下で切れやすい */
 const tankPlaceRaw = params.get("tankPlace") ?? "thumb";
 const TANK_PLACE: "thumb" | "pinky" | "arm" = tankPlaceRaw === "pinky" || tankPlaceRaw === "arm" ? tankPlaceRaw : "thumb";
-/** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない） */
+/**
+ * タンクを出す条件: fist = グーで補充している間だけ、そのグーの手のそばに出す（既定）。
+ * always = 見えている手（パー優先）のそばに常に出す（手が無いときは視界の下）
+ */
+const TANK_SHOW: "fist" | "always" = params.get("tankShow") === "always" ? "always" : "fist";
+/** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない。tankShow=always のときだけ意味がある） */
 const TANK_FALLBACK = params.get("tankFallback") !== "0";
-/** 手が消えてから視界の下へ落とすまで最後の手の位置に留める時間 [ms]（MediaPipe の一瞬の取りこぼしで往復しないように） */
+/**
+ * 手が消えてから最後の手の位置に留める時間 [ms]（MediaPipe の一瞬の取りこぼしで往復しないように）。
+ * fist のときはこの時間を過ぎたら消える。always のときは視界の下へ落ちる
+ */
 const TANK_HOLD_MS = numParam("tankHoldMs", 800, { min: 0, max: 5000 });
 
 // デバッグ
@@ -1016,11 +1025,16 @@ function updateMessages(now: number) {
 }
 
 // ---- 手元のインクタンク（issue #31）----
-// 見えている手（パーを優先）のそばに置く。既定は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ
-// TANK_OFFSET ずらした位置（?tankPlace= で小指側・手首の先にもできる。向きは手の 3D 点から取るので手を回しても同じ側に付く）。
+// 既定（TANK_SHOW = fist）はグーで補充している間だけ、そのグーの手のそばに置く。パーで撃っている間は残量を見ないので消して、
+// 視界を塞がないようにする（撃てなくなったらグーにすれば残量と回復が見える）。グーの手を一瞬見失っても TANK_HOLD_MS は
+// 最後の位置に留める（MediaPipe の取りこぼし・再検出直後の 3 フレームは形が "other" になるのでちらつかないように）が、
+// パーが見えたら即座に消す。
+// ?tankShow=always は従来どおり: 見えている手（パーを優先）のそばに常に出し、手が見えないとき（視線連射・手を下ろしたとき）は
+// 視界の下に大きめに出す（消えてから TANK_HOLD_MS は最後の位置に留める）。
+// 置き場所は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ TANK_OFFSET ずらした位置
+// （?tankPlace= で小指側・手首の先にもできる。向きは手の 3D 点から取るので手を回しても同じ側に付く）。
 // 板はカメラの子なので常に正面を向き、水位は手の向きによらず鉛直（残量を読むため。手に貼り付ける見た目より読みやすさ）。
-// 手が見えないとき（視線連射・手を下ろしたとき）は視界の下に大きめに出す。ただし消えてから TANK_HOLD_MS は最後の位置に留める
-// （一瞬の取りこぼしで往復しないように）。置き場所が変わるときは TANK_GLIDE_MS で滑らせる
+// 置き場所が変わるときは TANK_GLIDE_MS で滑らせる
 /** 視界の下の位置（1.2m 先）。上端が視界内メッセージの下端 -0.40 より下（脈動 ×1.06 ぶんも含めて）になる高さ */
 const TANK_FALLBACK_POS = new THREE.Vector3(0, -0.51, -1.2);
 /** 視界の下に出すときの高さ [m]（1.2m 先なので手元より大きく） */
@@ -1042,10 +1056,13 @@ function updateInkTank(now: number) {
     tankPlace = "-";
     return;
   }
+  const visibleSlots = handSlots.slots.filter((s) => s.view.visible && s.ema);
   const slot =
-    handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open") ??
-    handSlots.slots.find((s) => s.view.visible && s.ema) ??
-    null;
+    TANK_SHOW === "fist"
+      ? (visibleSlots.find((s) => s.shape === "fist") ?? null)
+      : (visibleSlots.find((s) => s.shape === "open") ?? visibleSlots[0] ?? null);
+  /** fist のとき: パーが見えている（撃っている）ので、猶予を待たずに消す */
+  const hideNow = TANK_SHOW === "fist" && visibleSlots.some((s) => s.shape === "open");
   let place: typeof tankPlace;
   let targetScale: number;
   if (slot?.ema) {
@@ -1069,11 +1086,11 @@ function updateInkTank(now: number) {
     tankLastHandMs = now;
     targetScale = 1;
     place = "hand";
-  } else if (tankPlace === "hand" && now - tankLastHandMs < TANK_HOLD_MS) {
-    // 手が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
+  } else if (!hideNow && tankPlace === "hand" && now - tankLastHandMs < TANK_HOLD_MS) {
+    // 手（fist ならグーの手）が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
     targetScale = 1;
     place = "hand";
-  } else if (TANK_FALLBACK) {
+  } else if (TANK_SHOW === "always" && TANK_FALLBACK) {
     tankTarget.copy(TANK_FALLBACK_POS);
     targetScale = TANK_FALLBACK_H / TANK_H;
     place = "view";

@@ -26,7 +26,7 @@ const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 14;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s]（カウントダウン 1s + 発射 3〜4 回） */
 const PLAY_WAIT_SEC = Number(process.env.PLAY_WAIT_SEC ?? "") || 12;
 const BASE = `https://localhost:${PORT}/demos/08-splatoon/`;
-// tankHoldMs=0: 合成の手が消える約 200ms の間にタンクが視界の下へ移るのを見るため（既定 800ms の猶予は切る）
+// tankHoldMs=0: 合成の手が消える約 200ms の間にタンクが視界の下へ移る（tankShow=always のウィンドウ 2）のを見るため（既定 800ms の猶予は切る）
 const COMMON =
   "fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check&waitSec=1&tankHoldMs=0";
 const OVERVIEW = `${BASE}overview.html?room=check&waitSec=1`;
@@ -210,7 +210,8 @@ try {
   const created = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
   const t2 = (await cdpJson("/json")).find((t) => t.id === created.result.targetId);
   const p2 = await openPage(t2, "2");
-  await p2.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Two&fakeShift=40` });
+  // ウィンドウ 2 は従来の「常に出す」（tankShow=always）で、手が無い間に視界の下へ落ちるのを見る
+  await p2.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Two&fakeShift=40&tankShow=always` });
   // 俯瞰画面（PC 用。カメラ無し）。同じ room に role=overview で入る
   const created3 = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
   const t3 = (await cdpJson("/json")).find((t) => t.id === created3.result.targetId);
@@ -247,15 +248,27 @@ try {
   check("練習中に連射が送られ受理されている（入室したら自由に塗れる）", pr1.sent >= 3 && pr1.accepted >= 3 && pr2.accepted >= 3, `${pr1.sent}/${pr1.accepted}, ${pr2.sent}/${pr2.accepted}`);
   check("練習中の塗りが得点に出る", (pr1.scores[pr1.me] ?? 0) > 0 && (pr2.scores[pr2.me] ?? 0) > 0, JSON.stringify(pr1.scores));
   check("俯瞰画面はプレイヤーではなく（players に含まれない）、2 人を見ている", prOv.me.startsWith("p") && !pr1.players.some((p) => p.startsWith(prOv.me + ":")) && prOv.players.length === 2, `${prOv.me} / ${prOv.players.join("|")}`);
-  // 合成の手は 5s 周期で 0.5s 消えるが、手の表示は handLostMs（300ms）残るので view になるのは約 200ms だけ（tankHoldMs=0 のとき）。
+  // 合成の手は 5s 周期で パー 2.5s → グー 2s → 0.5s 消える。既定（tankShow=fist）のウィンドウ 1 ではグーの間だけ手元（hand）に出て、
+  // パーの間は消える（-）。視界の下（view）には決して出ない。
+  // ウィンドウ 2（tankShow=always）は常に手元にあり、手の表示は handLostMs（300ms）残るので view になるのは約 200ms だけ（tankHoldMs=0 のとき）。
   // 周期（5s）の倍数の間隔で読むと位相によっては毎回外すので、100ms 間隔で 2 周期ぶん追って両方を見る
-  const tankPlaces = new Set();
-  for (let i = 0; i < 120 && !(tankPlaces.has("hand") && tankPlaces.has("view")); i++) {
-    tankPlaces.add((await readHud(p1)).tank);
+  const tankPlaces1 = new Set();
+  const tankPlaces2 = new Set();
+  for (
+    let i = 0;
+    i < 120 && !(tankPlaces1.has("hand") && tankPlaces1.has("-") && tankPlaces2.has("hand") && tankPlaces2.has("view"));
+    i++
+  ) {
+    const [h1, h2] = await Promise.all([readHud(p1), readHud(p2)]);
+    tankPlaces1.add(h1.tank);
+    tankPlaces2.add(h2.tank);
     await sleep(100);
   }
-  check("インクタンクが手元（合成の手のそば）に出ている", tankPlaces.has("hand"), [...tankPlaces].join(","));
-  check("合成の手が消えている間は視界の下に出る", tankPlaces.has("view"), [...tankPlaces].join(","));
+  check("既定: グーで補充している間はインクタンクが手元（合成の手のそば）に出る", tankPlaces1.has("hand"), [...tankPlaces1].join(","));
+  check("既定: パーで撃っている間はインクタンクが消える", tankPlaces1.has("-"), [...tankPlaces1].join(","));
+  check("既定: 視界の下には出ない", !tankPlaces1.has("view"), [...tankPlaces1].join(","));
+  check("tankShow=always: インクタンクが手元に出ている", tankPlaces2.has("hand"), [...tankPlaces2].join(","));
+  check("tankShow=always: 合成の手が消えている間は視界の下に出る", tankPlaces2.has("view"), [...tankPlaces2].join(","));
   const buttonEnabled = await p3.eval("(() => { const b = document.querySelector('#start-match'); return b && !b.disabled; })()");
   check("俯瞰画面の「対戦開始」が押せる状態", buttonEnabled === true);
   check("寸法は URL に無く、既定（3x2.4x2.5、マーカー 1.2）で全員が一致している", pr1.field === "3x2.4x2.5/1.2" && pr2.field === "3x2.4x2.5/1.2" && prOv.field === "3x2.4x2.5/1.2", `${pr1.field} / ${pr2.field} / ${prOv.field}`);
