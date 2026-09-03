@@ -75,6 +75,63 @@
         color: #9aa0a6;
         cursor: default;
       }
+      /* フィールドの寸法（幅・高さ・奥行き）。練習中か結果表示中だけ変えられる */
+      #size {
+        border: 1px solid #3c4043;
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin: 0 0 8px;
+      }
+      #size legend {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        padding: 0 4px;
+      }
+      #size .row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr) auto;
+        gap: 6px;
+        align-items: end;
+      }
+      #size label {
+        display: grid;
+        gap: 2px;
+        font-size: 0.7rem;
+        color: #9aa0a6;
+      }
+      #size input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px;
+        border-radius: 6px;
+        border: 1px solid #5f6368;
+        background: #14161a;
+        color: #e8eaed;
+        font-size: 0.9rem;
+      }
+      #size input:disabled {
+        color: #9aa0a6;
+      }
+      #apply-size {
+        padding: 7px 12px;
+        border-radius: 6px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #apply-size:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      #size-hint {
+        margin-top: 6px;
+        color: #9aa0a6;
+        font-size: 0.7rem;
+        min-height: 1em;
+      }
       #players {
         list-style: none;
         margin: 0;
@@ -127,10 +184,21 @@
       <h1>08. MR Splatoon 俯瞰画面</h1>
       <p class="sub">
         コート全体・全員の位置と塗りをリアルタイムに表示します（PC 用。カメラ・マーカー不要）。
-        スマホと同じ room（既定 demo。?room=）と同じフィールド設定で入ります。
+        スマホと同じ room（既定 demo。?room=）に入ります。
+        塗れる空間の大きさ（幅・高さ・奥行き）はここで決めて全員に配ります。
         ドラッグで回転、ホイールで拡大。
       </p>
       <div id="phase">接続中…</div>
+      <fieldset id="size">
+        <legend>塗れる空間の大きさ [m]（開始前に変更）</legend>
+        <div class="row">
+          <label>幅<input id="size-wallW" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <label>高さ<input id="size-wallH" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <label>奥行き<input id="size-floorDepth" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <button id="apply-size" type="button" disabled>反映</button>
+        </div>
+        <div id="size-hint"></div>
+      </fieldset>
       <button id="start-match" type="button" disabled>対戦開始</button>
       <ul id="players"></ul>
       <div id="status"></div>

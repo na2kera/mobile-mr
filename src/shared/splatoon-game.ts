@@ -15,6 +15,7 @@ import {
   norm,
   simulateInk,
   type FieldConfig,
+  type FieldSize,
   type InkLanding,
   type InkColor,
   type SurfaceFrame,
@@ -44,6 +45,8 @@ export type GameEvent =
   | { kind: "start" }
   /** 結果表示が終わり練習に戻った（格子は消える） */
   | { kind: "practice" }
+  /** 俯瞰画面がフィールドの寸法を変えた（格子は作り直し = 塗りは消える。config は field メッセージで配る） */
+  | { kind: "field" }
   /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空） */
   | { kind: "result"; winners: string[]; winnerNames: string[] }
   | { kind: "shot"; by: string };
@@ -84,8 +87,9 @@ export const MAX_SHOT_FROM_HEAD_M = 1.2;
 export const FIST_STALE_MS = 1000;
 
 export class SplatoonGame {
-  readonly config: FieldConfig;
-  readonly surfaces: SurfaceFrame[];
+  /** setFieldSize で差し替わる（参照を取っておかず、都度 game.config を読むこと） */
+  config: FieldConfig;
+  surfaces: SurfaceFrame[];
   readonly grids = new Map<string, InkGrid>();
   readonly players = new Map<string, Player>();
   phase: Phase = "practice";
@@ -104,15 +108,41 @@ export class SplatoonGame {
   /** 直近の join で色を再利用してその色のセルを消したか（サーバーはこれを見て格子を配り直す） */
   lastJoinClearedColor = false;
   /** 発射位置の距離上限（コートの対角 + 1m） */
-  private readonly maxShotDist: number;
+  private maxShotDist = MAX_SHOT_DIST_M;
   lastRejectReason = "";
 
   constructor(config: Partial<FieldConfig> = {}) {
     this.config = { ...DEFAULT_FIELD, ...config };
+    this.surfaces = [];
+    this.buildField();
+  }
+
+  /** config から壁と床（5 枚）と格子を作る。既存の格子は捨てる */
+  private buildField() {
     this.surfaces = fieldSurfaces(this.config);
+    this.grids.clear();
     for (const s of this.surfaces) this.grids.set(s.id, new InkGrid(s, this.config.cellM));
     const c = this.config;
     this.maxShotDist = Math.max(MAX_SHOT_DIST_M, Math.hypot(c.wallW / 2, c.floorDrop + c.wallH, c.floorDepth) + 1);
+  }
+
+  /**
+   * 俯瞰画面からのフィールドの寸法の変更。練習中か結果表示中だけ受け付ける（カウントダウン中・試合中は拒否）。
+   * 格子はセル数が変わるので作り直す（塗りは消える。インクと発射も新品 = resetField）。
+   * 寸法の範囲とセル数の上限は呼ぶ側（サーバー）が validateFieldSize で検証する
+   */
+  setFieldSize(size: FieldSize, now: number): GameEvent[] {
+    if (this.phase !== "practice" && this.phase !== "result") {
+      this.lastRejectReason = `cannot resize during ${this.phase}`;
+      return [];
+    }
+    this.config = { ...this.config, wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth };
+    this.buildField();
+    // 結果表示中なら練習に戻す（結果の格子は消えたので、勝者の表示だけ残っても意味がない）
+    this.phase = "practice";
+    this.phaseEndsAt = Infinity;
+    this.resetField(now);
+    return [{ kind: "field" }];
   }
 
   get totalCells(): number {

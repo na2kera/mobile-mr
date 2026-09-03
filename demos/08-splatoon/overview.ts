@@ -6,8 +6,8 @@ import { LANDMARK_COUNT } from "../../src/shared/hand-math";
 import type { Vec3 } from "../../src/shared/hand-math";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import { DEFAULT_FIELD, fieldSurfaces, inkAt } from "../../src/shared/splatoon-sim";
-import type { FieldConfig, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
+import { DEFAULT_FIELD, FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, fieldSurfaces, inkAt, validateFieldSize } from "../../src/shared/splatoon-sim";
+import type { FieldConfig, FieldSize, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { connectGame } from "./game-client";
@@ -17,19 +17,17 @@ import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-s
 import { createSplatSound } from "./splat-sound";
 
 // Phase 8 / issue #19・#21: PC の俯瞰画面。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
-// コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」を送る唯一の端末。
+// コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」と「フィールドの寸法」を送る唯一の端末。
 // 座標系はスマホと同じ field 座標系（マーカー座標系）で、ここではそれをワールド座標にそのまま置く。
 // 描画のうち塗り（InkView）・飛行（inkAt）・ピアの頭と手は main.ts と同じ式（俯瞰なので視点だけ違う）
 
-// ---- パラメータ（room の設定はスマホと一致が必要。サーバーが検証する） ----
+// ---- パラメータ（room の設定はスマホと一致が必要。サーバーが検証する）----
+// フィールドの寸法（幅・高さ・奥行き）は URL ではなくこの画面の入力欄で決め、サーバーに送る（welcome / field で戻ってくる）
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
 const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
-const WALL_W = numParam("wallW", DEFAULT_FIELD.wallW, { min: 0.2, max: 20 });
-const WALL_H = numParam("wallH", DEFAULT_FIELD.wallH, { min: 0.2, max: 20 });
 const FLOOR_DROP = numParam("floorDrop", DEFAULT_FIELD.floorDrop, { min: 0.1, max: 5 });
-const FLOOR_DEPTH = numParam("floorDepth", DEFAULT_FIELD.floorDepth, { min: 0.2, max: 20 });
 const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
 const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
 const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 });
@@ -66,20 +64,33 @@ const field = new THREE.Group();
 scene.add(field);
 let fieldCfg: FieldConfig = {
   ...DEFAULT_FIELD,
-  wallW: WALL_W,
-  wallH: WALL_H,
   floorDrop: FLOOR_DROP,
-  floorDepth: FLOOR_DEPTH,
   gravity: GRAVITY,
   matchSec: MATCH_SEC,
   waitSec: WAIT_SEC,
 };
-const surfaces: SurfaceFrame[] = fieldSurfaces(fieldCfg);
+let surfaces: SurfaceFrame[] = [];
 const inkViews = new Map<string, InkView>();
-for (const s of surfaces) {
-  const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
-  field.add(view.group);
-  inkViews.set(s.id, view);
+
+/** 壁と床（5 枚）と塗りの層を config から作り直す（起動時と、寸法が変わったとき）。視点もコートに合わせ直す */
+function buildField() {
+  for (const v of inkViews.values()) v.dispose();
+  inkViews.clear();
+  surfaces = fieldSurfaces(fieldCfg);
+  for (const s of surfaces) {
+    const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
+    field.add(view.group);
+    inkViews.set(s.id, view);
+  }
+  fitCamera();
+}
+
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す */
+function applyFieldConfig(cfg: FieldConfig): boolean {
+  const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
+  fieldCfg = cfg;
+  if (changed) buildField();
+  return changed;
 }
 // マーカーの枠（壁の原点。スマホの位置合わせの基準がどこかを示す）
 field.add(
@@ -91,9 +102,13 @@ field.add(
 field.add(new THREE.AxesHelper(0.3));
 
 // 視点: コートの後方上空から壁を見下ろす。OrbitControls で回せる
-camera.position.set(WALL_W * 0.9, WALL_H * 0.6, FLOOR_DEPTH + WALL_W * 0.9);
-controls.target.set(0, -FLOOR_DROP / 2, FLOOR_DEPTH / 2);
-controls.update();
+function fitCamera() {
+  const { wallW, wallH, floorDrop, floorDepth } = fieldCfg;
+  camera.position.set(wallW * 0.9, -floorDrop + wallH * 1.1, floorDepth + wallW * 0.9);
+  controls.target.set(0, -floorDrop + wallH * 0.35, floorDepth / 2);
+  controls.update();
+}
+buildField();
 
 // ---- インクの玉（飛行中）----
 const inkGeometry = new THREE.SphereGeometry(1, 16, 12);
@@ -256,6 +271,9 @@ let startsSent = 0;
 let lastRejectReason = "";
 /** 「対戦開始」を送ってから state / rejected / 切断のいずれかが来るまで（二重送信の防止） */
 let startPending = false;
+/** 寸法の「反映」を送ってから field / rejected / 切断のいずれかが来るまで */
+let fieldPending = false;
+let fieldsSent = 0;
 
 function colorOf(id: string): InkColor | null {
   return auth?.state.players.find((p) => p.id === id)?.color ?? null;
@@ -300,10 +318,7 @@ function connect() {
     {
       markerId: MARKER_ID,
       markerMm: MARKER_MM,
-      wallW: WALL_W,
-      wallH: WALL_H,
       floorDrop: FLOOR_DROP,
-      floorDepth: FLOOR_DEPTH,
       gravity: GRAVITY,
       matchSec: MATCH_SEC,
       waitSec: WAIT_SEC,
@@ -314,6 +329,7 @@ function connect() {
         if (status !== "open") {
           joined = false;
           startPending = false;
+          fieldPending = false;
         }
         renderPanel();
       },
@@ -326,7 +342,8 @@ function connect() {
         selfId = id;
         netStatus = "open";
         joined = true;
-        fieldCfg = cfg;
+        applyFieldConfig(cfg);
+        syncSizeInputs();
         [...peers.keys()].forEach(removePeer);
         peerIds.forEach(createPeer);
         lastEventKey = "";
@@ -349,10 +366,22 @@ function connect() {
       onRejected: (reason) => {
         lastRejectReason = reason;
         startPending = false;
-        console.log(`[overview] start rejected by server: ${reason}`);
+        fieldPending = false;
+        console.log(`[overview] rejected by server: ${reason}`);
         renderPanel();
       },
       onState,
+      onField: (cfg, state) => {
+        fieldPending = false;
+        lastRejectReason = "";
+        applyFieldConfig(cfg);
+        syncSizeInputs();
+        for (const s of shots.values()) s.mesh.removeFromParent();
+        shots.clear();
+        splatted.clear();
+        onState(state);
+        console.log(`[overview] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth} (${state.totalCells} cells)`);
+      },
     },
     "overview",
   );
@@ -432,6 +461,55 @@ const startButton = document.querySelector<HTMLButtonElement>("#start-match")!;
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
+/** フィールドの寸法の入力欄（幅・高さ・奥行き [m]）と「反映」。サーバーの config が届くたび入力欄を合わせる */
+const sizeInputs: Record<keyof FieldSize, HTMLInputElement> = {
+  wallW: document.querySelector<HTMLInputElement>("#size-wallW")!,
+  wallH: document.querySelector<HTMLInputElement>("#size-wallH")!,
+  floorDepth: document.querySelector<HTMLInputElement>("#size-floorDepth")!,
+};
+const applySizeButton = document.querySelector<HTMLButtonElement>("#apply-size")!;
+const sizeHint = document.querySelector<HTMLDivElement>("#size-hint")!;
+for (const key of FIELD_SIZE_KEYS) {
+  sizeInputs[key].min = String(FIELD_SIZE_LIMITS[key].min);
+  sizeInputs[key].max = String(FIELD_SIZE_LIMITS[key].max);
+}
+
+function syncSizeInputs() {
+  for (const key of FIELD_SIZE_KEYS) sizeInputs[key].value = String(fieldCfg[key]);
+  renderPanel();
+}
+
+/** 入力欄の値（不正なら null） */
+function readSizeInputs(): FieldSize {
+  return {
+    wallW: Number(sizeInputs.wallW.value),
+    wallH: Number(sizeInputs.wallH.value),
+    floorDepth: Number(sizeInputs.floorDepth.value),
+  };
+}
+function sizeInputsChanged(): boolean {
+  const v = readSizeInputs();
+  return FIELD_SIZE_KEYS.some((k) => v[k] !== fieldCfg[k]);
+}
+
+applySizeButton.addEventListener("click", () => {
+  if (!client || fieldPending) return;
+  const size = readSizeInputs();
+  const invalid = validateFieldSize(size, fieldCfg.cellM);
+  if (invalid) {
+    lastRejectReason = invalid;
+    renderPanel();
+    return;
+  }
+  if (client.sendField(size)) {
+    fieldsSent++;
+    fieldPending = true;
+    lastRejectReason = "";
+    console.log(`[overview] field sent ${size.wallW}x${size.wallH}x${size.floorDepth}`);
+  }
+  renderPanel();
+});
+for (const key of FIELD_SIZE_KEYS) sizeInputs[key].addEventListener("input", () => renderPanel());
 
 function remainingSec(now: number): number {
   if (!auth || auth.state.phaseEndsAt === null) return 0;
@@ -470,17 +548,32 @@ function renderPanel() {
     phaseText = w.length === 0 ? "結果: だれも塗れず…" : `結果: ${w.join("・")} の勝ち！`;
   }
   const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0 && !startPending;
+  // 寸法は練習中か結果表示中だけ変えられる（カウントダウン中・試合中は入力ごと無効）
+  const sizeEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !fieldPending;
+  const sizeInvalid = validateFieldSize(readSizeInputs(), fieldCfg.cellM);
+  const canApplySize = sizeEditable && sizeInputsChanged() && sizeInvalid === null;
+  const sizeHintText = !joined
+    ? ""
+    : sizeInvalid
+      ? sizeInvalid
+      : sizeInputsChanged()
+        ? "「反映」で全員のフィールドが変わります（塗りは消えます）"
+        : `いま: 幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m（${s?.totalCells ?? 0} セル）`;
   const total = Math.max(1, s?.totalCells ?? 1);
   const ranking = s
     ? [...s.players]
         .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
         .map((p) => ({ p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id) }))
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, ranking, netStatus, lastRejectReason, peers.size]);
+  const key = JSON.stringify([phaseText, canStart, startPending, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   startButton.disabled = !canStart;
+  for (const key of FIELD_SIZE_KEYS) sizeInputs[key].disabled = !sizeEditable;
+  applySizeButton.disabled = !canApplySize;
+  applySizeButton.textContent = fieldPending ? "送信中…" : "反映";
+  sizeHint.textContent = sizeHintText;
   startButton.textContent = startPending
     ? "送信中…"
     : s?.phase === "play"
@@ -512,7 +605,7 @@ function renderPanel() {
     li.textContent = "プレイヤーはまだいません（スマホで同じ room に入ってください）";
     playersEl.append(li);
   }
-  statusEl.textContent = [`room=${ROOM ?? "(不正)"} ws=${netStatus}`, lastRejectReason && `開始できません: ${lastRejectReason}`].filter(Boolean).join("\n");
+  statusEl.textContent = [`room=${ROOM ?? "(不正)"} ws=${netStatus}`, lastRejectReason && `できません: ${lastRejectReason}`].filter(Boolean).join("\n");
 }
 
 let lastHudText = "";
@@ -520,7 +613,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} live=${shots.size} seq=${s.seq} starts=${startsSent}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth} live=${shots.size} seq=${s.seq} starts=${startsSent} fields=${fieldsSent}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;
