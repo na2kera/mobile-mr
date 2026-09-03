@@ -75,6 +75,30 @@
         color: #9aa0a6;
         cursor: default;
       }
+      /* 途中終了（issue #32）。開始と同じ形だが、押し間違えないよう塗りつぶさない */
+      #stop-match {
+        width: 100%;
+        font-size: 0.9rem;
+        font-weight: 700;
+        padding: 10px;
+        margin: -4px 0 12px;
+        border-radius: 999px;
+        border: 1px solid #f28b82;
+        background: transparent;
+        color: #f28b82;
+        cursor: pointer;
+      }
+      #stop-match:disabled {
+        border-color: #3c4043;
+        color: #5f6368;
+        cursor: default;
+      }
+      /* 順位の塗り率（issue #32 で大きく） */
+      #players .pct {
+        font-size: 1.15rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
       /* フィールドの寸法（幅・高さ・奥行き）。練習中か結果表示中だけ変えられる */
       #size {
         border: 1px solid #3c4043;
@@ -145,7 +169,7 @@
       }
       #players li {
         display: grid;
-        grid-template-columns: 14px 1fr auto;
+        grid-template-columns: 14px 1fr auto auto;
         gap: 8px;
         align-items: center;
       }
@@ -190,6 +214,7 @@
         コート全体・全員の位置と塗りをリアルタイムに表示します（PC 用。カメラ・マーカー不要）。
         スマホと同じ room（既定 demo。?room=）に入ります。
         塗れる空間の大きさ（幅・高さ・奥行き）はここで決めて全員に配ります。
+        対戦は 1 分（?matchSec=）。「対戦を終了」で途中でも結果に進めます。
         ドラッグで回転、ホイールで拡大。
       </p>
       <div id="phase">接続中…</div>
@@ -207,6 +232,7 @@
         <div id="size-hint"></div>
       </fieldset>
       <button id="start-match" type="button" disabled>対戦開始</button>
+      <button id="stop-match" type="button" disabled>対戦を終了</button>
       <ul id="players"></ul>
       <div id="status"></div>
       <p><a href="./">← プレイヤー画面（スマホ用）</a> ／ <a href="/">デモ一覧</a></p>

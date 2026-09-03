@@ -71,7 +71,7 @@ export const DEFAULT_FIELD: FieldConfig = {
   floorDepth: 2.5,
   gravity: 4,
   maxFlightSec: 3,
-  matchSec: 180,
+  matchSec: 60,
   resultSec: 8,
   shotSpeed: 5,
   shotRadius: 0.09,
