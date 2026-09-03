@@ -2,6 +2,7 @@
 //   - 参加順に 8 色から自分の色を割り当てる（その試合で未使用の色を優先。再利用時はその色のセルを消す）
 //   - 入室したら練習（practice。時間無制限に自由に塗れる。issue #20）→ 俯瞰画面の「対戦開始」（start）で
 //     カウントダウン（waiting。waitSec）→ 試合（matchSec）→ 結果（resultSec）→ 格子とインクをリセットして練習に戻る
+//   - 俯瞰画面の「終了」（stop）で試合を途中で終えられる（即座に結果へ）。カウントダウン中の stop は中止して練習に戻る（issue #32）
 //   - 発射（shot）は位置・速度・半径・インク残量を検証し、着弾を simulateInk で決めて格子に塗る
 //   - インクは撃つのをやめると回復し、グー（fist）の間は速く回復する（issue #20「グーで補充」）
 //   - 得点 = 自分の色のセル数（四方の壁 + 床）。勝者はセル最多の人（同点は複数）
@@ -45,10 +46,12 @@ export type GameEvent =
   | { kind: "start" }
   /** 結果表示が終わり練習に戻った（格子は消える） */
   | { kind: "practice" }
+  /** 俯瞰画面がカウントダウンを中止した（練習に戻る。練習の塗りは残る） */
+  | { kind: "cancel" }
   /** 俯瞰画面がフィールドの寸法を変えた（格子は作り直し = 塗りは消える。config は field メッセージで配る） */
   | { kind: "field" }
-  /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空） */
-  | { kind: "result"; winners: string[]; winnerNames: string[] }
+  /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空）。stopped = 俯瞰画面が途中で終えた */
+  | { kind: "result"; winners: string[]; winnerNames: string[]; stopped?: boolean }
   | { kind: "shot"; by: string };
 
 export type GameSnapshot = {
@@ -313,18 +316,41 @@ export class SplatoonGame {
     }
     if (now < this.phaseEndsAt) return [];
     if (this.phase === "waiting") return this.startMatch(now);
-    if (this.phase === "play") {
-      const scores = this.scores();
-      const max = Math.max(0, ...Object.values(scores));
-      this.winners = max > 0 ? Object.keys(scores).filter((id) => scores[id] === max) : [];
-      // 名前は結果確定時に固定する（勝者が result 中に退出しても名前で表示できる）
-      this.winnerNames = this.winners.map((id) => this.players.get(id)?.name ?? id);
-      this.phase = "result";
-      this.phaseEndsAt = now + this.config.resultSec * 1000;
-      this.seq++;
-      return [{ kind: "result", winners: this.winners, winnerNames: this.winnerNames }];
-    }
+    if (this.phase === "play") return this.finishMatch(now, false);
     if (this.phase === "result") return this.enterPractice(now);
+    return [];
+  }
+
+  /** 試合を終えて結果（result）にする。時間切れ（tick）と俯瞰画面の stop の両方から */
+  private finishMatch(now: number, stopped: boolean): GameEvent[] {
+    const scores = this.scores();
+    const max = Math.max(0, ...Object.values(scores));
+    this.winners = max > 0 ? Object.keys(scores).filter((id) => scores[id] === max) : [];
+    // 名前は結果確定時に固定する（勝者が result 中に退出しても名前で表示できる）
+    this.winnerNames = this.winners.map((id) => this.players.get(id)?.name ?? id);
+    this.phase = "result";
+    this.phaseEndsAt = now + this.config.resultSec * 1000;
+    this.seq++;
+    const ev: GameEvent = { kind: "result", winners: this.winners, winnerNames: this.winnerNames };
+    if (stopped) ev.stopped = true;
+    return [ev];
+  }
+
+  /**
+   * 俯瞰画面の「終了」（issue #32「途中で終われるように」）。
+   * 試合中なら即座に結果へ（時間切れと同じ集計。塗りはそのまま結果表示に使う）、
+   * カウントダウン中なら中止して練習に戻る（練習の塗りは消していないのでそのまま）。
+   * それ以外（練習中・結果表示中）は終えるものが無いので空を返す
+   */
+  stop(now: number): GameEvent[] {
+    if (this.phase === "play") return this.finishMatch(now, true);
+    if (this.phase === "waiting") {
+      this.phase = "practice";
+      this.phaseEndsAt = Infinity;
+      this.seq++;
+      return [{ kind: "cancel" }];
+    }
+    this.lastRejectReason = `nothing to stop during ${this.phase}`;
     return [];
   }
 

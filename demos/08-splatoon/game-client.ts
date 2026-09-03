@@ -39,6 +39,8 @@ export type GameClient = {
   sendShot: (pos: V3, vel: V3, radius: number) => boolean;
   /** 対戦開始（俯瞰画面だけ。送れたら true） */
   sendStart: () => boolean;
+  /** 途中終了（俯瞰画面だけ。試合中は即座に結果、カウントダウン中は中止。送れたら true） */
+  sendStop: () => boolean;
   /** フィールドの寸法の変更（俯瞰画面だけ。送れたら true） */
   sendField: (size: FieldSize) => boolean;
   dispose: () => void;
@@ -139,6 +141,9 @@ export function connectGame(
     },
     sendStart() {
       return send({ type: "start" });
+    },
+    sendStop() {
+      return send({ type: "stop" });
     },
     sendField(size) {
       return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop });

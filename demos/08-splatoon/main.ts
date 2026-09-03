@@ -48,7 +48,9 @@ import { createSplatSound } from "./splat-sound";
 //     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
 //     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
 //   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
-//     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 3 分の試合 → 結果 → 練習に戻る
+//     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 → 練習に戻る。
+//     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
+//     対戦中は視界の上に自分の塗り率と順位を大きく出す（issue #32「パーセント表示がもう少し大きく」）
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
 //   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
@@ -157,8 +159,8 @@ let fieldCfg: FieldConfig = {
 let surfaces: SurfaceFrame[] = [];
 const inkViews = new Map<string, InkView>();
 
-// スコアボード: 壁の上端。視界内メッセージ: カメラの子
-const scorePanel = new TextPanel(1.0, 0.22);
+// スコアボード: 壁の上端（issue #32 で 1.0×0.22 → 1.5×0.33 に拡大。壁から 2〜3m 離れると読めなかった）。視界内メッセージ: カメラの子
+const scorePanel = new TextPanel(1.5, 0.33);
 field.add(scorePanel.mesh);
 
 /** 壁と床（5 枚）と塗りの層を config から作り直す（起動時と、寸法が変わったとき） */
@@ -172,7 +174,7 @@ function buildField() {
     inkViews.set(s.id, view);
   }
   // 壁の下端は床（-floorDrop）に接続し、上端は床から wallH
-  scorePanel.mesh.position.set(0, -fieldCfg.floorDrop + fieldCfg.wallH + 0.16, 0.01);
+  scorePanel.mesh.position.set(0, -fieldCfg.floorDrop + fieldCfg.wallH + 0.22, 0.01);
 }
 buildField();
 
@@ -190,6 +192,11 @@ camera.add(message.mesh);
 const inkPanel = new TextPanel(0.52, 0.09, 512);
 inkPanel.mesh.position.set(0, -0.45, -1.2);
 camera.add(inkPanel.mesh);
+// 自分の塗り率と順位（視界の上・対戦中だけ。issue #32「対戦中のパーセント表示がもう少し大きく見えると良い」。
+// 壁のスコアボードは離れると小さいので、視界に固定して minCols=8 で文字を大きく出す）
+const percentPanel = new TextPanel(0.6, 0.16, 512, 8);
+percentPanel.mesh.position.set(0, 0.34, -1.2);
+camera.add(percentPanel.mesh);
 
 // ---- インクの玉（飛行中）----
 const inkGeometry = new THREE.SphereGeometry(1, 16, 12);
@@ -564,6 +571,7 @@ function onState(state: GameSnapshot) {
     if (ev?.kind === "start") flash = { text: "スタート！ 塗れ！", untilMs: now + 2500 };
     else if (ev?.kind === "countdown") flash = { text: "まもなく対戦開始！\n構えてください", untilMs: now + 2500 };
     else if (ev?.kind === "practice") flash = { text: "練習に戻りました\n（開始は俯瞰画面から）", untilMs: now + 3000 };
+    else if (ev?.kind === "cancel") flash = { text: "対戦開始は中止されました\n練習を続けてください", untilMs: now + 3000 };
     else if (ev?.kind === "field") flash = { text: `フィールドが変わりました\n幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m\nマーカーの高さ ${fieldCfg.floorDrop}m`, untilMs: now + 3000 };
     else if (ev?.kind === "result") {
       const text =
@@ -572,7 +580,7 @@ function onState(state: GameSnapshot) {
           : ev.winners.includes(selfId)
             ? "あなたの勝ち！"
             : `${ev.winnerNames.join("・")} の勝ち！`;
-      flash = { text, untilMs: now + 4000 };
+      flash = { text: ev.stopped ? `そこまで！\n${text}` : text, untilMs: now + 4000 };
     }
     console.log(`[game] event ${ev?.kind} phase=${state.phase} scores=${JSON.stringify(state.scores)} players=${state.players.length}`);
   }
@@ -926,14 +934,24 @@ function updateMessages(now: number) {
     const left = Math.ceil(remainingSec(now));
     const head =
       s.phase === "result" ? "結果" : s.phase === "waiting" ? `開始まで ${left} 秒` : s.phase === "practice" ? "練習中（開始は俯瞰画面から）" : `残り ${left} 秒`;
-    const ranking = [...s.players]
-      .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
-      .map((p, i) => {
-        const pct = (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1);
-        const win = s.winners?.includes(p.id) ? " 🏆" : "";
-        return `${i + 1}. ${inkColorName(p.color)} ${p.name}${p.id === selfId ? "（あなた）" : ""} ${pct}%${win}`;
-      });
+    const sorted = [...s.players].sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0));
+    const ranking = sorted.map((p, i) => {
+      const pct = (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1);
+      const win = s.winners?.includes(p.id) ? " 🏆" : "";
+      return `${i + 1}. ${inkColorName(p.color)} ${p.name}${p.id === selfId ? "（あなた）" : ""} ${pct}%${win}`;
+    });
     scorePanel.set([head, ...ranking].join("\n"), "#e8eaed", "left");
+    // 対戦中だけ、自分の塗り率と順位を視界の上に大きく（同点は同じ順位）
+    const myIndex = sorted.findIndex((p) => p.id === selfId);
+    if (s.phase === "play" && myIndex >= 0 && myColor) {
+      const myScore = s.scores[selfId] ?? 0;
+      const rank = sorted.findIndex((p) => (s.scores[p.id] ?? 0) === myScore) + 1;
+      percentPanel.set(`${rank}位 ${((myScore / total) * 100).toFixed(1)}%`, `#${inkColorHex(myColor).toString(16).padStart(6, "0")}`);
+    } else {
+      percentPanel.set("");
+    }
+  } else {
+    percentPanel.set("");
   }
   let text = "";
   let color = "#e8eaed";
@@ -976,7 +994,8 @@ function updateMessages(now: number) {
     text = `練習中（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充\n対戦は俯瞰画面の「開始」から`;
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   } else {
-    text = `あなたは ${myColor ? inkColorName(myColor) : "-"}\nパーで塗る ／ グーで補充`;
+    // 対戦中: 1 分と短いので残り時間も視界に（塗り率は上の percentPanel）
+    text = `残り ${Math.ceil(remainingSec(now))} 秒（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充`;
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
   message.set(text, color);

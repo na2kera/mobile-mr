@@ -304,6 +304,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const inks = Object.values(snap.ink);
   check("snapshot: ink に残っている全員の残量", Object.keys(snap.ink).length === g.players.size && inks.every((v) => typeof v === "number" && v <= 1));
   check("練習に戻るとインクは満タン", inks.every((v) => v === 1));
+  // 途中終了（issue #32）: 試合中の stop は即座に結果、カウントダウン中の stop は中止して練習、それ以外は拒否
+  {
+    const gs = new SplatoonGame({ matchSec: 60, resultSec: 5, waitSec: 1, wallW: 2, wallH: 1 });
+    check("練習中の stop は拒否（終えるものが無い）", gs.stop(0).length === 0 && /practice/.test(gs.lastRejectReason) && gs.phase === "practice");
+    gs.join("p1", "A", 0);
+    gs.join("p2", "B", 0);
+    gs.updatePose("p1", [0, 0, 1.5], 50);
+    gs.updatePose("p2", [0.5, 0, 1.5], 50);
+    check("練習中に塗ってからカウントダウン", gs.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 100) !== null && gs.start(200)[0]?.kind === "countdown");
+    const seqBefore = gs.snapshot(250).seq;
+    const cancel = gs.stop(300);
+    check("カウントダウン中の stop は中止（cancel）で練習に戻り、練習の塗りは残る。seq は進む", cancel[0]?.kind === "cancel" && gs.phase === "practice" && gs.phaseEndsAt === Infinity && gs.scores().p1 > 0 && gs.snapshot(300).seq > seqBefore);
+    check("中止後は tick しても始まらない", gs.tick(5000).length === 0 && gs.phase === "practice");
+    gs.start(6000);
+    gs.tick(7000);
+    check("再び開始できる（waitSec 後に play。塗りは消える）", gs.phase === "play" && gs.scores().p1 === 0 && gs.phaseEndsAt === 67000);
+    check("試合中に p2 が塗る", gs.shoot("p2", [0.5, 0, 1], [0, -2, -4.5], 0.09, 7100)?.landing?.hit === true, gs.lastRejectReason);
+    const stopped = gs.stop(8000);
+    check("試合中の stop は時間切れを待たず result（stopped 付き・勝者は最多セル = p2・結果表示は resultSec）", stopped[0]?.kind === "result" && stopped[0].stopped === true && stopped[0].winners.length === 1 && stopped[0].winners[0] === "p2" && gs.phase === "result" && gs.phaseEndsAt === 13000);
+    check("result 中の stop は拒否", gs.stop(8100).length === 0 && /result/.test(gs.lastRejectReason) && gs.phase === "result");
+    check("stop 後の result は時間で練習に戻る", gs.tick(13000)[0]?.kind === "practice" && gs.phase === "practice");
+    gs.start(14000);
+    gs.tick(15000);
+    const timeUp = gs.tick(75000);
+    check("時間切れの result には stopped が付かない", timeUp[0]?.kind === "result" && timeUp[0].stopped === undefined);
+  }
   // 結果表示中にも start できる（次の対戦へ）
   const g2 = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
   g2.join("q1", "Q", 0);
@@ -558,6 +584,20 @@ try {
   b.send({ type: "start" });
   const rejPhone = await b.waitFor((m) => m.type === "rejected" && /overview/.test(m.reason));
   check("スマホからの start には rejected: not overview が返る", rejPhone !== null);
+  // 途中終了（issue #32）: スマホからは拒否、俯瞰画面からは試合中でも即座に result（格子付き）が全員に配られる
+  const rejCountBefore = b.msgs.filter((m) => m.type === "rejected" && /overview/.test(m.reason)).length;
+  b.send({ type: "stop" });
+  const rejPhoneStop = await b.waitFor(() => b.msgs.filter((m) => m.type === "rejected" && /overview/.test(m.reason)).length > rejCountBefore);
+  check("スマホからの stop には rejected: not overview が返る", rejPhoneStop !== null);
+  check("stop を送る前はまだ試合中（matchSec=20 のうち数秒）", !a.msgs.some((m) => m.type === "state" && m.state.phase === "result"));
+  ov.send({ type: "stop" });
+  const stoppedSt = await a.waitFor((m) => m.type === "state" && m.state.phase === "result" && m.state.event?.kind === "result");
+  check("俯瞰画面の stop で時間切れを待たず result が全員に配られる（stopped 付き・格子付き・勝者は塗った p2）", stoppedSt !== null && stoppedSt.state.event.stopped === true && stoppedSt.state.grids && stoppedSt.state.winners?.[0] === "p2", JSON.stringify(stoppedSt?.state.event));
+  const ovStopped = await ov.waitFor((m) => m.type === "state" && m.state.phase === "result", 1000);
+  check("俯瞰画面にも result が届く", ovStopped !== null);
+  ov.send({ type: "stop" });
+  const rejStopResult = await ov.waitFor((m) => m.type === "rejected" && /nothing to stop/.test(m.reason));
+  check("結果表示中の stop は俯瞰画面に rejected: nothing to stop during result", rejStopResult !== null);
   // 俯瞰画面の再接続: 新しい id で welcome、peers に古い id は残らない
   ov.ws.close();
   await sleep(100);

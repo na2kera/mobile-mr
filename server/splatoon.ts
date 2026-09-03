@@ -2,7 +2,7 @@
 // ルールは src/shared/splatoon-game.ts の純粋クラス。ここは「Room 設定」「メッセージ」「状態と tick」だけ。
 // 接続には 2 つの役割がある: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview）。俯瞰画面はプレイヤーではない
 // （game.join しない・join / leave を配らない・welcome の peers にも入れない）が、room のメンバーとして
-// pose / shot / state を受け取り、唯一「start（対戦開始）」と「field（フィールドの寸法の変更）」を送れる（issue #19 / #21）。
+// pose / shot / state を受け取り、唯一「start（対戦開始）」「stop（途中終了）」と「field（フィールドの寸法の変更）」を送れる（issue #19 / #21 / #32）。
 // フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
@@ -84,6 +84,7 @@ function parseClientMessage(data: RawData): ClientMessage | null {
     return { type: "pose", ...pose };
   }
   if (m.type === "start") return { type: "start" };
+  if (m.type === "stop") return { type: "stop" };
   if (m.type === "field") {
     // 範囲とセル数の上限は onMessage で validateFieldSize（理由を rejected で返すため）。ここは数値であることだけ
     if (!FIELD_SIZE_KEYS.every((k) => typeof m[k] === "number" && Number.isFinite(m[k]))) return null;
@@ -221,6 +222,23 @@ export function splatoonServer() {
         }
         console.log(`[splatoon] ${id} start → countdown ${game.config.waitSec}s`);
         broadcastState(room, now, false, events[0]);
+        return;
+      }
+      if (msg.type === "stop") {
+        // 途中終了も俯瞰画面だけ（issue #32）。試合中は即座に結果、カウントダウン中は中止して練習へ
+        if (!isOverview) {
+          room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
+          return;
+        }
+        const events = game.stop(now);
+        if (events.length === 0) {
+          console.log(`[splatoon] ${id} stop rejected: ${game.lastRejectReason}`);
+          room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
+          return;
+        }
+        console.log(`[splatoon] ${id} stop → ${events[0].kind}`);
+        // 結果は tick の時間切れと同じく格子ごと配る（カウントダウンの中止は格子が変わらないので配らない）
+        broadcastState(room, now, events[0].kind === "result", events[0]);
         return;
       }
       if (msg.type === "field") {

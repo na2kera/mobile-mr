@@ -10,9 +10,10 @@ export const SPLATOON_PATH = "/api/splatoon";
 /**
  * メッセージや座標系の意味を変えたら上げる（不一致は入室拒否）。
  * v5: 練習 / 俯瞰画面からの開始 / グーで補充。v6: 着弾を飛沫の形で塗る（shot.radius は円ではなく飛沫の基準半径。得点もその形）。
- * v7: フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）を URL クエリからサーバーの状態に移し、俯瞰画面の field で変える
+ * v7: フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）を URL クエリからサーバーの状態に移し、俯瞰画面の field で変える。
+ * v8: 俯瞰画面の stop（対戦を途中で終える / カウントダウンを中止する。issue #32）と cancel イベント
  */
-export const SPLATOON_PROTOCOL_VERSION = 7;
+export const SPLATOON_PROTOCOL_VERSION = 8;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -51,6 +52,8 @@ export type ClientMessage =
   | { type: "shot"; pos: V3; vel: V3; radius: number }
   /** 対戦開始（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける） */
   | { type: "start" }
+  /** 対戦を途中で終える（俯瞰画面だけが送れる。試合中は即座に結果へ、カウントダウン中は中止して練習に戻る。issue #32） */
+  | { type: "stop" }
   /** フィールドの寸法の変更（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける。格子は作り直す = 塗りは消える） */
   | ({ type: "field" } & FieldSize);
 
