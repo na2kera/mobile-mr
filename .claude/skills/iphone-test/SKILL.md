@@ -33,7 +33,8 @@ description: iPhone 実機（iOS Safari）でデモを確認するための手�
 iOS Safari で通る導線が Chrome で黙って変わる箇所（06 以降は `src/shared/start-flow.ts` が吸収している）：
 
 - **センサー許可**: ダイアログは出ない。最近の Chrome は互換のため `DeviceOrientationEvent.requestPermission()` を持ち即 `granted` を返す（古い Chrome には API 自体が無い）。ただし Chrome の**サイト設定 → モーションセンサー**がブロックだとイベントが黙って届かない。HUD の `sensor=... events-ok / no-events` で見分ける（3 秒以内にイベントが届いたか）
-- **フルスクリーン**: `requestFullscreen()` は使える。初回はカメラ許可ダイアログで activation（Chrome は 5 秒）が切れて拒否されるので「タップで全画面表示」の 2 タップ目に落ちる（iOS と同じ）。**全画面中は `screen.orientation.lock("landscape")` が使える**ので横向きに固定する（HUD の `fs=ok lock=ok`）。iOS は `lock=unsupported`
+- **フルスクリーン**: `requestFullscreen()` は使える。初回はカメラ許可ダイアログで activation（Chrome は 5 秒）が切れて拒否されるので「タップで全画面表示」の 2 タップ目に落ちる（iOS と同じ）。**全画面中は `screen.orientation.lock("landscape")` が使える**ので横向きに固定する（HUD の `fs=ok lock=ok`）。iOS は `lock=unsupported`。上端スワイプで解除 → ボタン再表示 → 再タップ。ユーザー向けの手順は README「Android（Chrome）で確認する」に書いてある（案内するときはそこを指す）
+- **iPhone の Chrome**: WebKit の制約で Fullscreen API 自体が無く（`fs=unsupported`）、アドレスバーは消せない。Safari（iOS 17.2+）で開いてもらう
 - **Wake Lock**: `navigator.wakeLock` で画面消灯を防ぐ（HUD の `wake=ok`。裏に回ると `released`、表に戻ると取り直す）
 - **長押し**: 「画面を押している間」の操作は Android の長押しで `contextmenu` が出て切れるので抑止している（07 / 08 / ex8-1）
 - **自己署名証明書**: 「詳細設定 → localhost にアクセスする（安全ではありません）」で突破する。突破後は `wss://` も同じホストなら通る
