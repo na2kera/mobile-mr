@@ -84,6 +84,48 @@ export const DEFAULT_FIELD: FieldConfig = {
   cellM: 0.02,
 };
 
+/**
+ * 俯瞰画面（マスター）から変えられるフィールドの寸法（幅・高さ・奥行き・マーカーの高さ [m]）。
+ * URL クエリではなくサーバーの状態として持ち、俯瞰画面の「反映」で room 全員に配る。
+ * マーカーの高さ（床からマーカー中心まで）は現実の採寸だが、測るのはマーカーを貼った運営なのでここに含める
+ */
+export type FieldSize = Pick<FieldConfig, "wallW" | "wallH" | "floorDepth" | "floorDrop">;
+export const FIELD_SIZE_KEYS = ["wallW", "wallH", "floorDepth", "floorDrop"] as const;
+/** 寸法の許容範囲 [m]（サーバーの検証と俯瞰画面の入力欄で共有） */
+export const FIELD_SIZE_LIMITS: Record<keyof FieldSize, { min: number; max: number }> = {
+  wallW: { min: 0.2, max: 20 },
+  wallH: { min: 0.2, max: 20 },
+  floorDepth: { min: 0.2, max: 20 },
+  floorDrop: { min: 0.1, max: 5 },
+};
+/** 格子のセル数の上限（四方の壁 + 床）。超える寸法は拒否（scores の走査と encode の転送量のため） */
+export const MAX_FIELD_CELLS = 250_000;
+
+/** 四方の壁 + 床のセル数（InkGrid と同じ丸め） */
+export function fieldCellCount(cfg: FieldSize & { cellM: number }): number {
+  let n = 0;
+  for (const s of fieldSurfaces({ ...DEFAULT_FIELD, ...cfg })) {
+    n += Math.max(1, Math.round(s.widthM / cfg.cellM)) * Math.max(1, Math.round(s.heightM / cfg.cellM));
+  }
+  return n;
+}
+
+/**
+ * 寸法の検証。不正なら理由（サーバーの rejected の文言と俯瞰画面の入力欄の表示で共有）、正しければ null
+ */
+export function validateFieldSize(size: FieldSize, cellM = DEFAULT_FIELD.cellM): string | null {
+  for (const key of FIELD_SIZE_KEYS) {
+    const v = size[key];
+    const { min, max } = FIELD_SIZE_LIMITS[key];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max) return `${key} は ${min}〜${max} m`;
+  }
+  // マーカーが壁の上端より上にあると、マーカーの真下に塗れない帯ができて不自然（壁は床から wallH まで）
+  if (size.floorDrop > size.wallH) return `マーカーの高さ（floorDrop ${size.floorDrop}）は壁の高さ（wallH ${size.wallH}）以下にしてください`;
+  const cells = fieldCellCount({ ...size, cellM });
+  if (cells > MAX_FIELD_CELLS) return `フィールドが大きすぎます（${cells} セル > ${MAX_FIELD_CELLS}）`;
+  return null;
+}
+
 export const WALL_ID = "wall";
 export const FLOOR_ID = "floor";
 export const LEFT_ID = "left";

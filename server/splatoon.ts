@@ -2,7 +2,8 @@
 // ルールは src/shared/splatoon-game.ts の純粋クラス。ここは「Room 設定」「メッセージ」「状態と tick」だけ。
 // 接続には 2 つの役割がある: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview）。俯瞰画面はプレイヤーではない
 // （game.join しない・join / leave を配らない・welcome の peers にも入れない）が、room のメンバーとして
-// pose / shot / state を受け取り、唯一「start（対戦開始）」を送れる（issue #19 / #21）
+// pose / shot / state を受け取り、唯一「start（対戦開始）」と「field（フィールドの寸法の変更）」を送れる（issue #19 / #21）。
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -17,7 +18,7 @@ import {
   type SplatoonRoomConfig,
 } from "../src/shared/splatoon-protocol.ts";
 import { SplatoonGame } from "../src/shared/splatoon-game.ts";
-import { DEFAULT_FIELD, type V3 } from "../src/shared/splatoon-sim.ts";
+import { DEFAULT_FIELD, FIELD_SIZE_KEYS, validateFieldSize, type FieldSize, type V3 } from "../src/shared/splatoon-sim.ts";
 import { RateLimiter } from "../src/shared/surface-paint.ts";
 
 const MAX_PAYLOAD_BYTES = 8 * 1024;
@@ -32,8 +33,6 @@ const MAX_ROOMS = 64;
 const POSE_RATE_PER_SEC = 90;
 /** 全員切断してから Room を捨てるまでの猶予（1 人プレイ中の瞬断・bfcache で試合が消えないように） */
 const EMPTY_ROOM_TTL_MS = 60 * 1000;
-/** 格子のセル数の上限（壁 + 床）。超える大きさは拒否（scores の走査と encode の転送量のため） */
-const MAX_CELLS = 250_000;
 
 type State = { game: SplatoonGame; lastBroadcastMs: number; poseRate: RateLimiter; overviews: Set<string> };
 type Ctx = RoomContext<SplatoonRoomConfig, State>;
@@ -85,6 +84,11 @@ function parseClientMessage(data: RawData): ClientMessage | null {
     return { type: "pose", ...pose };
   }
   if (m.type === "start") return { type: "start" };
+  if (m.type === "field") {
+    // 範囲とセル数の上限は onMessage で validateFieldSize（理由を rejected で返すため）。ここは数値であることだけ
+    if (!FIELD_SIZE_KEYS.every((k) => typeof m[k] === "number" && Number.isFinite(m[k]))) return null;
+    return { type: "field", wallW: m.wallW as number, wallH: m.wallH as number, floorDepth: m.floorDepth as number, floorDrop: m.floorDrop as number };
+  }
   if (m.type === "shot") {
     if (!isVec(m.pos, 3) || !isVec(m.vel, 3)) return null;
     if (typeof m.radius !== "number" || !Number.isFinite(m.radius)) return null;
@@ -105,23 +109,20 @@ function parseRoomConfig(url: URL): SplatoonRoomConfig | null {
     const v = Number(raw);
     return Number.isFinite(v) && v >= min && v <= max ? v : null;
   };
-  const wallW = num("wallW", DEFAULT_FIELD.wallW, 0.2, 20);
-  const wallH = num("wallH", DEFAULT_FIELD.wallH, 0.2, 20);
-  const floorDrop = num("floorDrop", DEFAULT_FIELD.floorDrop, 0.1, 5);
-  const floorDepth = num("floorDepth", DEFAULT_FIELD.floorDepth, 0.2, 20);
   const gravity = num("gravity", DEFAULT_FIELD.gravity, 0, 30);
   const matchSec = num("matchSec", DEFAULT_FIELD.matchSec, 10, 600);
   const waitSec = num("waitSec", DEFAULT_FIELD.waitSec, 0, 120);
-  if (wallW === null || wallH === null || floorDrop === null || floorDepth === null || gravity === null || matchSec === null || waitSec === null) return null;
-  // 四方の壁（正面 + 背面 + 左右）+ 床
-  const area = wallW * wallH * 2 + floorDepth * wallH * 2 + wallW * floorDepth;
-  const cells = area / (DEFAULT_FIELD.cellM * DEFAULT_FIELD.cellM);
-  if (cells > MAX_CELLS) return null;
-  return { markerId, markerMm, wallW, wallH, floorDrop, floorDepth, gravity, matchSec, waitSec };
+  if (gravity === null || matchSec === null || waitSec === null) return null;
+  return { markerId, markerMm, gravity, matchSec, waitSec };
 }
 
 function describeConfig(c: SplatoonRoomConfig): string {
-  return `markerId=${c.markerId} markerMm=${c.markerMm} wallW=${c.wallW} wallH=${c.wallH} floorDrop=${c.floorDrop} floorDepth=${c.floorDepth} gravity=${c.gravity} matchSec=${c.matchSec} waitSec=${c.waitSec}`;
+  return `markerId=${c.markerId} markerMm=${c.markerMm} gravity=${c.gravity} matchSec=${c.matchSec} waitSec=${c.waitSec}`;
+}
+
+/** 幅x高さx奥行き/マーカーの高さ（クライアントの HUD の field= と同じ形） */
+function describeSize(s: FieldSize): string {
+  return `${s.wallW}x${s.wallH}x${s.floorDepth}/${s.floorDrop}`;
 }
 
 function broadcastState(room: Ctx, now: number, withGrids: boolean, event?: ReturnType<SplatoonGame["tick"]>[number]) {
@@ -138,7 +139,7 @@ export function splatoonServer() {
     parseConfig: parseRoomConfig,
     sameConfig: (a, b) => describeConfig(a) === describeConfig(b),
     describeConfig,
-    configErrorReason: "Room 設定 (markerId / markerMm / wallW / wallH / floorDrop / floorDepth / gravity / matchSec) が不正です（フィールドが大きすぎる場合も）",
+    configErrorReason: "Room 設定 (markerId / markerMm / gravity / matchSec / waitSec) が不正です",
     parseMessage: parseClientMessage,
     // 役割ごとの上限（room-server の maxMembers は役割を区別しないので canJoin で数える）
     canJoin(room: Ctx, url) {
@@ -151,12 +152,9 @@ export function splatoonServer() {
     },
     maxRooms: MAX_ROOMS,
     emptyRoomTtlMs: EMPTY_ROOM_TTL_MS,
+    // フィールドの寸法は DEFAULT_FIELD から始まり、俯瞰画面の field で変わる
     createState: (_name, c) => ({
       game: new SplatoonGame({
-        wallW: c.wallW,
-        wallH: c.wallH,
-        floorDrop: c.floorDrop,
-        floorDepth: c.floorDepth,
         gravity: c.gravity,
         matchSec: c.matchSec,
         waitSec: c.waitSec,
@@ -223,6 +221,26 @@ export function splatoonServer() {
         }
         console.log(`[splatoon] ${id} start → countdown ${game.config.waitSec}s`);
         broadcastState(room, now, false, events[0]);
+        return;
+      }
+      if (msg.type === "field") {
+        // フィールドの寸法の変更も俯瞰画面だけ（対戦開始と同じ運営の操作）
+        if (!isOverview) {
+          room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
+          return;
+        }
+        const { type: _type, ...size } = msg;
+        const invalid = validateFieldSize(size, game.config.cellM);
+        const reason = invalid ?? (game.setFieldSize(size, now).length === 0 ? game.lastRejectReason : null);
+        if (reason !== null) {
+          console.log(`[splatoon] ${id} field ${describeSize(size)} rejected: ${reason}`);
+          room.send(id, { type: "rejected", reason } satisfies ServerMessage);
+          return;
+        }
+        console.log(`[splatoon] ${id} field → ${describeSize(game.config)} (${game.totalCells} cells)`);
+        // 格子が作り直されたので、config と格子付きの state を全員に配る（俯瞰画面も含む）
+        room.state.lastBroadcastMs = now;
+        room.broadcast({ type: "field", config: game.config, state: game.snapshot(now, true, { kind: "field" }) } satisfies ServerMessage);
         return;
       }
       if (isOverview) return; // 俯瞰画面は pose / shot を送らない（送ってきても捨てる）
