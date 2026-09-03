@@ -266,9 +266,12 @@ let joined = false;
 let auth: { state: GameSnapshot; recvMs: number } | null = null;
 let lastEventKey = "";
 let startsSent = 0;
+let stopsSent = 0;
 let lastRejectReason = "";
 /** 「対戦開始」を送ってから state / rejected / 切断のいずれかが来るまで（二重送信の防止） */
 let startPending = false;
+/** 「対戦を終了」を送ってから state / rejected / 切断のいずれかが来るまで */
+let stopPending = false;
 /** 寸法の「反映」を送ってから field / rejected / 切断のいずれかが来るまで */
 let fieldPending = false;
 let fieldsSent = 0;
@@ -294,6 +297,7 @@ function onState(state: GameSnapshot) {
     startPending = false;
     lastRejectReason = "";
   }
+  if (state.phase === "practice" || state.phase === "result") stopPending = false;
   const ev = state.event;
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
@@ -326,6 +330,7 @@ function connect() {
         if (status !== "open") {
           joined = false;
           startPending = false;
+          stopPending = false;
           fieldPending = false;
         }
         renderPanel();
@@ -363,6 +368,7 @@ function connect() {
       onRejected: (reason) => {
         lastRejectReason = reason;
         startPending = false;
+        stopPending = false;
         fieldPending = false;
         console.log(`[overview] rejected by server: ${reason}`);
         renderPanel();
@@ -455,6 +461,7 @@ function updateShots(now: number) {
 // ---- 操作パネル ----
 const phaseEl = document.querySelector<HTMLDivElement>("#phase")!;
 const startButton = document.querySelector<HTMLButtonElement>("#start-match")!;
+const stopButton = document.querySelector<HTMLButtonElement>("#stop-match")!;
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
@@ -530,6 +537,17 @@ startButton.addEventListener("click", () => {
   }
   renderPanel();
 });
+// 途中終了（issue #32）: 試合中は即座に結果へ、カウントダウン中は中止して練習へ。確認ダイアログは出さない（運営の操作なので即時）
+stopButton.addEventListener("click", () => {
+  if (!client || stopPending) return;
+  if (client.sendStop()) {
+    stopsSent++;
+    stopPending = true;
+    lastRejectReason = "";
+    console.log("[overview] stop sent");
+  }
+  renderPanel();
+});
 
 let lastPanelKey = "";
 function renderPanel() {
@@ -547,6 +565,8 @@ function renderPanel() {
     phaseText = w.length === 0 ? "結果: だれも塗れず…" : `結果: ${w.join("・")} の勝ち！`;
   }
   const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0 && !startPending;
+  const canStop = joined && s !== undefined && (s.phase === "waiting" || s.phase === "play") && !stopPending;
+  const stopText = stopPending ? "送信中…" : s?.phase === "waiting" ? "カウントダウンを中止" : "対戦を終了";
   // 寸法は練習中か結果表示中だけ変えられる（カウントダウン中・試合中は入力ごと無効）
   const sizeEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !fieldPending;
   const sizeInvalid = validateFieldSize(readSizeInputs(), fieldCfg.cellM);
@@ -564,11 +584,13 @@ function renderPanel() {
         .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
         .map((p) => ({ p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id) }))
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText]);
+  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   startButton.disabled = !canStart;
+  stopButton.disabled = !canStop;
+  stopButton.textContent = stopText;
   for (const key of FIELD_SIZE_KEYS) sizeInputs[key].disabled = !sizeEditable;
   applySizeButton.disabled = !canApplySize;
   applySizeButton.textContent = fieldPending ? "送信中…" : "反映";
@@ -591,11 +613,14 @@ function renderPanel() {
       sw.className = "swatch";
       sw.style.background = cssColor(inkColorHex(p.color));
       const name = document.createElement("span");
-      name.textContent = `${p.name}（${inkColorName(p.color)}）${win ? " 🏆" : ""} ${pct}%`;
+      name.textContent = `${p.name}（${inkColorName(p.color)}）${win ? " 🏆" : ""}`;
+      const pctEl = document.createElement("span");
+      pctEl.className = "pct";
+      pctEl.textContent = `${pct}%`;
       const inkEl = document.createElement("span");
       inkEl.className = "ink";
       inkEl.textContent = gauge(ink);
-      li.append(sw, name, inkEl);
+      li.append(sw, name, pctEl, inkEl);
       return li;
     }),
   );
@@ -612,7 +637,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} live=${shots.size} seq=${s.seq} starts=${startsSent} fields=${fieldsSent}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;

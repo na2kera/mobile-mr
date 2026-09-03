@@ -169,6 +169,7 @@ function parseOverviewHud(hud) {
     total: Number(hud.match(/total=(\d+)/)?.[1] ?? -1),
     field: hud.match(/field=(\S+)/)?.[1] ?? "",
     starts: Number(hud.match(/starts=(\d+)/)?.[1] ?? -1),
+    stops: Number(hud.match(/stops=(\d+)/)?.[1] ?? -1),
     fields: Number(hud.match(/fields=(\d+)/)?.[1] ?? -1),
   };
 }
@@ -302,6 +303,21 @@ try {
   const hits = landings.filter((l) => l.where !== "miss");
   check("着弾のほとんどが壁か床に当たっている（外れが半分未満）", landings.length >= 6 && hits.length > landings.length / 2, `${hits.length}/${landings.length} hit`);
   check("サーバーが start → countdown 1s を記録している（?waitSec= が room 設定として届いている）", serverLines.some((l) => /start → countdown 1s/.test(l)));
+
+  // ---- 途中終了（issue #32。俯瞰画面の「対戦を終了」）----
+  const stopEnabled = await p3.eval("(() => { const b = document.querySelector('#stop-match'); return b && !b.disabled ? b.textContent : null; })()");
+  check("試合中は俯瞰画面の「対戦を終了」が押せる", stopEnabled === "対戦を終了", String(stopEnabled));
+  await p3.eval("document.querySelector('#stop-match').click()");
+  await sleep(1500);
+  const st1 = await readHud(p1);
+  const stOv = await readOverview();
+  console.log(`stopped window1: ${show(st1)}`);
+  console.log(`stopped overview: ${showOv(stOv)} stops=${stOv.stops}`);
+  check("「対戦を終了」で時間切れ（matchSec 既定 60 秒）を待たず結果（result）になる", stOv.stops === 1 && st1.phase === "result" && stOv.phase === "result");
+  check("サーバーが stop → result を記録している", serverLines.some((l) => /stop → result/.test(l)));
+  const stopDisabled = await p3.eval("(() => { const b = document.querySelector('#stop-match'); return b && b.disabled; })()");
+  check("結果表示中は「対戦を終了」が押せない", stopDisabled === true);
+  check("スマホ側にも result イベントが届いている（視界に「そこまで！」）", p1.logs.some((l) => /\[game\] event result phase=result/.test(l)));
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0 && p3.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions, ...p3.exceptions].slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[game] shot sent")).slice(0, 2)) console.log(`window1 log: ${l}`);
   for (const l of p3.logs.filter((l) => l.startsWith("[overview]")).slice(0, 4)) console.log(`overview log: ${l}`);
