@@ -39,7 +39,7 @@ import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
 import { InkTankView } from "./ink-tank";
-import { scriptedSplatHand } from "./fake-splat-hand";
+import { FAKE_FIST_SEC, FAKE_OPEN_SEC, FAKE_REST_SEC, scriptedSplatHand } from "./fake-splat-hand";
 import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
 import { createSplatSound } from "./splat-sound";
 
@@ -50,7 +50,8 @@ import { createSplatSound } from "./splat-sound";
 //     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
 //     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
 //   - インクの残量は手元のタンク（issue #31。ink-tank.ts）: グーで補充している間だけ、そのグーの手のそば（既定は手のひらの親指側）に
-//     水位で出す（パーで撃っている間は消す。?tankShow=always なら従来どおり見えている手のそば / 手が無いときは視界の下に常に出す）
+//     水位で出す（パーで撃っている間は消す）。ただし空になったら（1 発ぶんも無い）撃てない理由が分かるように出し、
+//     tankLowUntil まで回復するまで出し続ける。?tankShow=always なら従来どおり見えている手のそば / 手が無いときは視界の下に常に出す
 //   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
 //     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 → 練習に戻る。
 //     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
@@ -127,6 +128,11 @@ const TANK_PLACE: "thumb" | "pinky" | "arm" = tankPlaceRaw === "pinky" || tankPl
  * always = 見えている手（パー優先）のそばに常に出す（手が無いときは視界の下）
  */
 const TANK_SHOW: "fist" | "always" = params.get("tankShow") === "always" ? "always" : "fist";
+/**
+ * tankShow=fist のとき: 空になった（1 発ぶんも無い）ら出し、残量がここまで回復するまで出し続ける（0..1）。
+ * 1 発ぶん回復 → 撃つ → また空、の繰り返しで点滅しないためのヒステリシス
+ */
+const TANK_LOW_UNTIL = numParam("tankLowUntil", 0.25, { min: 0, max: 1 });
 /** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない。tankShow=always のときだけ意味がある） */
 const TANK_FALLBACK = params.get("tankFallback") !== "0";
 /**
@@ -141,6 +147,12 @@ const FAKE_SHIFT = numParam("fakeShift", 0, { min: -200, max: 200 });
 const FAKE_SHIFT_Y = numParam("fakeShiftY", 0, { min: -240, max: 240 });
 const FAKE_MARKER_PX = numParam("fakeMarkerPx", 80, { min: 30, max: 400 });
 const FAKE_HANDS = params.has("fakehands");
+/** 合成の手の パー → グー → 休み の時間 [s]（?fakeOpenSec=9 でタンクが空になるまで撃ち続ける） */
+const FAKE_TIMING = {
+  openSec: numParam("fakeOpenSec", FAKE_OPEN_SEC, { min: 0, max: 60 }),
+  fistSec: numParam("fakeFistSec", FAKE_FIST_SEC, { min: 0, max: 60 }),
+  restSec: numParam("fakeRestSec", FAKE_REST_SEC, { min: 0, max: 60 }),
+};
 
 /** タッチ端末（実機）か。PC は OrbitControls + キーボード */
 const touch = isTouchDevice();
@@ -515,7 +527,7 @@ function updateFakeHands(now: number) {
   const mapping = passthrough.displayViewMapping(camera.fov);
   if (fakeStartMs < 0) fakeStartMs = now;
   lastDetectAt = now;
-  const r = scriptedSplatHand((now - fakeStartMs) / 1000, mapping);
+  const r = scriptedSplatHand((now - fakeStartMs) / 1000, mapping, FAKE_TIMING);
   if (r) applyHandResult(r, now);
 }
 
@@ -1026,9 +1038,11 @@ function updateMessages(now: number) {
 
 // ---- 手元のインクタンク（issue #31）----
 // 既定（TANK_SHOW = fist）はグーで補充している間だけ、そのグーの手のそばに置く。パーで撃っている間は残量を見ないので消して、
-// 視界を塞がないようにする（撃てなくなったらグーにすれば残量と回復が見える）。グーの手を一瞬見失っても TANK_HOLD_MS は
-// 最後の位置に留める（MediaPipe の取りこぼし・再検出直後の 3 フレームは形が "other" になるのでちらつかないように）が、
-// パーが見えたら即座に消す。
+// 視界を塞がないようにする。ただし空になったら（1 発ぶんも無い）撃てない理由が分かるように、グーでなくても出す
+// （見えている手のそば。手が無ければ視界の下）。空で出したあとは TANK_LOW_UNTIL まで回復するまで出し続ける
+// （パーのままだと 1 発ぶん回復するたびに撃ってまた空になるので、「空か」だけで出し消しすると点滅する）。
+// グーの手を一瞬見失っても TANK_HOLD_MS は最後の位置に留める（MediaPipe の取りこぼし・再検出直後の 3 フレームは形が
+// "other" になるのでちらつかないように）が、パーが見えたら即座に消す。
 // ?tankShow=always は従来どおり: 見えている手（パーを優先）のそばに常に出し、手が見えないとき（視線連射・手を下ろしたとき）は
 // 視界の下に大きめに出す（消えてから TANK_HOLD_MS は最後の位置に留める）。
 // 置き場所は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ TANK_OFFSET ずらした位置
@@ -1049,6 +1063,8 @@ let tankSlot: HandSlot | null = null;
 let tankLastHandMs = -Infinity;
 /** いまの置き場所（HUD 用）: hand = 手元、view = 視界の下、- = 非表示 */
 let tankPlace: "hand" | "view" | "-" = "-";
+/** tankShow=fist で「空になったので出している」最中か（TANK_LOW_UNTIL まで回復したら下ろす） */
+let tankLowShowing = false;
 
 function updateInkTank(now: number) {
   if (!joined || !myColor) {
@@ -1056,13 +1072,18 @@ function updateInkTank(now: number) {
     tankPlace = "-";
     return;
   }
+  if (!hasInkForShot()) tankLowShowing = true;
+  else if (inkLocal >= TANK_LOW_UNTIL) tankLowShowing = false;
   const visibleSlots = handSlots.slots.filter((s) => s.view.visible && s.ema);
+  const openOrAny = visibleSlots.find((s) => s.shape === "open") ?? visibleSlots[0] ?? null;
   const slot =
     TANK_SHOW === "fist"
-      ? (visibleSlots.find((s) => s.shape === "fist") ?? null)
-      : (visibleSlots.find((s) => s.shape === "open") ?? visibleSlots[0] ?? null);
-  /** fist のとき: パーが見えている（撃っている）ので、猶予を待たずに消す */
-  const hideNow = TANK_SHOW === "fist" && visibleSlots.some((s) => s.shape === "open");
+      ? (visibleSlots.find((s) => s.shape === "fist") ?? (tankLowShowing ? openOrAny : null))
+      : openOrAny;
+  /** fist のとき（空でなければ）: パーが見えている（撃っている）ので、猶予を待たずに消す */
+  const hideNow = TANK_SHOW === "fist" && !tankLowShowing && visibleSlots.some((s) => s.shape === "open");
+  /** 手が見えないとき視界の下に出せるか（always は常に。fist は空で出している間だけ） */
+  const canFallback = TANK_FALLBACK && (TANK_SHOW === "always" || tankLowShowing);
   let place: typeof tankPlace;
   let targetScale: number;
   if (slot?.ema) {
@@ -1090,7 +1111,7 @@ function updateInkTank(now: number) {
     // 手（fist ならグーの手）が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
     targetScale = 1;
     place = "hand";
-  } else if (TANK_SHOW === "always" && TANK_FALLBACK) {
+  } else if (canFallback) {
     tankTarget.copy(TANK_FALLBACK_POS);
     targetScale = TANK_FALLBACK_H / TANK_H;
     place = "view";
@@ -1161,7 +1182,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} tank=${tankPlace} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} tank=${tankPlace} tankLow=${tankLowShowing ? "yes" : "no"} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
       `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
