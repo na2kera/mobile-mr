@@ -10,20 +10,19 @@ export const SPLATOON_PATH = "/api/splatoon";
 /**
  * メッセージや座標系の意味を変えたら上げる（不一致は入室拒否）。
  * v5: 練習 / 俯瞰画面からの開始 / グーで補充。v6: 着弾を飛沫の形で塗る（shot.radius は円ではなく飛沫の基準半径。得点もその形）。
- * v7: フィールドの寸法（幅・高さ・奥行き）を URL クエリからサーバーの状態に移し、俯瞰画面の field で変える
+ * v7: フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）を URL クエリからサーバーの状態に移し、俯瞰画面の field で変える
  */
 export const SPLATOON_PROTOCOL_VERSION = 7;
 
 export const NAME_MAX_LENGTH = 12;
 
 /**
- * Room の設定（接続クエリ）。マーカーに加えて、マーカーの高さ・飛行・時間は全員一致が必要
+ * Room の設定（接続クエリ）。マーカーに加えて、飛行・時間は全員一致が必要
  * （違うと同じ発射が端末ごとに別の場所に着弾する）。
- * フィールドの寸法（幅・高さ・奥行き）はここに無い: サーバーの状態で、俯瞰画面の field メッセージで変える
+ * フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）はここに無い: サーバーの状態で、俯瞰画面の field メッセージで変える
  * （welcome / field でサーバーの config が配られ、クライアントはそれで壁と床を作る）
  */
 export type SplatoonRoomConfig = SpaceConfig & {
-  floorDrop: number;
   gravity: number;
   matchSec: number;
   waitSec: number;

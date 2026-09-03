@@ -136,7 +136,7 @@ export class SplatoonGame {
       this.lastRejectReason = `cannot resize during ${this.phase}`;
       return [];
     }
-    this.config = { ...this.config, wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth };
+    this.config = { ...this.config, wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop };
     this.buildField();
     // 結果表示中なら練習に戻す（結果の格子は消えたので、勝者の表示だけ残っても意味がない）
     this.phase = "practice";

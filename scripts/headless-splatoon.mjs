@@ -245,11 +245,11 @@ try {
   check("俯瞰画面はプレイヤーではなく（players に含まれない）、2 人を見ている", prOv.me.startsWith("p") && !pr1.players.some((p) => p.startsWith(prOv.me + ":")) && prOv.players.length === 2, `${prOv.me} / ${prOv.players.join("|")}`);
   const buttonEnabled = await p3.eval("(() => { const b = document.querySelector('#start-match'); return b && !b.disabled; })()");
   check("俯瞰画面の「対戦開始」が押せる状態", buttonEnabled === true);
-  check("寸法は URL に無く、既定（3x2.4x2.5）で全員が一致している", pr1.field === "3x2.4x2.5" && pr2.field === "3x2.4x2.5" && prOv.field === "3x2.4x2.5", `${pr1.field} / ${pr2.field} / ${prOv.field}`);
+  check("寸法は URL に無く、既定（3x2.4x2.5、マーカー 1.2）で全員が一致している", pr1.field === "3x2.4x2.5/1.2" && pr2.field === "3x2.4x2.5/1.2" && prOv.field === "3x2.4x2.5/1.2", `${pr1.field} / ${pr2.field} / ${prOv.field}`);
 
-  // ---- 塗れる空間の大きさを俯瞰画面で変える（練習中。入力欄 → 反映）----
+  // ---- 塗れる空間の大きさとマーカーの高さを俯瞰画面で変える（練習中。入力欄 → 反映）----
   const setSize = (id, v) => p3.eval(`(() => { const i = document.querySelector('#size-${id}'); i.value = '${v}'; i.dispatchEvent(new Event('input')); return !i.disabled; })()`);
-  const editable = await Promise.all([setSize("wallW", 2), setSize("wallH", 1.5), setSize("floorDepth", 4)]);
+  const editable = await Promise.all([setSize("wallW", 2), setSize("wallH", 1.5), setSize("floorDepth", 4), setSize("floorDrop", 1)]);
   check("練習中は寸法の入力欄が有効", editable.every(Boolean));
   await sleep(300);
   const applyEnabled = await p3.eval("(() => { const b = document.querySelector('#apply-size'); return b && !b.disabled; })()");
@@ -261,12 +261,12 @@ try {
   const szOv = await readOverview();
   console.log(`resized window1: ${show(sz1)} field=${sz1.field}`);
   console.log(`resized overview: ${showOv(szOv)} field=${szOv.field} total=${szOv.total}`);
-  check("反映で全員（俯瞰画面も）の寸法が 2x1.5x4 になる", sz1.field === "2x1.5x4" && sz2.field === "2x1.5x4" && szOv.field === "2x1.5x4" && szOv.fields === 1, `${sz1.field} / ${sz2.field} / ${szOv.field}`);
+  check("反映で全員（俯瞰画面も）の寸法が 2x1.5x4、マーカーの高さ 1 になる", sz1.field === "2x1.5x4/1" && sz2.field === "2x1.5x4/1" && szOv.field === "2x1.5x4/1" && szOv.fields === 1, `${sz1.field} / ${sz2.field} / ${szOv.field}`);
   check("寸法の変更でセル数が変わり、練習のまま", szOv.total !== pr1.total && sz1.phase === "practice" && szOv.phase === "practice", `${pr1.total} → ${szOv.total}`);
   check("変更後も連射が受理され、新しいフィールドに塗れている", sz1.accepted > pr1.accepted && (sz1.scores[sz1.me] ?? 0) > 0, `${pr1.accepted} → ${sz1.accepted}, ${JSON.stringify(sz1.scores)}`);
-  check("サーバーが field → 2x1.5x4 を記録している", serverLines.some((l) => /field → 2x1\.5x4/.test(l)));
+  check("サーバーが field → 2x1.5x4/1 を記録している", serverLines.some((l) => /field → 2x1\.5x4\/1 /.test(l)));
   const hint = await p3.eval("document.querySelector('#size-hint')?.textContent");
-  check("入力欄がサーバーの値に揃い、いまの寸法が表示される", /2m × 高さ 1\.5m × 奥行き 4m/.test(hint ?? ""), hint);
+  check("入力欄がサーバーの値に揃い、いまの寸法が表示される", /2m × 高さ 1\.5m × 奥行き 4m、マーカーの高さ 1m/.test(hint ?? ""), hint);
 
   // ---- 対戦開始（俯瞰画面のボタン）----
   await p3.eval("document.querySelector('#start-match').click()");

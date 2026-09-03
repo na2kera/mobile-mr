@@ -57,7 +57,6 @@ export function connectGame(
     v: String(SPLATOON_PROTOCOL_VERSION),
     markerId: String(config.markerId),
     markerMm: String(config.markerMm),
-    floorDrop: String(config.floorDrop),
     gravity: String(config.gravity),
     matchSec: String(config.matchSec),
     waitSec: String(config.waitSec),
@@ -142,7 +141,7 @@ export function connectGame(
       return send({ type: "start" });
     },
     sendField(size) {
-      return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth });
+      return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop });
     },
     dispose() {
       disposed = true;

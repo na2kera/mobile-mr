@@ -22,12 +22,11 @@ import { createSplatSound } from "./splat-sound";
 // 描画のうち塗り（InkView）・飛行（inkAt）・ピアの頭と手は main.ts と同じ式（俯瞰なので視点だけ違う）
 
 // ---- パラメータ（room の設定はスマホと一致が必要。サーバーが検証する）----
-// フィールドの寸法（幅・高さ・奥行き）は URL ではなくこの画面の入力欄で決め、サーバーに送る（welcome / field で戻ってくる）
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL ではなくこの画面の入力欄で決め、サーバーに送る（welcome / field で戻ってくる）
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
 const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
-const FLOOR_DROP = numParam("floorDrop", DEFAULT_FIELD.floorDrop, { min: 0.1, max: 5 });
 const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
 const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
 const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 });
@@ -64,7 +63,6 @@ const field = new THREE.Group();
 scene.add(field);
 let fieldCfg: FieldConfig = {
   ...DEFAULT_FIELD,
-  floorDrop: FLOOR_DROP,
   gravity: GRAVITY,
   matchSec: MATCH_SEC,
   waitSec: WAIT_SEC,
@@ -318,7 +316,6 @@ function connect() {
     {
       markerId: MARKER_ID,
       markerMm: MARKER_MM,
-      floorDrop: FLOOR_DROP,
       gravity: GRAVITY,
       matchSec: MATCH_SEC,
       waitSec: WAIT_SEC,
@@ -380,7 +377,7 @@ function connect() {
         shots.clear();
         splatted.clear();
         onState(state);
-        console.log(`[overview] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth} (${state.totalCells} cells)`);
+        console.log(`[overview] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop} (${state.totalCells} cells)`);
       },
     },
     "overview",
@@ -461,11 +458,12 @@ const startButton = document.querySelector<HTMLButtonElement>("#start-match")!;
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
-/** フィールドの寸法の入力欄（幅・高さ・奥行き [m]）と「反映」。サーバーの config が届くたび入力欄を合わせる */
+/** フィールドの寸法の入力欄（幅・高さ・奥行き・マーカーの高さ [m]）と「反映」。サーバーの config が届くたび入力欄を合わせる */
 const sizeInputs: Record<keyof FieldSize, HTMLInputElement> = {
   wallW: document.querySelector<HTMLInputElement>("#size-wallW")!,
   wallH: document.querySelector<HTMLInputElement>("#size-wallH")!,
   floorDepth: document.querySelector<HTMLInputElement>("#size-floorDepth")!,
+  floorDrop: document.querySelector<HTMLInputElement>("#size-floorDrop")!,
 };
 const applySizeButton = document.querySelector<HTMLButtonElement>("#apply-size")!;
 const sizeHint = document.querySelector<HTMLDivElement>("#size-hint")!;
@@ -485,6 +483,7 @@ function readSizeInputs(): FieldSize {
     wallW: Number(sizeInputs.wallW.value),
     wallH: Number(sizeInputs.wallH.value),
     floorDepth: Number(sizeInputs.floorDepth.value),
+    floorDrop: Number(sizeInputs.floorDrop.value),
   };
 }
 function sizeInputsChanged(): boolean {
@@ -505,7 +504,7 @@ applySizeButton.addEventListener("click", () => {
     fieldsSent++;
     fieldPending = true;
     lastRejectReason = "";
-    console.log(`[overview] field sent ${size.wallW}x${size.wallH}x${size.floorDepth}`);
+    console.log(`[overview] field sent ${size.wallW}x${size.wallH}x${size.floorDepth}/${size.floorDrop}`);
   }
   renderPanel();
 });
@@ -558,7 +557,7 @@ function renderPanel() {
       ? sizeInvalid
       : sizeInputsChanged()
         ? "「反映」で全員のフィールドが変わります（塗りは消えます）"
-        : `いま: 幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m（${s?.totalCells ?? 0} セル）`;
+        : `いま: 幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m、マーカーの高さ ${fieldCfg.floorDrop}m（${s?.totalCells ?? 0} セル）`;
   const total = Math.max(1, s?.totalCells ?? 1);
   const ranking = s
     ? [...s.players]
@@ -613,7 +612,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth} live=${shots.size} seq=${s.seq} starts=${startsSent} fields=${fieldsSent}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} live=${shots.size} seq=${s.seq} starts=${startsSent} fields=${fieldsSent}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;

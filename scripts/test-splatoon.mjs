@@ -132,9 +132,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 {
   const g = new SplatoonGame();
   check("fieldCellCount は InkGrid の合計と一致", fieldCellCount(DEFAULT_FIELD) === g.totalCells, `${fieldCellCount(DEFAULT_FIELD)} vs ${g.totalCells}`);
-  check("既定の寸法は有効", validateFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5 }) === null);
-  check("範囲外（0.1m / 21m / NaN）は理由付きで拒否", /wallW/.test(validateFieldSize({ wallW: 0.1, wallH: 2.4, floorDepth: 2.5 }) ?? "") && /floorDepth/.test(validateFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 21 }) ?? "") && /wallH/.test(validateFieldSize({ wallW: 3, wallH: NaN, floorDepth: 2.5 }) ?? ""));
-  check("セル数の上限を超える寸法は拒否", /大きすぎ/.test(validateFieldSize({ wallW: 20, wallH: 20, floorDepth: 20 }) ?? "") && fieldCellCount({ wallW: 20, wallH: 20, floorDepth: 20, cellM: DEFAULT_FIELD.cellM }) > MAX_FIELD_CELLS);
+  check("既定の寸法は有効", validateFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }) === null);
+  check("範囲外（0.1m / 21m / NaN / マーカー 6m）は理由付きで拒否", /wallW/.test(validateFieldSize({ wallW: 0.1, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }) ?? "") && /floorDepth/.test(validateFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 21, floorDrop: 1.2 }) ?? "") && /wallH/.test(validateFieldSize({ wallW: 3, wallH: NaN, floorDepth: 2.5, floorDrop: 1.2 }) ?? "") && /floorDrop/.test(validateFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 6 }) ?? ""));
+  check("マーカーの高さが壁の高さより上は拒否（マーカーの真下に塗れない帯ができる）", /floorDrop/.test(validateFieldSize({ wallW: 3, wallH: 1, floorDepth: 2.5, floorDrop: 1.5 }) ?? "") && validateFieldSize({ wallW: 3, wallH: 1, floorDepth: 2.5, floorDrop: 1 }) === null);
+  check("セル数の上限を超える寸法は拒否", /大きすぎ/.test(validateFieldSize({ wallW: 20, wallH: 20, floorDepth: 20, floorDrop: 1.2 }) ?? "") && fieldCellCount({ wallW: 20, wallH: 20, floorDepth: 20, floorDrop: 1.2, cellM: DEFAULT_FIELD.cellM }) > MAX_FIELD_CELLS);
 }
 
 // ================= 1b. splat shape（飛沫の形）=================
@@ -424,19 +425,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const before = g.totalCells;
   check("変更前: 練習の塗りがある", g.scores().p1 > 0);
   // 奥行き 4m: 変更前なら z=3.5 の発射位置はコート外（対角 + 1m の上限内だが床に当たらない）
-  const ev = g.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4 }, 100);
-  check("練習中の setFieldSize: event field・config と surfaces が新しい寸法", ev[0]?.kind === "field" && g.config.wallW === 2 && g.config.wallH === 1.5 && g.config.floorDepth === 4 && g.surfaces.find((s) => s.id === FLOOR_ID).heightM === 4 && g.surfaces.find((s) => s.id === WALL_ID).heightM === 1.5);
+  const ev = g.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 100);
+  const floorSurface = g.surfaces.find((s) => s.id === FLOOR_ID);
+  check("練習中の setFieldSize: event field・config と surfaces が新しい寸法", ev[0]?.kind === "field" && g.config.wallW === 2 && g.config.wallH === 1.5 && g.config.floorDepth === 4 && g.config.floorDrop === 1 && floorSurface.heightM === 4 && g.surfaces.find((s) => s.id === WALL_ID).heightM === 1.5);
+  check("マーカーの高さも変わり、床が y=-floorDrop に動く", floorSurface.origin[1] === -1);
   check("格子は作り直され（セル数が変わる）、塗りは消える。練習のまま", g.totalCells !== before && g.totalCells === fieldCellCount({ ...g.config }) && g.scores().p1 === 0 && g.phase === "practice" && g.phaseEndsAt === Infinity);
-  check("変更後の config は他の値（floorDrop / matchSec / cellM）を保つ", g.config.floorDrop === DEFAULT_FIELD.floorDrop && g.config.matchSec === 10 && g.config.cellM === DEFAULT_FIELD.cellM);
+  check("変更後の config は他の値（matchSec / cellM）を保つ", g.config.matchSec === 10 && g.config.cellM === DEFAULT_FIELD.cellM);
   g.updatePose("p1", [0, 0.1, 3.5], 200);
   const far = g.shoot("p1", [0, 0, 3.5], [0, -3, -2], 0.09, 300);
   check("広げた床の奥にも着弾できる（surfaces と maxShotDist が更新されている）", far !== null && far.landing?.surfaceId === FLOOR_ID, g.lastRejectReason);
   g.start(400);
-  check("カウントダウン中の setFieldSize は拒否", g.setFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5 }, 500).length === 0 && /waiting/.test(g.lastRejectReason) && g.config.wallW === 2);
+  const base = { wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 };
+  check("カウントダウン中の setFieldSize は拒否", g.setFieldSize(base, 500).length === 0 && /waiting/.test(g.lastRejectReason) && g.config.wallW === 2);
   g.tick(1500);
-  check("試合中の setFieldSize は拒否", g.phase === "play" && g.setFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5 }, 1600).length === 0 && /play/.test(g.lastRejectReason));
+  check("試合中の setFieldSize は拒否", g.phase === "play" && g.setFieldSize(base, 1600).length === 0 && /play/.test(g.lastRejectReason));
   g.tick(11500);
-  check("結果表示中の setFieldSize は受け付け、練習に戻る（勝者の表示も消える）", g.phase === "result" && g.setFieldSize({ wallW: 3, wallH: 2.4, floorDepth: 2.5 }, 11600)[0]?.kind === "field" && g.phase === "practice" && g.winners === null && g.totalCells === before);
+  check("結果表示中の setFieldSize は受け付け、練習に戻る（勝者の表示も消える）", g.phase === "result" && g.setFieldSize(base, 11600)[0]?.kind === "field" && g.phase === "practice" && g.winners === null && g.totalCells === before);
 }
 
 // ================= 4. server =================
@@ -540,7 +544,7 @@ try {
   b.send({ type: "shot", pos: [0, 0, 2], vel: [0, 0, -50], radius: 0.09 });
   const rej = await b.waitFor((m) => m.type === "rejected" && /velocity/.test(m.reason));
   check("不正な shot は本人に rejected", rej !== null);
-  ov.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4 });
+  ov.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 });
   const rejFieldPlay = await ov.waitFor((m) => m.type === "rejected" && /resize/.test(m.reason));
   check("試合中の field は俯瞰画面に rejected: cannot resize during play", rejFieldPlay && /play/.test(rejFieldPlay.reason));
   // 練習中の state を拾わないよう、試合開始後の state に限定する
@@ -571,39 +575,43 @@ try {
   {
     const sz = connect({ ...cfg, room: "size" }, "Sz");
     const wsz = await sz.waitFor((m) => m.type === "welcome");
-    check("寸法は URL に無くても既定（3.0 × 2.4 × 2.5）で入室できる", wsz && wsz.config.wallW === DEFAULT_FIELD.wallW && wsz.config.wallH === DEFAULT_FIELD.wallH && wsz.config.floorDepth === DEFAULT_FIELD.floorDepth);
-    const ignored = connect({ ...cfg, room: "size", wallW: "9" }, "Ign");
+    check("寸法は URL に無くても既定（3.0 × 2.4 × 2.5、マーカー 1.2）で入室できる", wsz && wsz.config.wallW === DEFAULT_FIELD.wallW && wsz.config.wallH === DEFAULT_FIELD.wallH && wsz.config.floorDepth === DEFAULT_FIELD.floorDepth && wsz.config.floorDrop === DEFAULT_FIELD.floorDrop);
+    const ignored = connect({ ...cfg, room: "size", wallW: "9", floorDrop: "3" }, "Ign");
     const wign = await ignored.waitFor((m) => m.type === "welcome");
-    check("URL の wallW= は無視される（サーバーの寸法のまま入室できる）", wign && wign.config.wallW === DEFAULT_FIELD.wallW);
+    check("URL の wallW= / floorDrop= は無視される（サーバーの寸法のまま入室できる）", wign && wign.config.wallW === DEFAULT_FIELD.wallW && wign.config.floorDrop === DEFAULT_FIELD.floorDrop);
     ignored.ws.close();
-    sz.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4 });
+    sz.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 });
     const rejPhoneField = await sz.waitFor((m) => m.type === "rejected");
     check("スマホからの field は rejected: not overview", rejPhoneField && /not overview/.test(rejPhoneField.reason));
     const szOv = connect({ ...cfg, room: "size", role: "overview" });
     await szOv.waitFor((m) => m.type === "welcome");
-    szOv.send({ type: "field", wallW: 20, wallH: 20, floorDepth: 20 });
+    szOv.send({ type: "field", wallW: 20, wallH: 20, floorDepth: 20, floorDrop: 1.2 });
     const rejBig = await szOv.waitFor((m) => m.type === "rejected");
     check("大きすぎる寸法は rejected（セル数の上限）", rejBig && /大きすぎ/.test(rejBig.reason));
-    szOv.send({ type: "field", wallW: 0.05, wallH: 2, floorDepth: 2 });
+    szOv.send({ type: "field", wallW: 0.05, wallH: 2, floorDepth: 2, floorDrop: 1 });
     const rejRange = await szOv.waitFor((m) => m.type === "rejected" && /wallW/.test(m.reason));
     check("範囲外の寸法は rejected（理由に項目名）", rejRange !== null);
-    szOv.send({ type: "field", wallW: "2", wallH: 1.5, floorDepth: 4 });
+    szOv.send({ type: "field", wallW: 2, wallH: 1, floorDepth: 2, floorDrop: 1.5 });
+    const rejDrop = await szOv.waitFor((m) => m.type === "rejected" && /floorDrop/.test(m.reason));
+    check("マーカーの高さが壁より上は rejected", rejDrop !== null);
+    szOv.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4 });
+    szOv.send({ type: "field", wallW: "2", wallH: 1.5, floorDepth: 4, floorDrop: 1 });
     await sleep(150);
-    check("数値でない field は黙って捨てる", !szOv.msgs.some((m) => m.type === "field"));
+    check("項目が足りない・数値でない field は黙って捨てる", !szOv.msgs.some((m) => m.type === "field"));
     // 練習の塗りを作ってから変える → 消える
     sz.send({ type: "pose", pos: [0, 0.1, 1], quat: [0, 0, 0, 1], tracking: true });
     await sleep(50);
     sz.send({ type: "shot", pos: [0, 0, 1], vel: [0, 0, -5], radius: 0.09 });
     await sz.waitFor((m) => m.type === "shot");
     await sz.waitFor((m) => m.type === "state" && (m.state.scores[wsz.id] ?? 0) > 0, 2500);
-    szOv.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4 });
+    szOv.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 });
     const fPhone = await sz.waitFor((m) => m.type === "field");
     const fOv = await szOv.waitFor((m) => m.type === "field");
-    check("俯瞰画面の field で全員（俯瞰画面も）に field が届く: 新しい config・格子付き state・event field", fPhone && fOv && fPhone.config.wallW === 2 && fPhone.config.wallH === 1.5 && fPhone.config.floorDepth === 4 && fPhone.config.floorDrop === DEFAULT_FIELD.floorDrop && fPhone.state.grids && fPhone.state.event?.kind === "field");
-    check("寸法の変更で塗りは消え、セル数が変わる", (fPhone.state.scores[wsz.id] ?? 0) === 0 && fPhone.state.totalCells === fieldCellCount({ wallW: 2, wallH: 1.5, floorDepth: 4, cellM: DEFAULT_FIELD.cellM }) && fPhone.state.phase === "practice");
+    check("俯瞰画面の field で全員（俯瞰画面も）に field が届く: 新しい config・格子付き state・event field", fPhone && fOv && fPhone.config.wallW === 2 && fPhone.config.wallH === 1.5 && fPhone.config.floorDepth === 4 && fPhone.config.floorDrop === 1 && fPhone.config.matchSec === 20 && fPhone.state.grids && fPhone.state.event?.kind === "field");
+    check("寸法の変更で塗りは消え、セル数が変わる", (fPhone.state.scores[wsz.id] ?? 0) === 0 && fPhone.state.totalCells === fieldCellCount({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1, cellM: DEFAULT_FIELD.cellM }) && fPhone.state.phase === "practice");
     const late = connect({ ...cfg, room: "size" }, "Late");
     const wlate = await late.waitFor((m) => m.type === "welcome");
-    check("あとから入った人の welcome は新しい寸法", wlate && wlate.config.wallW === 2 && wlate.config.floorDepth === 4 && wlate.state.totalCells === fPhone.state.totalCells);
+    check("あとから入った人の welcome は新しい寸法（マーカーの高さも）", wlate && wlate.config.wallW === 2 && wlate.config.floorDepth === 4 && wlate.config.floorDrop === 1 && wlate.state.totalCells === fPhone.state.totalCells);
     // 広げた床の奥（z=3.5）から撃つ → 床に着弾（変更前の 2.5m の床なら当たらない位置）
     late.send({ type: "pose", pos: [0, 0.1, 3.5], quat: [0, 0, 0, 1], tracking: true });
     await sleep(50);

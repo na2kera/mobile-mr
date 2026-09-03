@@ -3,7 +3,7 @@
 // 接続には 2 つの役割がある: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview）。俯瞰画面はプレイヤーではない
 // （game.join しない・join / leave を配らない・welcome の peers にも入れない）が、room のメンバーとして
 // pose / shot / state を受け取り、唯一「start（対戦開始）」と「field（フィールドの寸法の変更）」を送れる（issue #19 / #21）。
-// フィールドの寸法（幅・高さ・奥行き）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -87,7 +87,7 @@ function parseClientMessage(data: RawData): ClientMessage | null {
   if (m.type === "field") {
     // 範囲とセル数の上限は onMessage で validateFieldSize（理由を rejected で返すため）。ここは数値であることだけ
     if (!FIELD_SIZE_KEYS.every((k) => typeof m[k] === "number" && Number.isFinite(m[k]))) return null;
-    return { type: "field", wallW: m.wallW as number, wallH: m.wallH as number, floorDepth: m.floorDepth as number };
+    return { type: "field", wallW: m.wallW as number, wallH: m.wallH as number, floorDepth: m.floorDepth as number, floorDrop: m.floorDrop as number };
   }
   if (m.type === "shot") {
     if (!isVec(m.pos, 3) || !isVec(m.vel, 3)) return null;
@@ -109,20 +109,20 @@ function parseRoomConfig(url: URL): SplatoonRoomConfig | null {
     const v = Number(raw);
     return Number.isFinite(v) && v >= min && v <= max ? v : null;
   };
-  const floorDrop = num("floorDrop", DEFAULT_FIELD.floorDrop, 0.1, 5);
   const gravity = num("gravity", DEFAULT_FIELD.gravity, 0, 30);
   const matchSec = num("matchSec", DEFAULT_FIELD.matchSec, 10, 600);
   const waitSec = num("waitSec", DEFAULT_FIELD.waitSec, 0, 120);
-  if (floorDrop === null || gravity === null || matchSec === null || waitSec === null) return null;
-  return { markerId, markerMm, floorDrop, gravity, matchSec, waitSec };
+  if (gravity === null || matchSec === null || waitSec === null) return null;
+  return { markerId, markerMm, gravity, matchSec, waitSec };
 }
 
 function describeConfig(c: SplatoonRoomConfig): string {
-  return `markerId=${c.markerId} markerMm=${c.markerMm} floorDrop=${c.floorDrop} gravity=${c.gravity} matchSec=${c.matchSec} waitSec=${c.waitSec}`;
+  return `markerId=${c.markerId} markerMm=${c.markerMm} gravity=${c.gravity} matchSec=${c.matchSec} waitSec=${c.waitSec}`;
 }
 
+/** 幅x高さx奥行き/マーカーの高さ（クライアントの HUD の field= と同じ形） */
 function describeSize(s: FieldSize): string {
-  return `${s.wallW}x${s.wallH}x${s.floorDepth}`;
+  return `${s.wallW}x${s.wallH}x${s.floorDepth}/${s.floorDrop}`;
 }
 
 function broadcastState(room: Ctx, now: number, withGrids: boolean, event?: ReturnType<SplatoonGame["tick"]>[number]) {
@@ -139,7 +139,7 @@ export function splatoonServer() {
     parseConfig: parseRoomConfig,
     sameConfig: (a, b) => describeConfig(a) === describeConfig(b),
     describeConfig,
-    configErrorReason: "Room 設定 (markerId / markerMm / floorDrop / gravity / matchSec / waitSec) が不正です",
+    configErrorReason: "Room 設定 (markerId / markerMm / gravity / matchSec / waitSec) が不正です",
     parseMessage: parseClientMessage,
     // 役割ごとの上限（room-server の maxMembers は役割を区別しないので canJoin で数える）
     canJoin(room: Ctx, url) {
@@ -155,7 +155,6 @@ export function splatoonServer() {
     // フィールドの寸法は DEFAULT_FIELD から始まり、俯瞰画面の field で変わる
     createState: (_name, c) => ({
       game: new SplatoonGame({
-        floorDrop: c.floorDrop,
         gravity: c.gravity,
         matchSec: c.matchSec,
         waitSec: c.waitSec,

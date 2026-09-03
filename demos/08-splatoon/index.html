@@ -144,9 +144,8 @@
         <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
         >して<strong>壁に天地を合わせて貼る</strong>と、床（既定 3.0m × 2.5m）を四方の壁（既定の高さ 2.4m）で囲んだ
         箱型のコートができます（正面 = マーカーの壁。左右と背面は現実に壁が無くても立つ仮想の壁。
-        壁の下端は常に床に接続します）。塗れる空間の大きさ（幅・高さ・奥行き）は
+        壁の下端は常に床に接続します）。塗れる空間の大きさ（幅・高さ・奥行き）と床からマーカー中心までの高さ（実測。既定 1.2m）は
         <a href="./overview.html">PC の俯瞰画面</a>で開始前に変えられ、全員に配られます（URL では指定しません）。
-        床からマーカー中心までの実測を ?floorDrop= に入れてください（既定 1.2m）。
         コートの中に立って、四方どこでも塗れます。
         <strong>パーを開いている間、手からインクを連射</strong>します（目 → 手の向きへ。満タンで 50 発）。
         撃つとインクゲージが減り、空になると撃てません。<strong>撃つのをやめると回復</strong>します
@@ -173,8 +172,8 @@
       <p>
         調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
         マーカーは ?markerMm=100&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100（手用は handDetW / handSmooth / handLostMs）。
-        マーカーの高さと飛行・時間 ?floorDrop=1.0&amp;gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
-        （塗れる空間の幅・高さ・奥行きは俯瞰画面の入力欄で変えます）。
+        飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
+        （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。
         PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakehands=1 で、合成の手がパー → グーを繰り返して撃ち続け、
         別ウィンドウで同じ URL を開くと別の色の相手として同じフィールドを塗り合います（裏タブは描画が止まるので別ウィンドウで）。
         俯瞰画面（overview.html）も同じ room 名で開くと、全体が見えて対戦を開始できます
