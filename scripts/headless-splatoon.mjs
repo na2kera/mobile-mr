@@ -245,11 +245,12 @@ try {
   check("練習中に連射が送られ受理されている（入室したら自由に塗れる）", pr1.sent >= 3 && pr1.accepted >= 3 && pr2.accepted >= 3, `${pr1.sent}/${pr1.accepted}, ${pr2.sent}/${pr2.accepted}`);
   check("練習中の塗りが得点に出る", (pr1.scores[pr1.me] ?? 0) > 0 && (pr2.scores[pr2.me] ?? 0) > 0, JSON.stringify(pr1.scores));
   check("俯瞰画面はプレイヤーではなく（players に含まれない）、2 人を見ている", prOv.me.startsWith("p") && !pr1.players.some((p) => p.startsWith(prOv.me + ":")) && prOv.players.length === 2, `${prOv.me} / ${prOv.players.join("|")}`);
-  // 合成の手は 5s 周期で 0.5s 消えるので、その間は視界の下（view）に出る。少し追って両方を見る
+  // 合成の手は 5s 周期で 0.5s 消えるが、手の表示は handLostMs（300ms）残るので view になるのは約 200ms だけ。
+  // 周期（5s）の倍数の間隔で読むと位相によっては毎回外すので、100ms 間隔で 2 周期ぶん追って両方を見る
   const tankPlaces = new Set();
-  for (let i = 0; i < 12 && !(tankPlaces.has("hand") && tankPlaces.has("view")); i++) {
+  for (let i = 0; i < 120 && !(tankPlaces.has("hand") && tankPlaces.has("view")); i++) {
     tankPlaces.add((await readHud(p1)).tank);
-    await sleep(500);
+    await sleep(100);
   }
   check("インクタンクが手元（合成の手のそば）に出ている", tankPlaces.has("hand"), [...tankPlaces].join(","));
   check("合成の手が消えている間は視界の下に出る", tankPlaces.has("view"), [...tankPlaces].join(","));
