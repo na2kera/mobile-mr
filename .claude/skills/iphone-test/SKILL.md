@@ -28,6 +28,19 @@ description: iPhone 実機（iOS Safari）でデモを確認するための手�
 - **スリープ**: 長時間のデモでは Wake Lock API（`navigator.wakeLock`）を検討（iOS 16.4+ で対応）
 - **console が見えない**: 実機のエラーは Mac の Safari → 開発メニューから iPhone を接続して Web インスペクタで確認する（USB 接続 + iPhone 側で「Web インスペクタ」を有効化）
 
+## Android Chrome で確認するときの違い
+
+iOS Safari で通る導線が Chrome で黙って変わる箇所（06 以降は `src/shared/start-flow.ts` が吸収している）：
+
+- **センサー許可**: ダイアログは出ない。最近の Chrome は互換のため `DeviceOrientationEvent.requestPermission()` を持ち即 `granted` を返す（古い Chrome には API 自体が無い）。ただし Chrome の**サイト設定 → モーションセンサー**がブロックだとイベントが黙って届かない。HUD の `sensor=... events-ok / no-events` で見分ける（3 秒以内にイベントが届いたか）
+- **フルスクリーン**: `requestFullscreen()` は使える。初回はカメラ許可ダイアログで activation（Chrome は 5 秒）が切れて拒否されるので「タップで全画面表示」の 2 タップ目に落ちる（iOS と同じ）。**全画面中は `screen.orientation.lock("landscape")` が使える**ので横向きに固定する（HUD の `fs=ok lock=ok`）。iOS は `lock=unsupported`。上端スワイプで解除 → ボタン再表示 → 再タップ。ユーザー向けの手順は README「Android（Chrome）で確認する」に書いてある（案内するときはそこを指す）
+- **iPhone の Chrome**: WebKit の制約で Fullscreen API 自体が無く（`fs=unsupported`）、アドレスバーは消せない。Safari（iOS 17.2+）で開いてもらう
+- **Wake Lock**: `navigator.wakeLock` で画面消灯を防ぐ（HUD の `wake=ok`。裏に回ると `released`、表に戻ると取り直す）
+- **長押し**: 「画面を押している間」の操作は Android の長押しで `contextmenu` が出て切れるので抑止している（07 / 08 / ex8-1）
+- **自己署名証明書**: 「詳細設定 → localhost にアクセスする（安全ではありません）」で突破する。突破後は `wss://` も同じホストなら通る
+- **カメラ**: ラベルに「超広角」が無いので標準カメラ扱い（camFov=68 の推定）。実機の見え方が合わなければ `?camFov=` で上書きする
+- **PC で再現**: `npm run check:chrome-flow`（ヘッドレス Chrome でタッチ端末を模擬して、上の HUD 表示と PC の縦長ウィンドウで案内が出ないことを確認）
+
 ## 痛点の記録
 
 実機確認でハマった点は pain-point スキルの形式で `docs/PAIN_POINTS.md` に記録する。

@@ -435,6 +435,13 @@
 - **SDK ならどう解決するか（案）**: Surface のペイント層を「蓄積レイヤー + 一時レイヤー（アニメーション）」の 2 枚構成にし、一時レイヤーは毎フレーム消せるようにする（`@mobile-mr/spatial` の Surface）。転送コストは差分（dirty rect）で抑える
 - **関連**: `demos/08-splatoon/ink-view.ts` の `drawFrame`
 
+## [2026-09-02] 全デモ共通 / start-flow: iOS Safari で詰めた開始導線が Chrome では「黙って」変わる（許可ダイアログが無い・横向き固定と Wake Lock は使える・長押しで contextmenu）
+
+- **何が苦しかったか**: 開始フロー（センサー許可 → カメラ → 全画面）は iOS Safari の制約に合わせて直列化してあるが、同じコードが Chrome ではエラーにならずに別の挙動になる。(1) Android Chrome はセンサー許可ダイアログが無い。最近の Chrome は互換のため `DeviceOrientationEvent.requestPermission()` を持ち即 `granted` を返す（古い Chrome には無い）ので、分岐はどちらも通る。ところが Chrome のサイト設定「モーションセンサー」がブロックだと `granted` のまま `deviceorientation` が一度も届かず、実機では console が見えないので「頭が動かない」原因が分からない。PC Chrome はセンサーが無いと alpha/beta/gamma が全部 null のイベントを 1 回だけ発火するので「届いた」の判定も素直にできない。(2) iOS で非対応のため案内 UI で代替していた横向き固定（`screen.orientation.lock`）は Android Chrome の全画面中なら使える。同じく Wake Lock も使える（ゴーグル装着中は触れないので画面が消えると詰む）。TS の lib.dom は Safari 非対応を理由に `ScreenOrientation.lock` の型を持たない。(3) 「画面を押している間」の操作は Android の長押しで `contextmenu` が出て押し続けが切れる。(4) 「横向きにしてください」の覆いは `(orientation: portrait)` だけで出していたので、PC Chrome の縦長ウィンドウ（DevTools を横に開いたとき等）で全画面を覆って OrbitControls のドラッグを塞いでいた。どれも Safari の実機では起きないので、Chrome で試すまで気づかない
+- **どう対処したか**: `src/shared/start-flow.ts` に集約。許可の結果に続けて「イベントが 3 秒以内に届いたか」（`events-ok` / `no-events`。全 null は数えない）を HUD に出す。全画面化に成功したら `lock("landscape")` を試み結果を HUD に出す（非対応なら従来の案内に落ちる）。Wake Lock はタッチ端末で取り、裏に回って解放されたら表に戻ったとき取り直す。長押しは `contextmenu` を抑止（07 / 08 / ex8-1）。案内の覆いは `(pointer: coarse)` を条件に足した。ヘッドレス Chrome でタッチ端末を模擬して確認する `npm run check:chrome-flow` を追加（Chrome 拡張が繋がらない環境でも回る）。Android 実機は未確認
+- **SDK ならどう解決するか（案）**: `mr.start()` の結果を「許可の有無」ではなく「実際にセンサーが届いているか」「全画面・横向き固定・Wake Lock のそれぞれが取れたか」の構造化された状態で返す。ブラウザごとの分岐（許可 API の有無・lock の可否・長押しの副作用）は SDK が吸収し、利用者は同じコードで Safari / Chrome を扱えるようにする。「iOS で通った導線を Chrome で確認するチェックリスト」は SDK のテスト項目そのもの
+- **関連**: `src/shared/start-flow.ts` の `watchSensorEvents` / `lockLandscape` / `keepScreenAwake`、`scripts/headless-chrome-flow.mjs`、`.claude/skills/iphone-test/SKILL.md` の「Android Chrome で確認するときの違い」
+
 ## [2026-09-03] Phase 8 追加 / 08-splatoon: 「room 設定は URL クエリで全端末一致」の方式は、運営が開始前に変えたい値（塗れる空間の大きさ）に向かない
 
 - **何が苦しかったか**: フィールドの寸法（`wallW` / `wallH` / `floorDepth`）は 06 以来の流儀で「各端末が URL クエリで申告し、サーバーは最初の入室者の値で room を作り、以後は一致しないと入室拒否」だった。これだと俯瞰画面（運営）が寸法を変えたくても、スマホ全員の URL を打ち直して再入室させるしかない。さらにクライアント（`main.ts` / `overview.ts`）は壁と床の Surface と `InkView` を読み込み時に一度だけ作っていて、welcome の `config` で `fieldCfg` を上書きしても形は変わらない（値が一致している前提の作りだった）。「URL で一致検証」と「サーバーが権威として配る」が混在し、どの値が真かがコードから読み取りにくかった

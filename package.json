@@ -21,6 +21,7 @@
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
     "check:person": "node scripts/headless-person.mjs",
+    "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {
