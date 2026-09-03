@@ -112,6 +112,8 @@ export class SplatoonGame {
   lastJoinClearedColor = false;
   /** 発射位置の距離上限（コートの対角 + 1m） */
   private maxShotDist = MAX_SHOT_DIST_M;
+  /** カウントダウンに入る前のフェーズ（practice か result）。中止したとき、result 由来なら前試合の盤面を消して練習に戻す */
+  private countdownFrom: Phase = "practice";
   lastRejectReason = "";
 
   constructor(config: Partial<FieldConfig> = {}) {
@@ -285,6 +287,7 @@ export class SplatoonGame {
       this.lastRejectReason = "no players";
       return [];
     }
+    this.countdownFrom = this.phase;
     this.phase = "waiting";
     this.phaseEndsAt = now + this.config.waitSec * 1000;
     // 結果表示中からの開始: 前の勝者の表示（🏆）はここで消す（格子は試合開始まで残す）
@@ -339,7 +342,8 @@ export class SplatoonGame {
   /**
    * 俯瞰画面の「終了」（issue #32「途中で終われるように」）。
    * 試合中なら即座に結果へ（時間切れと同じ集計。塗りはそのまま結果表示に使う）、
-   * カウントダウン中なら中止して練習に戻る（練習の塗りは消していないのでそのまま）。
+   * カウントダウン中なら中止して練習に戻る。練習から始めたカウントダウンなら練習の塗りはそのまま、
+   * 結果表示から始めたものなら前試合の盤面が練習に漏れないよう格子とインクを新品にする（外部レビュー指摘）。
    * それ以外（練習中・結果表示中）は終えるものが無いので空を返す
    */
   stop(now: number): GameEvent[] {
@@ -347,7 +351,8 @@ export class SplatoonGame {
     if (this.phase === "waiting") {
       this.phase = "practice";
       this.phaseEndsAt = Infinity;
-      this.seq++;
+      if (this.countdownFrom === "result") this.resetField(now); // seq も進む
+      else this.seq++;
       return [{ kind: "cancel" }];
     }
     this.lastRejectReason = `nothing to stop during ${this.phase}`;

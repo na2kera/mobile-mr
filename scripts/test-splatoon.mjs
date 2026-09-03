@@ -327,8 +327,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check("stop 後の result は時間で練習に戻る", gs.tick(13000)[0]?.kind === "practice" && gs.phase === "practice");
     gs.start(14000);
     gs.tick(15000);
+    check("2 戦目で p1 が塗る", gs.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 15100)?.landing?.hit === true, gs.lastRejectReason);
     const timeUp = gs.tick(75000);
     check("時間切れの result には stopped が付かない", timeUp[0]?.kind === "result" && timeUp[0].stopped === undefined);
+    // 結果表示中に「次の対戦を開始」→ 中止: 前試合の盤面が練習に漏れないよう格子は新品（外部レビュー指摘）
+    check("結果表示中から start でカウントダウン（前試合の塗りはまだ残る）", gs.start(76000)[0]?.kind === "countdown" && gs.scores().p1 > 0);
+    const cancel2 = gs.stop(76500);
+    check("結果表示から始めたカウントダウンの中止は、格子を新品にして練習に戻る（前試合の得点は消える）", cancel2[0]?.kind === "cancel" && gs.phase === "practice" && Object.values(gs.scores()).every((v) => v === 0) && gs.winners === null);
+    check("中止後の練習で撃てる（インクも新品）", gs.inkOf("p1", 76600) === 1 && gs.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 76600) !== null, gs.lastRejectReason);
   }
   // 結果表示中にも start できる（次の対戦へ）
   const g2 = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });

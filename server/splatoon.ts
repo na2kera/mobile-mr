@@ -237,8 +237,8 @@ export function splatoonServer() {
           return;
         }
         console.log(`[splatoon] ${id} stop → ${events[0].kind}`);
-        // 結果は tick の時間切れと同じく格子ごと配る（カウントダウンの中止は格子が変わらないので配らない）
-        broadcastState(room, now, events[0].kind === "result", events[0]);
+        // 結果は tick の時間切れと同じく格子ごと配る。中止も、結果表示から始めたカウントダウンなら格子が消えるので格子ごと配る
+        broadcastState(room, now, true, events[0]);
         return;
       }
       if (msg.type === "field") {
