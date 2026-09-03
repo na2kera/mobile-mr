@@ -9,6 +9,7 @@
 //      - 縦持ちなので「横向きにしてください」が出る / 長押しの contextmenu が抑止される
 //   B. PC（マウス）の縦長ウィンドウ: 「横向きにしてください」が出ず（OrbitControls のドラッグを塞がない）、
 //      タッチ端末向けの表示（wake= / sensor=）も出ない
+//   C. name 無し: 入力を求め、確定後は reload せず URL に name を追加して開始する
 //   - 例外が出ていない
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -191,6 +192,7 @@ try {
   await pb.send("Emulation.setDeviceMetricsOverride", { width: 500, height: 900, deviceScaleFactor: 1, mobile: false });
   await pb.send("Page.navigate", { url: `${BASE}?${COMMON}&autostart=1&name=PC` });
   await sleep(4000);
+  check("B: ?name= を入力欄へ復元する", (await pb.eval(`document.querySelector('#player-name').value`)) === "PC");
   check("B: pointer: coarse が偽（PC）", !(await pb.eval(`matchMedia("(pointer: coarse)").matches`)));
   check("B: 縦長ウィンドウは portrait 判定", await pb.eval(`matchMedia("(orientation: portrait)").matches`));
   check("B: 開始済み", await pb.eval(`document.body.classList.contains('started')`));
@@ -200,14 +202,43 @@ try {
   check("B: PC では wake= / sensor= を出さない", !/wake=|sensor=/.test(hud));
   check("B: 例外なし", pb.exceptions.length === 0, pb.exceptions.join(" | "));
 
+  // ---- C: 表示名の入力 → URL 反映 → 開始 ----
+  const pc = await newPage(browser, { width: 390, height: 844 });
+  await pc.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await pc.send("Page.navigate", { url: `${BASE}?${COMMON}&autostart=1#join` });
+  await sleep(800);
+  check("C: name 無しの autostart では開始しない", !(await pc.eval(`document.body.classList.contains('started')`)));
+  check("C: 空の入力欄を表示する", (await pc.eval(`document.querySelector('#player-name').value`)) === "");
+  check("C: 名前の必須エラーを表示する", (await pc.eval(`document.querySelector('#name-error').textContent`)) === "名前を入力してください");
+  check("C: エラー時に入力欄へフォーカスする", await pc.eval(`document.activeElement?.id === 'player-name'`));
+  await pc.eval(`(() => {
+    const input = document.querySelector('#player-name');
+    input.value = '  テスト太郎123456789  ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  check("C: 入力すると必須エラーが消える", await pc.eval(`document.querySelector('#name-error').hidden`));
+  await pc.clickStart();
+  await sleep(800);
+  check("C: 名前を入力すると開始できる", await pc.eval(`document.body.classList.contains('started')`));
+  check("C: name をトリム・12文字にして URL に追加する", (await pc.eval(`new URL(location.href).searchParams.get('name')`)) === "テスト太郎1234567");
+  check("C: 正規化した name を入力欄にも反映する", (await pc.eval(`document.querySelector('#player-name').value`)) === "テスト太郎1234567");
+  check("C: 既存の room パラメータを保持する", (await pc.eval(`new URL(location.href).searchParams.get('room')`)) === "chromeflow");
+  check("C: URL のハッシュを保持する", (await pc.eval(`location.hash`)) === "#join");
+  check("C: 入力後にページを再読み込みしていない", (await pc.eval(`performance.getEntriesByType('navigation')[0]?.type`)) === "navigate");
+  check("C: 例外なし", pc.exceptions.length === 0, pc.exceptions.join(" | "));
+
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(failed ? `${failed} FAILED` : "ALL PASS");
   exitCode = failed ? 1 : 0;
 } catch (e) {
   console.error(e);
 } finally {
-  chrome?.kill();
+  if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
+    const exited = new Promise((resolve) => chrome.once("exit", resolve));
+    chrome.kill();
+    await Promise.race([exited, sleep(2000)]);
+  }
   server.kill();
-  rmSync(profile, { recursive: true, force: true });
+  rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 process.exit(exitCode);

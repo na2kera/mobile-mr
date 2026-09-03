@@ -63,7 +63,48 @@
         font-size: 0.85rem;
         max-width: 32em;
       }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label {
+        color: #e8eaed;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #player-name[aria-invalid="true"] {
+        border-color: #f28b82;
+      }
+      #name-hint {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #name-error {
+        color: #f28b82;
+      }
+      #name-error[hidden] {
+        display: none;
+      }
       #start-button {
+        width: 100%;
         font-size: 1.1rem;
         font-weight: 600;
         padding: 14px 48px;
@@ -148,13 +189,27 @@
       </p>
       <p>
         <a href="../03-marker-anchor/marker.html">マーカーを印刷</a>して壁に貼り、参加する全員が同じ URL を開いて
-        まずマーカーを見ます（表示名は ?name=。既定 room: demo。分けたいときは ?room=名前）。
+        まずマーカーを見ます（既定 room: demo。分けたいときは ?room=名前）。表示名は下の入力欄で設定します（?name= での事前指定も可能）。
         相手の方を向くと、相手の体に骨格と名札（色は参加順）が重なり、ネットワーク上の頭のアバターとの
         ずれが線で見えます。相手の端末には「あなたから見えています（ずれ 0.2m）」と出ます。
         1 台だけなら映った人は「？」のまま（検出の確認になります）。
       </p>
       <p id="room-error" hidden></p>
-      <button id="start-button" type="button">開始</button>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
       <p>
         確認の見方: 開始後、まず壁のマーカーを見ます（枠が出ます）。次に相手を見て、骨格が背景の相手に
         重なり、名札に相手の名前が出れば OK。名札が「？」のままなら HUD の tracks=（角度・距離のずれ）を見て
@@ -164,7 +219,7 @@
         調整: 表示は 06〜08 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
         マーカーは ?markerMm=100&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100。
         人物は ?poses=2&amp;bodyDetW=640&amp;bodySmooth=0.5&amp;bodyLostMs=500&amp;minVis=0.5&amp;maxBodyDepth=8。
-        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;fakebody=1 で、合成の人（相手が居ればその頭の位置 +
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC&amp;fakebody=1 で、合成の人（相手が居ればその頭の位置 +
         ?fakeBodyErr= のずれ、居なければ 2.5m 先）が映ります
       </p>
       <a href="/">← デモ一覧へ戻る</a>

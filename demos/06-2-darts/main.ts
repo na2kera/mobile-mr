@@ -10,6 +10,7 @@ import {
 } from "../../src/shared/passthrough-camera";
 import type { Passthrough } from "../../src/shared/passthrough-camera";
 import { isTouchDevice, runStartFlow, setupFullscreen } from "../../src/shared/start-flow";
+import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
 import type { MarkerAnchor } from "../../src/shared/marker-anchor";
 import { createHandTracker } from "../../src/shared/hand-tracker";
@@ -81,7 +82,6 @@ const MODEL_URLS = params.get("model")
 // Room / 通信
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
-const NAME = (params.get("name") ?? "").trim().slice(0, NAME_MAX_LENGTH);
 const SEND_INTERVAL_MS = 1000 / numParam("sendHz", 15, { min: 1, max: 60 });
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
@@ -609,11 +609,11 @@ function onState(state: GameState) {
   auth = { state, recvMs: now };
 }
 
-function connect() {
+function connect(name: string) {
   if (ROOM === null) return;
   client = connectGame(
     ROOM,
-    NAME,
+    name,
     { markerId: MARKER_ID, markerMm: MARKER_MM, gravity: GRAVITY, rounds: ROUNDS },
     {
       onStatus: (status) => {
@@ -949,16 +949,25 @@ const tryEnterFullscreen = setupFullscreen({
 });
 
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
+const nameForm = document.querySelector<HTMLFormElement>("#name-form")!;
 const roomError = document.querySelector<HTMLParagraphElement>("#room-error")!;
-startButton.addEventListener("click", () => {
+const readPlayerName = setupPlayerNameField({
+  input: document.querySelector<HTMLInputElement>("#player-name")!,
+  error: document.querySelector<HTMLParagraphElement>("#name-error")!,
+  maxLength: NAME_MAX_LENGTH,
+});
+nameForm.addEventListener("submit", (event) => {
+  event.preventDefault();
   if (ROOM === null) {
     roomError.hidden = false;
     roomError.textContent = `room 名「${roomRaw}」は使えません。日本語・英数字・ハイフン・アンダースコアの1〜32文字にしてください（記号・空白は不可）`;
     return;
   }
+  const name = readPlayerName();
+  if (name === null) return;
   document.body.classList.add("started");
   hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} rounds=${ROUNDS} throwMinSpeed=${THROW_MIN_SPEED} throwGain=${THROW_GAIN} throwLoft=${THROW_LOFT} mode=${touch ? "gyro" : "orbit"}`;
-  connect();
+  connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
   } else {
@@ -996,7 +1005,8 @@ addEventListener("pagehide", () => {
 addEventListener("pageshow", (e) => {
   if (!e.persisted) return;
   if (!document.body.classList.contains("started")) return;
-  connect();
+  const name = readPlayerName();
+  if (name !== null) connect(name);
   if (hudState.cam && !hudState.cam.includes("bfcache")) {
     hudState.cam += " (bfcache: カメラ停止の可能性)";
   }
