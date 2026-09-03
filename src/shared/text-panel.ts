@@ -8,7 +8,13 @@ export class TextPanel {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly texture: THREE.CanvasTexture;
   private last = "";
-  constructor(widthM: number, heightM: number, px = 768) {
+  /** 文字の大きさの上限を「幅に何文字入るか」で決める（長い行はこれと無関係に幅に収まるまで縮む） */
+  private readonly minCols: number;
+  /**
+   * minCols: 既定 14。短い文字を大きく出したいパネルは小さくする（08 の対戦中の塗り率表示で追加）
+   */
+  constructor(widthM: number, heightM: number, px = 768, minCols = 14) {
+    this.minCols = minCols;
     this.canvas.width = px;
     this.canvas.height = Math.round((px * heightM) / widthM);
     this.ctx = this.canvas.getContext("2d")!;
@@ -40,7 +46,7 @@ export class TextPanel {
     ctx.roundRect(0, 0, canvas.width, canvas.height, 24);
     ctx.fill();
     const lines = text.split("\n");
-    let size = Math.min(canvas.height / (lines.length + 0.6), canvas.width / 14);
+    let size = Math.min(canvas.height / (lines.length + 0.6), canvas.width / this.minCols);
     const maxW = canvas.width * 0.94;
     for (let i = 0; i < 8; i++) {
       ctx.font = `bold ${size}px system-ui, sans-serif`;
