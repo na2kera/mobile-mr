@@ -95,11 +95,8 @@ const SEND_INTERVAL_MS = 1000 / numParam("sendHz", 15, { min: 1, max: 60 });
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
 
-// フィールド・飛行（room 内で一致が必要。サーバーが検証）
-const WALL_W = numParam("wallW", DEFAULT_FIELD.wallW, { min: 0.2, max: 20 });
-const WALL_H = numParam("wallH", DEFAULT_FIELD.wallH, { min: 0.2, max: 20 });
-const FLOOR_DROP = numParam("floorDrop", DEFAULT_FIELD.floorDrop, { min: 0.1, max: 5 });
-const FLOOR_DEPTH = numParam("floorDepth", DEFAULT_FIELD.floorDepth, { min: 0.2, max: 20 });
+// 飛行・時間（room 内で一致が必要。サーバーが検証）。
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL ではなくサーバーの状態で、俯瞰画面から変える（welcome / field で届く）
 const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
 const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
 /** 俯瞰画面で「対戦開始」を押してから試合が始まるまでのカウントダウン [s] */
@@ -150,28 +147,42 @@ const markerFrameMaterial = new THREE.MeshBasicMaterial({
 anchor.add(new THREE.Mesh(new THREE.PlaneGeometry(MARKER_SIZE_M, MARKER_SIZE_M), markerFrameMaterial));
 
 // ---- フィールド（壁 + 床）----
+// 寸法はサーバーが権威（welcome / field で届く）。届くまでは既定の寸法で枠だけ出しておく
 let fieldCfg: FieldConfig = {
   ...DEFAULT_FIELD,
-  wallW: WALL_W,
-  wallH: WALL_H,
-  floorDrop: FLOOR_DROP,
-  floorDepth: FLOOR_DEPTH,
   gravity: GRAVITY,
   matchSec: MATCH_SEC,
   waitSec: WAIT_SEC,
 };
-const surfaces: SurfaceFrame[] = fieldSurfaces(fieldCfg);
+let surfaces: SurfaceFrame[] = [];
 const inkViews = new Map<string, InkView>();
-for (const s of surfaces) {
-  const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
-  field.add(view.group);
-  inkViews.set(s.id, view);
-}
 
-// スコアボード: 壁の上。視界内メッセージ: カメラの子
+// スコアボード: 壁の上端。視界内メッセージ: カメラの子
 const scorePanel = new TextPanel(1.0, 0.22);
-scorePanel.mesh.position.set(0, WALL_H / 2 + 0.16, 0.01);
 field.add(scorePanel.mesh);
+
+/** 壁と床（5 枚）と塗りの層を config から作り直す（起動時と、寸法が変わったとき） */
+function buildField() {
+  for (const v of inkViews.values()) v.dispose();
+  inkViews.clear();
+  surfaces = fieldSurfaces(fieldCfg);
+  for (const s of surfaces) {
+    const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
+    field.add(view.group);
+    inkViews.set(s.id, view);
+  }
+  // 壁の下端は床（-floorDrop）に接続し、上端は床から wallH
+  scorePanel.mesh.position.set(0, -fieldCfg.floorDrop + fieldCfg.wallH + 0.16, 0.01);
+}
+buildField();
+
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（塗りは直後の state の格子で描き直される） */
+function applyFieldConfig(cfg: FieldConfig): boolean {
+  const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
+  fieldCfg = cfg;
+  if (changed) buildField();
+  return changed;
+}
 const message = new TextPanel(0.9, 0.24);
 message.mesh.position.set(0, -0.28, -1.2);
 camera.add(message.mesh);
@@ -553,6 +564,7 @@ function onState(state: GameSnapshot) {
     if (ev?.kind === "start") flash = { text: "スタート！ 塗れ！", untilMs: now + 2500 };
     else if (ev?.kind === "countdown") flash = { text: "まもなく対戦開始！\n構えてください", untilMs: now + 2500 };
     else if (ev?.kind === "practice") flash = { text: "練習に戻りました\n（開始は俯瞰画面から）", untilMs: now + 3000 };
+    else if (ev?.kind === "field") flash = { text: `フィールドが変わりました\n幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m\nマーカーの高さ ${fieldCfg.floorDrop}m`, untilMs: now + 3000 };
     else if (ev?.kind === "result") {
       const text =
         ev.winners.length === 0
@@ -585,10 +597,6 @@ function connect() {
     {
       markerId: MARKER_ID,
       markerMm: MARKER_MM,
-      wallW: WALL_W,
-      wallH: WALL_H,
-      floorDrop: FLOOR_DROP,
-      floorDepth: FLOOR_DEPTH,
       gravity: GRAVITY,
       matchSec: MATCH_SEC,
       waitSec: WAIT_SEC,
@@ -607,7 +615,7 @@ function connect() {
         netStatus = "open";
         joined = true;
         posesSent = 0;
-        fieldCfg = cfg;
+        applyFieldConfig(cfg);
         [...peers.keys()].forEach(removePeer);
         peerIds.forEach(createPeer);
         clearPredicted();
@@ -645,6 +653,16 @@ function connect() {
         console.log(`[game] shot rejected by server: ${reason}`);
       },
       onState,
+      onField: (cfg, state) => {
+        // 寸法が変わった: 壁と床を作り直し、飛んでいる玉と予測は捨てる（古い面への着弾なので）
+        applyFieldConfig(cfg);
+        clearPredicted();
+        for (const s of shots.values()) s.mesh.removeFromParent();
+        shots.clear();
+        splatted.clear();
+        onState(state);
+        console.log(`[game] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop}`);
+      },
     },
   );
 }
@@ -1003,7 +1021,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} ink=${inkLocal.toFixed(2)} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
       `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
@@ -1039,7 +1057,7 @@ startButton.addEventListener("click", () => {
   }
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} wall=${WALL_W}x${WALL_H} floor=${FLOOR_DROP}/${FLOOR_DEPTH} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect();
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

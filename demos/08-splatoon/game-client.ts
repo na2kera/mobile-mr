@@ -6,6 +6,7 @@ import {
   type ClientMessage,
   type ClientRole,
   type FieldConfig,
+  type FieldSize,
   type GameSnapshot,
   type PlayerPose,
   type ServerMessage,
@@ -26,6 +27,8 @@ export type GameClientEvents = {
   onShot: (shot: Shot, serverT: number) => void;
   onRejected: (reason: string) => void;
   onState: (state: GameSnapshot) => void;
+  /** フィールドの寸法が変わった（俯瞰画面の field）。config で壁と床を作り直してから state（格子付き）を反映する */
+  onField: (config: FieldConfig, state: GameSnapshot) => void;
   onError: (reason: string) => void;
 };
 
@@ -36,6 +39,8 @@ export type GameClient = {
   sendShot: (pos: V3, vel: V3, radius: number) => boolean;
   /** 対戦開始（俯瞰画面だけ。送れたら true） */
   sendStart: () => boolean;
+  /** フィールドの寸法の変更（俯瞰画面だけ。送れたら true） */
+  sendField: (size: FieldSize) => boolean;
   dispose: () => void;
 };
 
@@ -52,10 +57,6 @@ export function connectGame(
     v: String(SPLATOON_PROTOCOL_VERSION),
     markerId: String(config.markerId),
     markerMm: String(config.markerMm),
-    wallW: String(config.wallW),
-    wallH: String(config.wallH),
-    floorDrop: String(config.floorDrop),
-    floorDepth: String(config.floorDepth),
     gravity: String(config.gravity),
     matchSec: String(config.matchSec),
     waitSec: String(config.waitSec),
@@ -93,6 +94,9 @@ export function connectGame(
         break;
       case "state":
         events.onState(msg.state);
+        break;
+      case "field":
+        events.onField(msg.config, msg.state);
         break;
       case "error":
         // バージョン・設定の不一致は再接続しても同じ結果なのでループを止める。
@@ -135,6 +139,9 @@ export function connectGame(
     },
     sendStart() {
       return send({ type: "start" });
+    },
+    sendField(size) {
+      return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop });
     },
     dispose() {
       disposed = true;
