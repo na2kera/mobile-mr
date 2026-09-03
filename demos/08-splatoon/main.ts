@@ -15,10 +15,10 @@ import type { MarkerAnchor } from "../../src/shared/marker-anchor";
 import { createHandTracker } from "../../src/shared/hand-tracker";
 import type { HandTracker } from "../../src/shared/hand-tracker";
 import { HandView } from "../../src/shared/hand-view";
-import { LANDMARK_COUNT } from "../../src/shared/hand-math";
+import { INDEX_MCP, LANDMARK_COUNT, MIDDLE_MCP, PINKY_MCP, WRIST } from "../../src/shared/hand-math";
 import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
-import type { HandResultLike } from "../../src/shared/hand-slots";
+import type { HandResultLike, HandSlot } from "../../src/shared/hand-slots";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import markerSvgUrl from "../../src/shared/marker-0.svg";
@@ -37,6 +37,7 @@ import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
+import { InkTankView } from "./ink-tank";
 import { scriptedSplatHand } from "./fake-splat-hand";
 import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
 import { createSplatSound } from "./splat-sound";
@@ -47,6 +48,7 @@ import { createSplatSound } from "./splat-sound";
 //   - 操作: パーの間、手のひらから連射（1 発 = タンクの 1/tankShots。空になると撃てない）。
 //     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
 //     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
+//   - インクの残量は手元のタンク（issue #31。ink-tank.ts）: 見えている手のそば（既定は手のひらの親指側）に水位で出す。手が無いときは視界の下
 //   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
 //     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 → 練習に戻る。
 //     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
@@ -110,6 +112,19 @@ const PREDICT_MAX_MS = 1500;
 
 /** 着弾の音（?sound=0 で無効） */
 const SOUND = params.get("sound") !== "0";
+
+// 手元のインクタンク（issue #31）
+/** タンクの板の高さ [m]（幅はその 0.4 倍）。実機で手の大きさと見比べて決める */
+const TANK_H = numParam("tankH", 0.12, { min: 0.03, max: 0.5 });
+/** タンクの中心を手からずらす距離 [m]（thumb / pinky は手のひらの中心から、arm は手首から） */
+const TANK_OFFSET = numParam("tankOffset", 0.09, { min: 0, max: 0.5 });
+/** タンクの置き場所: thumb = 手のひらの親指側（既定）、pinky = 小指側、arm = 手首の先（前腕側）。手が低いと arm は視界の下で切れやすい */
+const tankPlaceRaw = params.get("tankPlace") ?? "thumb";
+const TANK_PLACE: "thumb" | "pinky" | "arm" = tankPlaceRaw === "pinky" || tankPlaceRaw === "arm" ? tankPlaceRaw : "thumb";
+/** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない） */
+const TANK_FALLBACK = params.get("tankFallback") !== "0";
+/** 手が消えてから視界の下へ落とすまで最後の手の位置に留める時間 [ms]（MediaPipe の一瞬の取りこぼしで往復しないように） */
+const TANK_HOLD_MS = numParam("tankHoldMs", 800, { min: 0, max: 5000 });
 
 // デバッグ
 const FAKE_CAM = params.has("fakecam");
@@ -188,10 +203,9 @@ function applyFieldConfig(cfg: FieldConfig): boolean {
 const message = new TextPanel(0.9, 0.24);
 message.mesh.position.set(0, -0.28, -1.2);
 camera.add(message.mesh);
-// インクゲージ（視界の下・常時）
-const inkPanel = new TextPanel(0.52, 0.09, 512);
-inkPanel.mesh.position.set(0, -0.45, -1.2);
-camera.add(inkPanel.mesh);
+// 手元のインクタンク（issue #31）。置き場所と残量は updateInkTank で毎フレーム決める
+const inkTank = new InkTankView(TANK_H);
+camera.add(inkTank.mesh);
 // 自分の塗り率と順位（視界の上・対戦中だけ。issue #32「対戦中のパーセント表示がもう少し大きく見えると良い」。
 // 壁のスコアボードは離れると小さいので、視界に固定して minCols=8 で文字を大きく出す）
 const percentPanel = new TextPanel(0.6, 0.16, 512, 8);
@@ -737,6 +751,11 @@ let inkLocal = 1;
 let lastInkUpdateMs = performance.now();
 let lastNoInkFlashMs = -Infinity;
 
+/** いまの残量で 1 発撃てるか（発射と、タンクの「空」表示で同じ判定。減算の丸め誤差ぶんの余裕を持つ） */
+function hasInkForShot(): boolean {
+  return inkLocal + 1e-9 >= inkPerShot(fieldCfg);
+}
+
 /** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
 function canShoot(): boolean {
   const phase = auth?.state.phase;
@@ -787,7 +806,7 @@ function updateFire(now: number) {
   const wantHand = openSlot && canShoot();
   const wantGaze = !openSlot && holdPressed && canShoot();
   if ((wantHand || wantGaze) && now - lastShotMs >= interval) {
-    if (inkLocal + 1e-9 < inkPerShot(fieldCfg)) {
+    if (!hasInkForShot()) {
       if (now - lastNoInkFlashMs > 2000) {
         lastNoInkFlashMs = now;
         flash = { text: "インク切れ！\n少し待つと回復します", untilMs: now + 2000 };
@@ -922,11 +941,6 @@ function remainingSec(now: number): number {
   return Math.max(0, (auth.state.phaseEndsAt - auth.state.t) / 1000 - (now - auth.recvMs) / 1000);
 }
 
-function gauge(c: number): string {
-  const n = Math.round(Math.min(1, Math.max(0, c)) * 10);
-  return "■".repeat(n) + "□".repeat(10 - n);
-}
-
 function updateMessages(now: number) {
   const s = auth?.state;
   if (s) {
@@ -999,13 +1013,100 @@ function updateMessages(now: number) {
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
   message.set(text, color);
-  // インクゲージ（入室後は常時）
-  if (joined && myColor) {
-    const hex = `#${inkColorHex(myColor).toString(16).padStart(6, "0")}`;
-    inkPanel.set(`インク ${gauge(inkLocal)}`, inkLocal < inkPerShot(fieldCfg) ? "#fdd663" : hex);
-  } else {
-    inkPanel.set("");
+}
+
+// ---- 手元のインクタンク（issue #31）----
+// 見えている手（パーを優先）のそばに置く。既定は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ
+// TANK_OFFSET ずらした位置（?tankPlace= で小指側・手首の先にもできる。向きは手の 3D 点から取るので手を回しても同じ側に付く）。
+// 板はカメラの子なので常に正面を向き、水位は手の向きによらず鉛直（残量を読むため。手に貼り付ける見た目より読みやすさ）。
+// 手が見えないとき（視線連射・手を下ろしたとき）は視界の下に大きめに出す。ただし消えてから TANK_HOLD_MS は最後の位置に留める
+// （一瞬の取りこぼしで往復しないように）。置き場所が変わるときは TANK_GLIDE_MS で滑らせる
+/** 視界の下の位置（1.2m 先）。上端が視界内メッセージの下端 -0.40 より下（脈動 ×1.06 ぶんも含めて）になる高さ */
+const TANK_FALLBACK_POS = new THREE.Vector3(0, -0.51, -1.2);
+/** 視界の下に出すときの高さ [m]（1.2m 先なので手元より大きく） */
+const TANK_FALLBACK_H = 0.2;
+const TANK_GLIDE_MS = 250;
+const tankTarget = new THREE.Vector3();
+const tankFrom = new THREE.Vector3();
+let tankFromScale = 1;
+let tankGlideStartMs = -Infinity;
+let tankSlot: HandSlot | null = null;
+/** 最後に手のそばに置いた時刻 [ms]（TANK_HOLD_MS の判定） */
+let tankLastHandMs = -Infinity;
+/** いまの置き場所（HUD 用）: hand = 手元、view = 視界の下、- = 非表示 */
+let tankPlace: "hand" | "view" | "-" = "-";
+
+function updateInkTank(now: number) {
+  if (!joined || !myColor) {
+    inkTank.mesh.visible = false;
+    tankPlace = "-";
+    return;
   }
+  const slot =
+    handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open") ??
+    handSlots.slots.find((s) => s.view.visible && s.ema) ??
+    null;
+  let place: typeof tankPlace;
+  let targetScale: number;
+  if (slot?.ema) {
+    const wrist = slot.ema[WRIST];
+    const mcp = slot.ema[MIDDLE_MCP];
+    if (TANK_PLACE === "arm") {
+      // 手首から前腕の向き（手首 − 中指の付け根）へ
+      tmpVec.set(wrist.x - mcp.x, wrist.y - mcp.y, wrist.z - mcp.z);
+      tankTarget.set(wrist.x, wrist.y, wrist.z);
+    } else {
+      // 手のひらの中心（手首と中指の付け根の中点）から親指側（小指の付け根 → 人差し指の付け根）か小指側へ
+      const idx = slot.ema[INDEX_MCP];
+      const pky = slot.ema[PINKY_MCP];
+      tmpVec.set(idx.x - pky.x, idx.y - pky.y, idx.z - pky.z);
+      if (TANK_PLACE === "pinky") tmpVec.negate();
+      tankTarget.set((wrist.x + mcp.x) / 2, (wrist.y + mcp.y) / 2, (wrist.z + mcp.z) / 2);
+    }
+    if (tmpVec.lengthSq() < 1e-8) tmpVec.set(0, -1, 0);
+    else tmpVec.normalize();
+    tankTarget.addScaledVector(tmpVec, TANK_OFFSET);
+    tankLastHandMs = now;
+    targetScale = 1;
+    place = "hand";
+  } else if (tankPlace === "hand" && now - tankLastHandMs < TANK_HOLD_MS) {
+    // 手が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
+    targetScale = 1;
+    place = "hand";
+  } else if (TANK_FALLBACK) {
+    tankTarget.copy(TANK_FALLBACK_POS);
+    targetScale = TANK_FALLBACK_H / TANK_H;
+    place = "view";
+  } else {
+    inkTank.mesh.visible = false;
+    tankPlace = "-";
+    tankSlot = null;
+    return;
+  }
+  if (place !== tankPlace || slot !== tankSlot) {
+    // 置き場所が変わった: いまの位置から目標へ滑らせる（非表示からは即座に置く）
+    if (tankPlace === "-") {
+      tankGlideStartMs = -Infinity;
+    } else {
+      tankFrom.copy(inkTank.mesh.position);
+      tankFromScale = inkTank.baseScale;
+      tankGlideStartMs = now;
+    }
+    tankPlace = place;
+    tankSlot = slot;
+  }
+  const p = Math.min(1, (now - tankGlideStartMs) / TANK_GLIDE_MS);
+  const k = 1 - (1 - p) * (1 - p);
+  if (k >= 1) {
+    inkTank.mesh.position.copy(tankTarget);
+    inkTank.baseScale = targetScale;
+  } else {
+    inkTank.mesh.position.lerpVectors(tankFrom, tankTarget, k);
+    inkTank.baseScale = tankFromScale + (targetScale - tankFromScale) * k;
+  }
+  inkTank.set(inkLocal, inkColorHex(myColor), !hasInkForShot());
+  inkTank.update(now);
+  inkTank.mesh.visible = true;
 }
 
 // ---- 頭追従（02〜07 と同じ） ----
@@ -1043,7 +1144,7 @@ function renderHud() {
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
-    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} tank=${tankPlace} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
     s &&
       `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
   ]
@@ -1153,6 +1254,7 @@ renderer.setAnimationLoop(() => {
   for (const v of inkViews.values()) v.update(now);
   sendPoseIfDue(now);
   updateMessages(now);
+  updateInkTank(now);
   if (document.body.classList.contains("started")) renderHud();
   effect.render(scene, camera);
 });
