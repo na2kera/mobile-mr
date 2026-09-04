@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>08. マーカー印刷（マルチマーカー） — Mobile MR</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        /* 黒い正方形の一辺 [mm]。?mm= で変更できる（markers.ts 参照） */
+        --marker-mm: 150;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 24px 16px;
+        box-sizing: border-box;
+      }
+      p.note {
+        max-width: 40em;
+        font-size: 0.85rem;
+        color: #666;
+        margin: 0;
+      }
+      @media (prefers-color-scheme: dark) {
+        p.note {
+          color: #9aa0a6;
+        }
+      }
+      a {
+        font-size: 0.85rem;
+      }
+      /* 1 ページに 1 枚。マーカー SVG は黒枠 8 セル + 白余白各 1 セル = 10 セルなので全体は 10/8 倍で描く。
+         余白（クワイエットゾーン）は検出に必須なので削らないこと（03 の marker.html と同じ） */
+      .sheet {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        page-break-after: always;
+        break-after: page;
+      }
+      .sheet .marker {
+        width: calc(var(--marker-mm) * 1mm * 10 / 8);
+        height: calc(var(--marker-mm) * 1mm * 10 / 8);
+        background: #fff;
+        display: block;
+      }
+      .sheet .marker svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .sheet .up {
+        font-size: 1.2rem;
+        font-weight: 700;
+      }
+      .sheet .caption {
+        font-size: 0.95rem;
+        text-align: center;
+        max-width: 36em;
+      }
+      .sheet .caption small {
+        display: block;
+        font-weight: 400;
+        color: #666;
+        font-size: 0.8rem;
+      }
+      @media print {
+        .no-print {
+          display: none;
+        }
+        body {
+          padding: 0;
+          gap: 0;
+        }
+        .sheet {
+          min-height: 100vh;
+          justify-content: center;
+        }
+        .sheet .caption small {
+          color: #000;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="no-print" style="font-size: 1.1rem; margin: 0">08 用マーカー一式（ARUCO_MIP_36h12）</h1>
+    <p class="note no-print" id="size-note">
+      1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が 150mm になります
+      （?mm= で変更。全員のデモ URL に ?markerMm=実測値 を付けます。追加マーカーも同じ大きさで印刷してください）。
+    </p>
+    <p class="note no-print">
+      貼り方: 壁のマーカーは<strong>「上」を天井に向けて</strong>貼ります。床のマーカーは<strong>「上」を正面の壁に向けて</strong>置きます。
+      原点は正面の壁のマーカー（ID 0）で、他のマーカーは「原点の中心からの位置（右 +X / 上 +Y / 部屋側 +Z）」を測って
+      俯瞰画面の「追加マーカーの配置」に入れます（床のマーカーの高さは自動）。ID の割り当ては俯瞰画面で変えられます。
+      検出できる距離はマーカーの一辺の 10〜20 倍が目安なので、部屋が広いときは大きく印刷してください。
+    </p>
+    <p class="no-print"><a href="./overview.html">← 俯瞰画面へ</a>　<a href="./">プレイヤー画面へ</a>　<a href="/">デモ一覧へ</a></p>
+    <div id="sheets"></div>
+    <script type="module" src="./markers.ts"></script>
+  </body>
+</html>

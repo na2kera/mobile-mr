@@ -3,11 +3,13 @@
 // 接続には 2 つの役割がある: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview）。俯瞰画面はプレイヤーではない
 // （game.join しない・join / leave を配らない・welcome の peers にも入れない）が、room のメンバーとして
 // pose / shot / state を受け取り、唯一「start（対戦開始）」「stop（途中終了）」と「field（フィールドの寸法の変更）」を送れる（issue #19 / #21 / #32）。
-// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る。
+// 追加マーカーの配置（issue #30）も同じく room の状態（game.config.markers）で、俯瞰画面の markers で変えて welcome / markers で配る
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
   HAND_FLAT_LENGTH,
+  MAX_POSE_MARKER_IDS,
   NAME_MAX_LENGTH,
   SPLATOON_PATH,
   SPLATOON_PROTOCOL_VERSION,
@@ -20,6 +22,7 @@ import {
 import { SplatoonGame } from "../src/shared/splatoon-game.ts";
 import { DEFAULT_FIELD, FIELD_SIZE_KEYS, validateFieldSize, type FieldSize, type V3 } from "../src/shared/splatoon-sim.ts";
 import { RateLimiter } from "../src/shared/surface-paint.ts";
+import { MAX_EXTRA_MARKERS, MAX_MARKER_ID, describeMarkers, validateMarkerLayout, type MarkerFace, type MarkerPlacement } from "../src/shared/marker-layout.ts";
 
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const TICK_MS = 100;
@@ -74,6 +77,11 @@ function parseClientMessage(data: RawData): ClientMessage | null {
       hands = m.hands as number[][];
     }
     if (m.fist !== undefined && typeof m.fist !== "boolean") return null;
+    let markerIds: number[] | undefined;
+    if (m.markerIds !== undefined) {
+      if (!Array.isArray(m.markerIds) || m.markerIds.length > MAX_POSE_MARKER_IDS || !m.markerIds.every((v) => Number.isInteger(v) && v >= 0 && v <= 999)) return null;
+      markerIds = m.markerIds as number[];
+    }
     const pose: PlayerPose = {
       pos: m.pos as V3,
       quat: m.quat.map((v) => v / quatLen) as unknown as PlayerPose["quat"],
@@ -81,6 +89,7 @@ function parseClientMessage(data: RawData): ClientMessage | null {
     };
     if (hands) pose.hands = hands;
     if (m.fist === true) pose.fist = true;
+    if (markerIds && markerIds.length > 0) pose.markerIds = markerIds;
     return { type: "pose", ...pose };
   }
   if (m.type === "start") return { type: "start" };
@@ -89,6 +98,20 @@ function parseClientMessage(data: RawData): ClientMessage | null {
     // 範囲とセル数の上限は onMessage で validateFieldSize（理由を rejected で返すため）。ここは数値であることだけ
     if (!FIELD_SIZE_KEYS.every((k) => typeof m[k] === "number" && Number.isFinite(m[k]))) return null;
     return { type: "field", wallW: m.wallW as number, wallH: m.wallH as number, floorDepth: m.floorDepth as number, floorDrop: m.floorDrop as number };
+  }
+  if (m.type === "markers") {
+    // 形（配列・各要素の型）だけここで。枚数の上限・ID の重複・床の高さは onMessage で validateMarkerLayout（理由を rejected で返すため。
+    // 配列の長さは明らかな異常値だけ弾く）
+    if (!Array.isArray(m.markers) || m.markers.length > MAX_EXTRA_MARKERS * 4) return null;
+    const markers: MarkerPlacement[] = [];
+    for (const raw of m.markers) {
+      if (typeof raw !== "object" || raw === null) return null;
+      const r = raw as Record<string, unknown>;
+      if (!Number.isInteger(r.id) || (r.id as number) < 0 || (r.id as number) > MAX_MARKER_ID) return null;
+      if (typeof r.face !== "string" || !isVec(r.pos, 3)) return null;
+      markers.push({ id: r.id as number, face: r.face as MarkerFace, pos: [r.pos[0], r.pos[1], r.pos[2]] });
+    }
+    return { type: "markers", markers };
   }
   if (m.type === "shot") {
     if (!isVec(m.pos, 3) || !isVec(m.vel, 3)) return null;
@@ -259,6 +282,23 @@ export function splatoonServer() {
         // 格子が作り直されたので、config と格子付きの state を全員に配る（俯瞰画面も含む）
         room.state.lastBroadcastMs = now;
         room.broadcast({ type: "field", config: game.config, state: game.snapshot(now, true, { kind: "field" }) } satisfies ServerMessage);
+        return;
+      }
+      if (msg.type === "markers") {
+        // 追加マーカーの配置の変更も俯瞰画面だけ（issue #30）。配置は塗りに関係しないので格子は配り直さない
+        if (!isOverview) {
+          room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
+          return;
+        }
+        const invalid = validateMarkerLayout(msg.markers, room.config.markerId, game.config.floorDrop);
+        const reason = invalid ?? (game.setMarkers(msg.markers, now) ? null : game.lastRejectReason);
+        if (reason !== null) {
+          console.log(`[splatoon] ${id} markers ${describeMarkers(msg.markers)} rejected: ${reason}`);
+          room.send(id, { type: "rejected", reason } satisfies ServerMessage);
+          return;
+        }
+        console.log(`[splatoon] ${id} markers → ${describeMarkers(game.config.markers)}`);
+        room.broadcast({ type: "markers", config: game.config } satisfies ServerMessage);
         return;
       }
       if (isOverview) return; // 俯瞰画面は pose / shot を送らない（送ってきても捨てる）

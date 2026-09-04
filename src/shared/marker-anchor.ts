@@ -2,10 +2,23 @@
 // detectAndUpdateAnchor / applyObservations を Phase 6 で抽出した。
 // ロスト時に anchor をどうするか（04: 非表示 / 06: 最後の姿勢を維持）は呼び出し側の方針なので
 // ここでは扱わず、isTracking() で判断材料だけ返す。
-// 03/04 は過去のデモとして手を付けず、06 以降がこれを使う
+// 03/04 は過去のデモとして手を付けず、06 以降がこれを使う。
+//
+// マルチマーカー（issue #30、08 で使用）: markerId の原点マーカーに加えて extraMarkers（原点座標系での姿勢が
+// 分かっている追加マーカー）を渡すと、どれが見えてもアンカー（= 原点マーカーの姿勢）に直して採用する。
+// アンカーは 1 つのままなので、呼び出し側（field = anchor）は枚数を意識しない。
+// 同じフレームで複数見えたときは画面上の大きさで重み付き平均し、候補のばらつき（spread）を診断用に返す
 import * as THREE from "three";
 import { createMarkerDetector } from "./marker-detector";
 import type { MarkerObservation } from "./marker-detector";
+import { fusePoseCandidates } from "./marker-layout";
+import type { PoseCandidate } from "./marker-layout";
+
+export type ExtraMarker = {
+  id: number;
+  /** このマーカーの座標系 → アンカー（原点マーカー）座標系の変換 */
+  toAnchor: THREE.Matrix4;
+};
 
 export type MarkerAnchorOptions = {
   video: HTMLVideoElement;
@@ -13,7 +26,13 @@ export type MarkerAnchorOptions = {
   /** マーカー座標系 → ワールドの変換を持たせる Object3D（子にマーカー基準の物体を置く） */
   anchor: THREE.Object3D;
   markerSizeM: number;
+  /** 原点マーカーの ID（anchor の座標系 = このマーカーの座標系） */
   markerId: number;
+  /**
+   * 追加マーカー（省略時は原点マーカーだけ）。毎回の検出で呼ぶので、配置が変わったら返す配列を差し替えれば良い。
+   * 追加マーカーの実寸は原点と同じ markerSizeM
+   */
+  extraMarkers?: () => readonly ExtraMarker[];
   /** 正規化再投影誤差（marker-detector.ts 参照）の上限。超える観測は捨てる */
   maxPoseError: number;
   /** 検出画像の長辺 [px]。大きいほど遠くまで検出できるが重い（04: 960 で 2.5m / 20ms） */
@@ -41,7 +60,7 @@ export type MarkerAnchorOptions = {
 export type MarkerAnchor = {
   /** 描画ループから毎フレーム呼ぶ。新しい映像フレームがあり間引き条件を満たせば検出する */
   update(now: number): void;
-  /** HUD 用（"id=0 err=0.03 18ms" / "lost (1.2s)" / "searching"） */
+  /** HUD 用（"id=0+1 err=0.03,0.05 spread=0.02m 18ms" / "lost (1.2s)" / "searching"） */
   readonly info: string;
   /** 直近に観測を採用した時刻 [ms]。一度も無ければ -Infinity */
   readonly lastAcceptedMs: number;
@@ -49,6 +68,10 @@ export type MarkerAnchor = {
   readonly detMs: number;
   /** 一度でも検出できたか（= anchor の姿勢に意味があるか） */
   readonly everDetected: boolean;
+  /** 直近の検出で採用したマーカーの ID（ロスト中は直近に採用したもののまま。isTracking と併用する） */
+  readonly usedIds: readonly number[];
+  /** 直近の採用で複数マーカーが見えたときの、原点の位置の候補のばらつき [m]（1 枚なら 0）。貼りズレの診断用 */
+  readonly spreadM: number;
   /** lostMs 以内に観測を採用していれば true */
   isTracking(now: number, lostMs: number): boolean;
 };
@@ -66,12 +89,15 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
   const targetQuat = new THREE.Quaternion();
   const targetScale = new THREE.Vector3();
   const markerWorld = new THREE.Matrix4();
+  const identity = new THREE.Matrix4();
 
   const self = {
     info: "searching",
     lastAcceptedMs: -Infinity,
     detMs: 0,
     everDetected: false,
+    usedIds: [] as number[],
+    spreadM: 0,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
     },
@@ -108,14 +134,37 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     },
   };
 
+  /** 観測した ID が原点か追加マーカーなら、そのマーカー → アンカー座標系の変換を返す */
+  function toAnchorOf(id: number): THREE.Matrix4 | null {
+    if (id === opts.markerId) return identity;
+    const extra = opts.extraMarkers?.().find((m) => m.id === id);
+    return extra ? extra.toAnchor : null;
+  }
+
   function apply(observations: MarkerObservation[], now: number) {
-    const obs = observations.find(
-      (o) =>
-        o.id === opts.markerId &&
-        Number.isFinite(o.error) &&
-        o.error <= opts.maxPoseError,
-    );
-    if (!obs) {
+    // 姿勢が信用できる観測のうち、配置が分かっているマーカーだけを候補にする（同じ ID が複数見えたら最初の 1 つ）
+    const candidates: PoseCandidate[] = [];
+    const used: { id: number; error: number }[] = [];
+    camera.updateMatrixWorld();
+    for (const o of observations) {
+      if (!Number.isFinite(o.error) || o.error > opts.maxPoseError) continue;
+      if (used.some((u) => u.id === o.id)) continue;
+      const toAnchor = toAnchorOf(o.id);
+      if (!toAnchor) continue;
+      // マーカーのカメラ座標系での姿勢 × カメラのワールド姿勢 = マーカー座標系 → ワールド。
+      // 追加マーカーなら、さらに（マーカー → アンカー）の逆を掛けてアンカー座標系 → ワールドに直す
+      markerWorld.multiplyMatrices(camera.matrixWorld, o.matrix);
+      if (toAnchor !== identity) markerWorld.multiply(toAnchor.clone().invert());
+      markerWorld.decompose(targetPos, targetQuat, targetScale);
+      candidates.push({
+        pos: [targetPos.x, targetPos.y, targetPos.z],
+        quat: [targetQuat.x, targetQuat.y, targetQuat.z, targetQuat.w],
+        weight: o.sidePx * o.sidePx,
+      });
+      used.push({ id: o.id, error: o.error });
+    }
+    const fused = fusePoseCandidates(candidates);
+    if (!fused) {
       if (observations.length > 0 && now - lastRejectLogMs > 2000) {
         console.log(
           `[marker] observed but rejected: ${observations.map((o) => `id=${o.id} err=${o.error.toFixed(2)}`).join(", ")}`,
@@ -127,10 +176,8 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
       }
       return;
     }
-    // マーカーのカメラ座標系での姿勢 × カメラのワールド姿勢 = マーカー座標系 → ワールド
-    camera.updateMatrixWorld();
-    markerWorld.multiplyMatrices(camera.matrixWorld, obs.matrix);
-    markerWorld.decompose(targetPos, targetQuat, targetScale);
+    targetPos.set(fused.pos[0], fused.pos[1], fused.pos[2]);
+    targetQuat.set(fused.quat[0], fused.quat[1], fused.quat[2], fused.quat[3]);
     const snap =
       !self.everDetected ||
       ((opts.canSnap?.() ?? true) &&
@@ -145,7 +192,9 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     }
     self.everDetected = true;
     self.lastAcceptedMs = now;
-    self.info = `id=${obs.id} err=${obs.error.toFixed(2)} ${self.detMs.toFixed(0)}ms`;
+    self.usedIds = used.map((u) => u.id);
+    self.spreadM = fused.spread;
+    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""} ${self.detMs.toFixed(0)}ms`;
   }
 
   return self;

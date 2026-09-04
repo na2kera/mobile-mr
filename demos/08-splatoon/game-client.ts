@@ -8,6 +8,7 @@ import {
   type FieldConfig,
   type FieldSize,
   type GameSnapshot,
+  type MarkerPlacement,
   type PlayerPose,
   type ServerMessage,
   type Shot,
@@ -29,6 +30,8 @@ export type GameClientEvents = {
   onState: (state: GameSnapshot) => void;
   /** フィールドの寸法が変わった（俯瞰画面の field）。config で壁と床を作り直してから state（格子付き）を反映する */
   onField: (config: FieldConfig, state: GameSnapshot) => void;
+  /** 追加マーカーの配置が変わった（俯瞰画面の markers）。config.markers でアンカーの候補を作り直す（塗りはそのまま） */
+  onMarkers: (config: FieldConfig) => void;
   onError: (reason: string) => void;
 };
 
@@ -43,6 +46,8 @@ export type GameClient = {
   sendStop: () => boolean;
   /** フィールドの寸法の変更（俯瞰画面だけ。送れたら true） */
   sendField: (size: FieldSize) => boolean;
+  /** 追加マーカーの配置の変更（俯瞰画面だけ。送れたら true） */
+  sendMarkers: (markers: MarkerPlacement[]) => boolean;
   dispose: () => void;
 };
 
@@ -100,6 +105,9 @@ export function connectGame(
       case "field":
         events.onField(msg.config, msg.state);
         break;
+      case "markers":
+        events.onMarkers(msg.config);
+        break;
       case "error":
         // バージョン・設定の不一致は再接続しても同じ結果なのでループを止める。
         // 満員（役割別の上限）は、半切断した古い接続が heartbeat で消えれば入れるので再接続を続ける
@@ -147,6 +155,9 @@ export function connectGame(
     },
     sendField(size) {
       return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop });
+    },
+    sendMarkers(markers) {
+      return send({ type: "markers", markers });
     },
     dispose() {
       disposed = true;

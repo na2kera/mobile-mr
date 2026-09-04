@@ -10,6 +10,8 @@ import { DEFAULT_FIELD, FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, fieldSurfaces, inkAt
 import type { FieldConfig, FieldSize, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
+import { FACE_LABELS, MARKER_FACES, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
+import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
@@ -17,7 +19,8 @@ import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-s
 import { createSplatSound } from "./splat-sound";
 
 // Phase 8 / issue #19・#21: PC の俯瞰画面。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
-// コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」と「フィールドの寸法」を送る唯一の端末。
+// コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」「フィールドの寸法」「追加マーカーの配置」を送る唯一の端末。
+// 追加マーカー（issue #30）は配置どおりの位置に枠と ID を描き、各プレイヤーがいまどのマーカーで位置合わせしているかを一覧に出す（貼りズレの診断用）。
 // 座標系はスマホと同じ field 座標系（マーカー座標系）で、ここではそれをワールド座標にそのまま置く。
 // 描画のうち塗り（InkView）・飛行（inkAt）・ピアの頭と手は main.ts と同じ式（俯瞰なので視点だけ違う）
 
@@ -83,21 +86,47 @@ function buildField() {
   fitCamera();
 }
 
-/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す */
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す。追加マーカーの配置も反映する */
 function applyFieldConfig(cfg: FieldConfig): boolean {
   const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
   fieldCfg = cfg;
   if (changed) buildField();
+  applyMarkerLayout(cfg.markers ?? []);
   return changed;
 }
 // マーカーの枠（壁の原点。スマホの位置合わせの基準がどこかを示す）
-field.add(
-  new THREE.Mesh(
-    new THREE.PlaneGeometry(MARKER_MM / 1000, MARKER_MM / 1000),
-    new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.5, side: THREE.DoubleSide }),
-  ),
-);
+const markerFrameGeometry = new THREE.PlaneGeometry(MARKER_MM / 1000, MARKER_MM / 1000);
+field.add(new THREE.Mesh(markerFrameGeometry, new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.5, side: THREE.DoubleSide })));
 field.add(new THREE.AxesHelper(0.3));
+// 追加マーカーの枠 + ID（issue #30）。配置どおりの位置と向きに描く（スマホ側の枠と同じ。貼る位置の目安）
+const markerFrames = new THREE.Group();
+field.add(markerFrames);
+let markerLayoutKey = "";
+function applyMarkerLayout(markers: MarkerPlacement[]) {
+  const key = JSON.stringify(markers);
+  if (key === markerLayoutKey) return;
+  markerLayoutKey = key;
+  for (const child of [...markerFrames.children]) {
+    child.removeFromParent();
+    child.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        (o.material as THREE.Material & { map?: THREE.Texture | null }).map?.dispose();
+        (o.material as THREE.Material).dispose();
+        if (o.geometry !== markerFrameGeometry) o.geometry.dispose();
+      }
+    });
+  }
+  for (const m of markers) {
+    const mesh = new THREE.Mesh(markerFrameGeometry, new THREE.MeshBasicMaterial({ color: 0xfdd663, transparent: true, opacity: 0.6, side: THREE.DoubleSide }));
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.fromArray(markerToFieldMatrix(m));
+    const label = new TextPanel(0.3, 0.09, 256, 6);
+    label.mesh.position.set(0, (MARKER_MM / 1000) * 0.9, 0.005);
+    label.set(`${FACE_LABELS[m.face]} ${m.id}`, "#fdd663");
+    mesh.add(label.mesh);
+    markerFrames.add(mesh);
+  }
+}
 
 // 視点: コートの後方上空から壁を見下ろす。OrbitControls で回せる
 function fitCamera() {
@@ -132,6 +161,8 @@ type Peer = {
   targetQuat: THREE.Quaternion;
   lastPoseMs: number;
   tracking: boolean;
+  /** いま位置合わせに使っているマーカーの ID（pose.markerIds。ロスト中は空） */
+  markerIds: number[];
 };
 const peers = new Map<string, Peer>();
 const headGeometry = new THREE.SphereGeometry(0.12, 24, 16);
@@ -164,6 +195,7 @@ function createPeer(id: string): Peer {
     targetQuat: new THREE.Quaternion(),
     lastPoseMs: -Infinity,
     tracking: false,
+    markerIds: [],
   };
   peers.set(id, peer);
   return peer;
@@ -187,6 +219,7 @@ function onPeerPose(id: string, pose: PlayerPose) {
   peer.targetPos.set(...pose.pos);
   peer.targetQuat.set(...pose.quat);
   peer.tracking = pose.tracking;
+  peer.markerIds = pose.tracking ? (pose.markerIds ?? []) : [];
   const now = performance.now();
   if (now - peer.lastPoseMs > PEER_STALE_MS) {
     peer.group.position.copy(peer.targetPos);
@@ -275,6 +308,9 @@ let stopPending = false;
 /** 寸法の「反映」を送ってから field / rejected / 切断のいずれかが来るまで */
 let fieldPending = false;
 let fieldsSent = 0;
+/** 追加マーカーの「反映」を送ってから markers / rejected / 切断のいずれかが来るまで */
+let markersPending = false;
+let markersSent = 0;
 
 function colorOf(id: string): InkColor | null {
   return auth?.state.players.find((p) => p.id === id)?.color ?? null;
@@ -332,6 +368,7 @@ function connect() {
           startPending = false;
           stopPending = false;
           fieldPending = false;
+          markersPending = false;
         }
         renderPanel();
       },
@@ -346,6 +383,7 @@ function connect() {
         joined = true;
         applyFieldConfig(cfg);
         syncSizeInputs();
+        syncMarkerRows();
         [...peers.keys()].forEach(removePeer);
         peerIds.forEach(createPeer);
         lastEventKey = "";
@@ -370,6 +408,7 @@ function connect() {
         startPending = false;
         stopPending = false;
         fieldPending = false;
+        markersPending = false;
         console.log(`[overview] rejected by server: ${reason}`);
         renderPanel();
       },
@@ -379,11 +418,20 @@ function connect() {
         lastRejectReason = "";
         applyFieldConfig(cfg);
         syncSizeInputs();
+        // 床のマーカーの高さは寸法に追従するので、行も合わせ直す
+        syncMarkerRows();
         for (const s of shots.values()) s.mesh.removeFromParent();
         shots.clear();
         splatted.clear();
         onState(state);
         console.log(`[overview] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop} (${state.totalCells} cells)`);
+      },
+      onMarkers: (cfg) => {
+        markersPending = false;
+        lastRejectReason = "";
+        applyFieldConfig(cfg);
+        syncMarkerRows();
+        console.log(`[overview] markers ${describeMarkers(cfg.markers)}`);
       },
     },
     "overview",
@@ -484,6 +532,121 @@ function syncSizeInputs() {
   renderPanel();
 }
 
+// ---- 追加マーカーの配置（issue #30）: 行 = 1 枚（使う / 面 / ID / X / Y / Z）。おすすめの割り当てを既定値にする ----
+type MarkerRow = { root: HTMLDivElement; use: HTMLInputElement; face: HTMLSelectElement; id: HTMLInputElement; pos: [HTMLInputElement, HTMLInputElement, HTMLInputElement] };
+const markerRowsEl = document.querySelector<HTMLDivElement>("#marker-rows")!;
+const applyMarkersButton = document.querySelector<HTMLButtonElement>("#apply-markers")!;
+const markersHint = document.querySelector<HTMLDivElement>("#markers-hint")!;
+const markerRows: MarkerRow[] = SUGGESTED_MARKERS.map((suggested) => {
+  const root = document.createElement("div");
+  root.className = "row off";
+  const use = document.createElement("input");
+  use.type = "checkbox";
+  use.title = "このマーカーを使う";
+  const face = document.createElement("select");
+  for (const f of MARKER_FACES) {
+    const opt = document.createElement("option");
+    opt.value = f;
+    opt.textContent = FACE_LABELS[f];
+    face.append(opt);
+  }
+  face.value = suggested.face;
+  const id = document.createElement("input");
+  id.type = "number";
+  id.min = "0";
+  id.step = "1";
+  id.inputMode = "numeric";
+  id.value = String(suggested.id);
+  const pos = [0, 1, 2].map(() => {
+    const i = document.createElement("input");
+    i.type = "number";
+    i.step = "0.05";
+    i.inputMode = "decimal";
+    return i;
+  }) as MarkerRow["pos"];
+  root.append(use, face, id, ...pos);
+  markerRowsEl.append(root);
+  const row: MarkerRow = { root, use, face, id, pos };
+  // 面を変えたら既定の位置を入れ直す（床は Y を床の高さに固定）
+  face.addEventListener("change", () => {
+    setRowPos(row, suggestedMarkerPos(face.value as MarkerFace, fieldCfg));
+    renderPanel();
+  });
+  use.addEventListener("change", () => renderPanel());
+  for (const el of [id, ...pos]) el.addEventListener("input", () => renderPanel());
+  return row;
+});
+function setRowPos(row: MarkerRow, p: readonly number[]) {
+  for (let k = 0; k < 3; k++) row.pos[k].value = String(p[k]);
+}
+/** 行 → 配置（使う行だけ。数値でないものは NaN のまま渡して validateMarkerLayout に弾かせる） */
+function readMarkerRows(): MarkerPlacement[] {
+  const out: MarkerPlacement[] = [];
+  for (const row of markerRows) {
+    if (!row.use.checked) continue;
+    const face = row.face.value as MarkerFace;
+    // 床の Y は入力欄に関係なく床の高さ（寸法から）
+    const y = face === "floor" ? -fieldCfg.floorDrop : Number(row.pos[1].value);
+    out.push({ id: Number(row.id.value), face, pos: [Number(row.pos[0].value), y, Number(row.pos[2].value)] });
+  }
+  return out;
+}
+function markerRowsChanged(): boolean {
+  return JSON.stringify(readMarkerRows()) !== JSON.stringify(fieldCfg.markers ?? []);
+}
+/**
+ * サーバーの配置（fieldCfg.markers）を行に反映する。同じ ID の行があればそこへ、無ければ空いている行へ。
+ * 残りの行は使わない状態にしておすすめの値を入れる
+ */
+function syncMarkerRows() {
+  const markers = fieldCfg.markers ?? [];
+  const assigned = new Map<MarkerRow, MarkerPlacement>();
+  const pending: MarkerPlacement[] = [];
+  for (const m of markers) {
+    const row = markerRows.find((r) => Number(r.id.value) === m.id && !assigned.has(r));
+    if (row) assigned.set(row, m);
+    else pending.push(m);
+  }
+  for (const m of pending) {
+    const row = markerRows.find((r) => !assigned.has(r));
+    if (row) assigned.set(row, m);
+    else console.warn(`[overview] 追加マーカー ${m.id}:${m.face} は行が足りず表示できません（反映すると消えます）`);
+  }
+  markerRows.forEach((row, i) => {
+    const m = assigned.get(row);
+    if (m) {
+      row.use.checked = true;
+      row.face.value = m.face;
+      row.id.value = String(m.id);
+      setRowPos(row, m.pos);
+    } else {
+      const suggested = SUGGESTED_MARKERS[i];
+      row.use.checked = false;
+      row.face.value = suggested.face;
+      row.id.value = String(suggested.id);
+      setRowPos(row, suggestedMarkerPos(suggested.face, fieldCfg));
+    }
+  });
+  renderPanel();
+}
+applyMarkersButton.addEventListener("click", () => {
+  if (!client || markersPending) return;
+  const markers = readMarkerRows();
+  const invalid = validateMarkerLayout(markers, MARKER_ID, fieldCfg.floorDrop);
+  if (invalid) {
+    lastRejectReason = invalid;
+    renderPanel();
+    return;
+  }
+  if (client.sendMarkers(markers)) {
+    markersSent++;
+    markersPending = true;
+    lastRejectReason = "";
+    console.log(`[overview] markers sent ${describeMarkers(markers)}`);
+  }
+  renderPanel();
+});
+
 /** 入力欄の値（不正なら null） */
 function readSizeInputs(): FieldSize {
   return {
@@ -578,13 +741,30 @@ function renderPanel() {
       : sizeInputsChanged()
         ? "「反映」で全員のフィールドが変わります（塗りは消えます）"
         : `いま: 幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m、マーカーの高さ ${fieldCfg.floorDrop}m（${s?.totalCells ?? 0} セル）`;
+  // 追加マーカーも練習中か結果表示中だけ（寸法と同じ）。床の行の Y は寸法から決まるので入力不可
+  const markersEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !markersPending;
+  const markerRowsValue = readMarkerRows();
+  const markersInvalid = validateMarkerLayout(markerRowsValue, MARKER_ID, fieldCfg.floorDrop);
+  const canApplyMarkers = markersEditable && markerRowsChanged() && markersInvalid === null;
+  const markersHintText = !joined
+    ? ""
+    : markersInvalid
+      ? markersInvalid
+      : markerRowsChanged()
+        ? "「反映」で全員の位置合わせに使うマーカーが変わります（塗りは消えません）"
+        : `いま: ${(fieldCfg.markers ?? []).length === 0 ? "正面のマーカーだけ" : (fieldCfg.markers ?? []).map((m) => `${FACE_LABELS[m.face]} ${m.id} (${m.pos.join(", ")})`).join(" / ")}`;
+  const rowStates = markerRows.map((r) => `${r.use.checked}:${r.face.value}`);
   const total = Math.max(1, s?.totalCells ?? 1);
   const ranking = s
     ? [...s.players]
         .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
-        .map((p) => ({ p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id) }))
+        .map((p) => {
+          const peer = peers.get(p.id);
+          const marker = !peer || peer.lastPoseMs === -Infinity || now - peer.lastPoseMs > PEER_STALE_MS ? "-" : !peer.tracking ? "ロスト（最後の姿勢を維持）" : peer.markerIds.length > 0 ? peer.markerIds.join("+") : "?";
+          return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
+        })
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText]);
+  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, markersEditable, canApplyMarkers, markersPending, markersHintText, rowStates]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
@@ -595,6 +775,21 @@ function renderPanel() {
   applySizeButton.disabled = !canApplySize;
   applySizeButton.textContent = fieldPending ? "送信中…" : "反映";
   sizeHint.textContent = sizeHintText;
+  for (const row of markerRows) {
+    row.use.disabled = !markersEditable;
+    row.root.classList.toggle("off", !row.use.checked);
+    const isFloor = row.face.value === "floor";
+    if (isFloor) row.pos[1].value = String(-fieldCfg.floorDrop);
+    row.face.disabled = !markersEditable;
+    row.id.disabled = !markersEditable;
+    row.pos[0].disabled = !markersEditable;
+    row.pos[1].disabled = !markersEditable || isFloor;
+    row.pos[1].title = isFloor ? "床のマーカーの高さは「マーカーの高さ」から自動" : "";
+    row.pos[2].disabled = !markersEditable;
+  }
+  applyMarkersButton.disabled = !canApplyMarkers;
+  applyMarkersButton.textContent = markersPending ? "送信中…" : "反映";
+  markersHint.textContent = markersHintText;
   startButton.textContent = startPending
     ? "送信中…"
     : s?.phase === "play"
@@ -607,7 +802,7 @@ function renderPanel() {
             ? "次の対戦を開始"
             : "対戦開始";
   playersEl.replaceChildren(
-    ...ranking.map(({ p, pct, ink, win }) => {
+    ...ranking.map(({ p, pct, ink, win, marker }) => {
       const li = document.createElement("li");
       const sw = document.createElement("span");
       sw.className = "swatch";
@@ -620,7 +815,10 @@ function renderPanel() {
       const inkEl = document.createElement("span");
       inkEl.className = "ink";
       inkEl.textContent = gauge(ink);
-      li.append(sw, name, pctEl, inkEl);
+      const markerEl = document.createElement("span");
+      markerEl.className = "marker";
+      markerEl.textContent = `位置合わせ: マーカー ${marker}`;
+      li.append(sw, name, pctEl, inkEl, markerEl);
       return li;
     }),
   );
@@ -637,7 +835,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent} markersSent=${markersSent} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;
