@@ -293,7 +293,8 @@ export function splatoonServer() {
         const invalid = validateMarkerLayout(msg.markers, room.config.markerId, game.config.floorDrop);
         const reason = invalid ?? (game.setMarkers(msg.markers, now) ? null : game.lastRejectReason);
         if (reason !== null) {
-          console.log(`[splatoon] ${id} markers ${describeMarkers(msg.markers)} rejected: ${reason}`);
+          // 拒否側は face が任意の文字列なので、そのままログに出さず枚数だけ
+          console.log(`[splatoon] ${id} markers (${msg.markers.length}) rejected: ${reason}`);
           room.send(id, { type: "rejected", reason } satisfies ServerMessage);
           return;
         }

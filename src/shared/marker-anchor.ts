@@ -16,7 +16,7 @@ import type { PoseCandidate } from "./marker-layout";
 
 export type ExtraMarker = {
   id: number;
-  /** このマーカーの座標系 → アンカー（原点マーカー）座標系の変換 */
+  /** このマーカーの座標系 → アンカー（原点マーカー）座標系の変換。中身を書き換えず、配置が変わったら新しい Matrix4 に差し替えること（逆行列をキャッシュする） */
   toAnchor: THREE.Matrix4;
 };
 
@@ -90,6 +90,16 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
   const targetScale = new THREE.Vector3();
   const markerWorld = new THREE.Matrix4();
   const identity = new THREE.Matrix4();
+  /** toAnchor の逆行列（アンカー → マーカー）。検出のたびに invert しないようキャッシュ */
+  const inverseCache = new WeakMap<THREE.Matrix4, THREE.Matrix4>();
+  function inverseOf(m: THREE.Matrix4): THREE.Matrix4 {
+    let inv = inverseCache.get(m);
+    if (!inv) {
+      inv = m.clone().invert();
+      inverseCache.set(m, inv);
+    }
+    return inv;
+  }
 
   const self = {
     info: "searching",
@@ -154,7 +164,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
       // マーカーのカメラ座標系での姿勢 × カメラのワールド姿勢 = マーカー座標系 → ワールド。
       // 追加マーカーなら、さらに（マーカー → アンカー）の逆を掛けてアンカー座標系 → ワールドに直す
       markerWorld.multiplyMatrices(camera.matrixWorld, o.matrix);
-      if (toAnchor !== identity) markerWorld.multiply(toAnchor.clone().invert());
+      if (toAnchor !== identity) markerWorld.multiply(inverseOf(toAnchor));
       markerWorld.decompose(targetPos, targetQuat, targetScale);
       candidates.push({
         pos: [targetPos.x, targetPos.y, targetPos.z],

@@ -56,6 +56,7 @@ import {
   withFloorDrop,
 } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField, parseFakeMarkersParam, projectFakeMarker, projectFakeMarkers } from "../src/shared/fake-markers.ts";
+import { Matrix4, Quaternion, Vector3 } from "three";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -266,7 +267,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const camWorld = fakeCameraToField([0, 1.6, 0], 0, 0);
   const anchor = mulMat4(camWorld, mulMat4(obs, invertRigid(floorM)));
   const pose = mulMat4(invertRigid(anchor), camWorld);
-  check("追加マーカーの観測から出したアンカーで、送る pose がフェイクカメラの field 姿勢に戻る", pose.every((v, i) => near(v, camToField[i], 1e-9)));
+  check("invertRigid / mulMat4 の整合: アンカーの式（camWorld × obs × M⁻¹）で送る pose がフェイクカメラの field 姿勢に戻る", pose.every((v, i) => near(v, camToField[i], 1e-9)));
+  // three.js との整合（marker-anchor.ts は Matrix4 で同じ式を計算する）: 列優先の 16 要素を fromArray でそのまま読め、
+  // 点の変換・積・逆行列・decompose が純粋関数と一致する
+  const t3 = (m) => new Matrix4().fromArray(m);
+  const p3 = new Vector3(0.1, 0.2, 0.3).applyMatrix4(t3(floorM));
+  const pp = transformPoint(floorM, [0.1, 0.2, 0.3]);
+  check("three.js: Matrix4.fromArray（列優先）で読んだ行列の点の変換が transformPoint と一致", near(p3.x, pp[0]) && near(p3.y, pp[1]) && near(p3.z, pp[2]));
+  const anchor3 = t3(camWorld).multiply(t3(obs)).multiply(t3(floorM).clone().invert());
+  check("three.js: multiply / invert で計算したアンカーが mulMat4 / invertRigid と一致", anchor3.elements.every((v, i) => near(v, anchor[i], 1e-9)));
+  const dp = new Vector3();
+  const dq = new Quaternion();
+  const ds = new Vector3();
+  anchor3.decompose(dp, dq, ds);
+  const rebuilt = new Matrix4().compose(dp, dq, ds);
+  check("three.js: decompose → compose で元に戻る（回転が正規直交 = markerAxes が右手系の単位ベクトル）", rebuilt.elements.every((v, i) => near(v, anchor[i], 1e-9)) && near(ds.x, 1) && near(ds.y, 1) && near(ds.z, 1));
   // 候補の合成
   const one = fusePoseCandidates([{ pos: [1, 2, 3], quat: [0, 0, 0, 1], weight: 4 }]);
   check("fusePoseCandidates: 1 つならそのまま、spread=0", one && nearV(one.pos, [1, 2, 3]) && nearV(one.quat, [0, 0, 0, 1]) && one.spread === 0);
@@ -319,7 +334,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const all = projectFakeMarkers([origin, floorMarker], down, f, 640, 480, 0.1);
   check("projectFakeMarkers: 見下ろしていると原点は視野外で、床のマーカーだけ", all.length === 1 && all[0].id === 1);
   check("fakeCameraToField: pitch 90 で真下、yaw 90 で左を向く", nearV(fakeCameraToField([0, 0, 0], 0, 90).slice(8, 11).map((v) => -v), [0, -1, 0]) && nearV(fakeCameraToField([0, 0, 0], 90, 0).slice(8, 11).map((v) => -v), [-1, 0, 0]));
-  check("parseFakeMarkersParam", JSON.stringify(parseFakeMarkersParam("1:floor:0,-1.2,0.6;5:wall:0.25,0,0;bad;7:left:x,0,0")) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -1.2, 0.6] }, { id: 5, face: "wall", pos: [0.25, 0, 0] }]) && parseFakeMarkersParam(null).length === 0);
+  check("parseFakeMarkersParam: 不正な要素（形・辞書の範囲外の ID）は捨てる", JSON.stringify(parseFakeMarkersParam("1:floor:0,-1.2,0.6;5:wall:0.25,0,0;bad;7:left:x,0,0;250:left:0,0,0;-1:left:0,0,0")) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -1.2, 0.6] }, { id: 5, face: "wall", pos: [0.25, 0, 0] }]) && parseFakeMarkersParam(null).length === 0);
 }
 
 // ================= 2. hand shape =================
@@ -809,13 +824,19 @@ try {
     szOv.send({ type: "markers", markers: [{ id: 1, face: "left", pos: [0, 0] }] });
     await sleep(150);
     check("形が不正な markers（面が文字列でも配列でない・位置が 3 要素でない）は黙って捨てる / 知らない面は rejected", !szOv.msgs.some((m) => m.type === "markers") && szOv.msgs.some((m) => m.type === "rejected" && /face/.test(m.reason)));
-    const scoreBeforeMarkers = (await sz.waitFor((m) => m.type === "state"))?.state.scores[wsz.id];
+    // 寸法の変更で塗りは消えているので、塗り直してから配置を変える（配置の変更で塗りが残ることを見るため）
+    sz.send({ type: "pose", pos: [0, 0.1, 1], quat: [0, 0, 0, 1], tracking: true });
+    await sleep(50);
+    sz.send({ type: "shot", pos: [0, 0, 1], vel: [0, 0, -5], radius: 0.09 });
+    const scoreBeforeMarkers = (await sz.waitFor((m) => m.type === "state" && (m.state.scores[wsz.id] ?? 0) > 0 && sz.msgs.indexOf(m) > sz.msgs.indexOf(fPhone), 2500))?.state.scores[wsz.id];
     szOv.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1, 2] }, { id: 2, face: "left", pos: [-1, 0, 2] }] });
     const mkPhone = await sz.waitFor((m) => m.type === "markers");
     const mkOv = await szOv.waitFor((m) => m.type === "markers");
     const mkLate = await late.waitFor((m) => m.type === "markers");
     check("俯瞰画面の markers で全員（俯瞰画面も）に markers が届く: config.markers に配置、寸法はそのまま", mkPhone && mkOv && mkLate && describeMarkers(mkPhone.config.markers) === "1:floor,2:left" && mkPhone.config.wallW === 2 && mkPhone.config.floorDrop === 1);
-    check("配置の変更で塗りは消えない（state は配られず得点はそのまま）", !sz.msgs.some((m) => m.type === "field" && m !== fPhone) && scoreBeforeMarkers !== undefined);
+    // markers より後に届いた state（1 秒ごとの定期配信）で得点を見る
+    const stateAfterMarkers = await sz.waitFor((m) => m.type === "state" && sz.msgs.indexOf(m) > sz.msgs.indexOf(mkPhone), 2500);
+    check("配置の変更で塗りは消えない（field は配られず、直後の state の得点もそのまま）", !sz.msgs.some((m) => m.type === "field" && m !== fPhone) && stateAfterMarkers !== null && stateAfterMarkers.state.scores[wsz.id] === scoreBeforeMarkers && scoreBeforeMarkers > 0, `${scoreBeforeMarkers} → ${stateAfterMarkers?.state.scores[wsz.id]}`);
     const later = connect({ ...cfg, room: "size" }, "Later");
     const wlater = await later.waitFor((m) => m.type === "welcome");
     check("あとから入った人の welcome にも配置が入っている", wlater && describeMarkers(wlater.config.markers) === "1:floor,2:left");
@@ -850,7 +871,8 @@ try {
     check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && typeof cResult.state.phaseEndsAt === "number");
     const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 10000);
     check("一周: 結果表示のあと練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
-    check("一周: 俯瞰画面にも同じ event が届く", cycOv.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice"));
+    // 俯瞰画面のソケットは別なので、届くまで少し待つ（同時判定だとレースで落ちることがあった）
+    check("一周: 俯瞰画面にも同じ event が届く", (await cycOv.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 1000)) !== null);
     cyc.ws.close();
     cycOv.ws.close();
   }

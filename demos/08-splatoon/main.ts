@@ -15,7 +15,7 @@ import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
 import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
 import { markerBits } from "../../src/shared/marker-detector";
-import { FACE_LABELS, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
+import { FACE_LABELS, MARKER_FACES, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
 import type { FakeMarker } from "../../src/shared/fake-markers";
@@ -453,7 +453,7 @@ addEventListener("resize", resize);
 // ---- パススルー（PC デバッグ用フェイクカメラ） ----
 // 06-2 / 07 は「マーカー画像を画面の決まった位置に貼る」だけだったが、マルチマーカーは全マーカーを同じ視点で
 // 投影しないと位置合わせが検証できないので、field 座標系に置いたマーカーをピンホールで投影する（fake-markers.ts）。
-// 原点マーカーだけなら従来と同じ見え方（fakeMarkerPx の大きさで fakeShift / fakeShiftY の位置）になる
+// 原点マーカーだけなら従来と同じ見え方（余白込みが fakeMarkerPx の大きさで、fakeShift / fakeShiftY の位置）になる
 const FAKE_CAM_W = 640;
 const FAKE_CAM_H = 480;
 /** フェイクカメラの焦点距離 [px]。検出側（marker-anchor.ts）と同じ換算（長辺 / 2 / tan(水平 FOV / 2)。FOV はラベル無し = 標準カメラ扱い） */
@@ -464,15 +464,16 @@ if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = 
 function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
   const markers: FakeMarker[] = [{ id: MARKER_ID, bits: markerBits(MARKER_ID), toField: markerToFieldMatrix({ id: MARKER_ID, face: "wall", pos: [0, 0, 0] }) }];
   for (const m of FAKE_MARKERS) {
-    if (m.id === MARKER_ID || !(m.face in FACE_LABELS)) continue;
+    if (m.id === MARKER_ID || !(MARKER_FACES as readonly string[]).includes(m.face)) continue;
     markers.push({ id: m.id, bits: markerBits(m.id), toField: markerToFieldMatrix({ id: m.id, face: m.face as MarkerFace, pos: m.pos }) });
   }
   let pos: [number, number, number];
   if (FAKE_CAM_POS.length === 3 && FAKE_CAM_POS.every(Number.isFinite)) {
     pos = [FAKE_CAM_POS[0], FAKE_CAM_POS[1], FAKE_CAM_POS[2]];
   } else {
-    // 原点マーカーが fakeMarkerPx の大きさで、中央から (fakeShift, fakeShiftY) px ずれて映る正面の位置
-    const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / FAKE_MARKER_PX;
+    // 原点マーカーが fakeMarkerPx の大きさで、中央から (fakeShift, fakeShiftY) px ずれて映る正面の位置。
+    // 従来は余白込みの SVG（10 セル）を fakeMarkerPx で描いていたので黒い正方形は 0.8 倍。同じ見え方にするため 0.8 を掛ける
+    const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / (0.8 * FAKE_MARKER_PX);
     pos = [(-FAKE_SHIFT * d) / FAKE_FOCAL_PX, (FAKE_SHIFT_Y * d) / FAKE_FOCAL_PX, d];
   }
   return { markers, camToField: fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH) };
@@ -1073,7 +1074,8 @@ function updateMessages(now: number) {
   } else if (!passthrough) {
     text = "カメラを起動中…";
   } else if (!markerAnchor?.everDetected) {
-    text = "壁のマーカーを見てください";
+    // 追加マーカーが配られていれば、どれを見ても位置合わせできる
+    text = (fieldCfg.markers ?? []).length > 0 ? "マーカーを見てください\n（正面の壁か、追加マーカーのどれか）" : "壁のマーカーを見てください";
     color = "#fdd663";
   } else if (trackerStatus.startsWith("error")) {
     text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";

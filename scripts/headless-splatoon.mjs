@@ -312,7 +312,7 @@ try {
     // 行 0 = 床（ID 1。Y は床の高さ -1 に自動）: 壁から 0.6m。行 4 = 正面 2 枚目（ID 5）: 右 0.25m
     return [set(rows[0], [1, 0, null, 0.6]), set(rows[4], [5, 0.25, 0, 0]), rows.length];
   })()`);
-  check("練習中は追加マーカーの行が有効（5 行）", Array.isArray(setRows) && setRows[0] === true && setRows[1] === true && setRows[2] === 5, JSON.stringify(setRows));
+  check("練習中は追加マーカーの行が有効（上限の 8 行）", Array.isArray(setRows) && setRows[0] === true && setRows[1] === true && setRows[2] === 8, JSON.stringify(setRows));
   await sleep(300);
   const applyMarkersEnabled = await p3.eval("(() => { const b = document.querySelector('#apply-markers'); return b && !b.disabled; })()");
   check("行を変えると配置の「反映」が押せる", applyMarkersEnabled === true);

@@ -6,7 +6,7 @@
 // 投影して 1 セルずつ多角形で塗る。描画は canvas 2D の fill だけなので three.js には依存しない。
 // 投影の数学は Node の回帰テストから import する（.ts 付き import は Node の ESM 解決のため）
 import type { V3 } from "./surface.ts";
-import { invertRigid, mulMat4, transformPoint } from "./marker-layout.ts";
+import { MAX_MARKER_ID, invertRigid, mulMat4, transformPoint } from "./marker-layout.ts";
 
 export type FakeMarker = {
   id: number;
@@ -142,7 +142,7 @@ export function drawProjectedMarkers(ctx: CanvasRenderingContext2D, markers: rea
 
 /**
  * URL の ?fakeMarkers= を読む（"1:floor:0,-1.2,0.6;5:wall:0.25,0,0" = ID:面:x,y,z を ; 区切り）。
- * 不正な要素は捨てる。face の綴りは marker-layout.ts の MARKER_FACES
+ * 不正な要素（ID が辞書の範囲 0〜MAX_MARKER_ID 外・位置が 3 つの数値でない）は捨てる。face の綴りは marker-layout.ts の MARKER_FACES
  */
 export function parseFakeMarkersParam(raw: string | null): { id: number; face: string; pos: V3 }[] {
   if (!raw) return [];
@@ -151,7 +151,7 @@ export function parseFakeMarkersParam(raw: string | null): { id: number; face: s
     const [idRaw, face, posRaw] = item.split(":");
     const id = Number(idRaw);
     const pos = (posRaw ?? "").split(",").map(Number);
-    if (!Number.isInteger(id) || !face || pos.length !== 3 || !pos.every(Number.isFinite)) continue;
+    if (!Number.isInteger(id) || id < 0 || id > MAX_MARKER_ID || !face || pos.length !== 3 || !pos.every(Number.isFinite)) continue;
     out.push({ id, face, pos: [pos[0], pos[1], pos[2]] });
   }
   return out;

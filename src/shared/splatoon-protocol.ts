@@ -4,6 +4,7 @@
 import type { SpaceConfig } from "./shared-room-protocol.ts";
 import type { FieldConfig, FieldSize, V3 } from "./splatoon-sim.ts";
 import type { GameSnapshot, Shot } from "./splatoon-game.ts";
+import { MAX_EXTRA_MARKERS } from "./marker-layout.ts";
 import type { MarkerPlacement } from "./marker-layout.ts";
 
 export const SPLATOON_PATH = "/api/splatoon";
@@ -43,8 +44,8 @@ export type PlayerPose = {
   markerIds?: number[];
 };
 
-/** pose の markerIds の上限（原点 + 追加マーカー） */
-export const MAX_POSE_MARKER_IDS = 9;
+/** pose の markerIds の上限（原点 + 追加マーカー。追加マーカーの上限と連動させないと、上限を増やしたとき pose ごと捨てられる） */
+export const MAX_POSE_MARKER_IDS = MAX_EXTRA_MARKERS + 1;
 
 /**
  * 接続の役割。"overview" は PC の俯瞰画面（プレイヤーではない。色も得点も無く、pose も送らない。

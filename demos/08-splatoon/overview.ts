@@ -10,7 +10,7 @@ import { DEFAULT_FIELD, FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, fieldSurfaces, inkAt
 import type { FieldConfig, FieldSize, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
-import { FACE_LABELS, MARKER_FACES, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
+import { FACE_LABELS, MARKER_FACES, MAX_EXTRA_MARKERS, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
@@ -418,8 +418,8 @@ function connect() {
         lastRejectReason = "";
         applyFieldConfig(cfg);
         syncSizeInputs();
-        // 床のマーカーの高さは寸法に追従するので、行も合わせ直す
-        syncMarkerRows();
+        // 追加マーカーの行はここでは同期しない（未送信の編集が消える。外部レビュー指摘）。床の Y は renderPanel が寸法から書き直す
+        renderPanel();
         for (const s of shots.values()) s.mesh.removeFromParent();
         shots.clear();
         splatted.clear();
@@ -537,7 +537,24 @@ type MarkerRow = { root: HTMLDivElement; use: HTMLInputElement; face: HTMLSelect
 const markerRowsEl = document.querySelector<HTMLDivElement>("#marker-rows")!;
 const applyMarkersButton = document.querySelector<HTMLButtonElement>("#apply-markers")!;
 const markersHint = document.querySelector<HTMLDivElement>("#markers-hint")!;
-const markerRows: MarkerRow[] = SUGGESTED_MARKERS.map((suggested) => {
+/**
+ * 行の既定値。サーバーの上限（MAX_EXTRA_MARKERS）ぶん用意する（足りないと他の端末が保存した配置を表示できず、反映で消してしまう）。
+ * おすすめの 5 枚の後は予備。既定の ID は原点（room の markerId）と重ならないよう空いている番号へずらす
+ */
+const ROW_DEFAULTS: readonly { face: MarkerFace; id: number }[] = (() => {
+  const used = new Set<number>([MARKER_ID]);
+  const alloc = (want: number) => {
+    let id = want;
+    while (used.has(id)) id++;
+    used.add(id);
+    return id;
+  };
+  return [
+    ...SUGGESTED_MARKERS.map((s) => ({ face: s.face, id: alloc(s.id) })),
+    ...Array.from({ length: Math.max(0, MAX_EXTRA_MARKERS - SUGGESTED_MARKERS.length) }, (_, i) => ({ face: "wall" as MarkerFace, id: alloc(SUGGESTED_MARKERS.length + 1 + i) })),
+  ];
+})();
+const markerRows: MarkerRow[] = ROW_DEFAULTS.map((suggested) => {
   const root = document.createElement("div");
   root.className = "row off";
   const use = document.createElement("input");
@@ -579,20 +596,25 @@ const markerRows: MarkerRow[] = SUGGESTED_MARKERS.map((suggested) => {
 function setRowPos(row: MarkerRow, p: readonly number[]) {
   for (let k = 0; k < 3; k++) row.pos[k].value = String(p[k]);
 }
-/** 行 → 配置（使う行だけ。数値でないものは NaN のまま渡して validateMarkerLayout に弾かせる） */
+/**
+ * 行 → 配置（使う行だけ）。空欄・数値でない入力は valueAsNumber の NaN のまま渡して validateMarkerLayout に弾かせる
+ * （Number("") は 0 になり、入力途中の空欄が「原点の位置」として配られてしまう。外部レビュー指摘）
+ */
 function readMarkerRows(): MarkerPlacement[] {
   const out: MarkerPlacement[] = [];
   for (const row of markerRows) {
     if (!row.use.checked) continue;
     const face = row.face.value as MarkerFace;
     // 床の Y は入力欄に関係なく床の高さ（寸法から）
-    const y = face === "floor" ? -fieldCfg.floorDrop : Number(row.pos[1].value);
-    out.push({ id: Number(row.id.value), face, pos: [Number(row.pos[0].value), y, Number(row.pos[2].value)] });
+    const y = face === "floor" ? -fieldCfg.floorDrop : row.pos[1].valueAsNumber;
+    out.push({ id: row.id.valueAsNumber, face, pos: [row.pos[0].valueAsNumber, y, row.pos[2].valueAsNumber] });
   }
   return out;
 }
+/** 行とサーバーの配置が違うか（順序は問わない: 行は ID で埋めるのでサーバーの並びと一致しないことがある） */
 function markerRowsChanged(): boolean {
-  return JSON.stringify(readMarkerRows()) !== JSON.stringify(fieldCfg.markers ?? []);
+  const key = (ms: readonly MarkerPlacement[]) => JSON.stringify([...ms].sort((a, b) => a.id - b.id));
+  return key(readMarkerRows()) !== key(fieldCfg.markers ?? []);
 }
 /**
  * サーバーの配置（fieldCfg.markers）を行に反映する。同じ ID の行があればそこへ、無ければ空いている行へ。
@@ -603,7 +625,7 @@ function syncMarkerRows() {
   const assigned = new Map<MarkerRow, MarkerPlacement>();
   const pending: MarkerPlacement[] = [];
   for (const m of markers) {
-    const row = markerRows.find((r) => Number(r.id.value) === m.id && !assigned.has(r));
+    const row = markerRows.find((r) => r.id.valueAsNumber === m.id && !assigned.has(r));
     if (row) assigned.set(row, m);
     else pending.push(m);
   }
@@ -620,7 +642,7 @@ function syncMarkerRows() {
       row.id.value = String(m.id);
       setRowPos(row, m.pos);
     } else {
-      const suggested = SUGGESTED_MARKERS[i];
+      const suggested = ROW_DEFAULTS[i];
       row.use.checked = false;
       row.face.value = suggested.face;
       row.id.value = String(suggested.id);
