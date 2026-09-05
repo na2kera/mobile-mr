@@ -122,9 +122,11 @@ export class SwingDetector {
     // 静止の判定は生の角速度で（バイアスを引く前。バイアスは数 deg/s なので stillDps より小さい）
     const rawSpeed = Math.hypot(rawGyro[0], rawGyro[1], rawGyro[2]);
     const gyro: V3 = [rawGyro[0] - this.bias[0], rawGyro[1] - this.bias[1], rawGyro[2] - this.bias[2]];
+    const inSwing = this.phase === "backswing" || this.phase === "forward";
     // 静止の監視: 静止が続いたら構え直す（積分の漂いも消える）。ただし振りの途中（バックスイングの頂点で止まる・ゆっくりの
-    // 切り返し）では構え直さない（外部レビュー指摘: 頂点で 0.3s 止まると振りを丸ごと捨てていた）。戻ってこない振りは maxSwingMs が捨てる
-    if (rawSpeed < this.opts.stillDps) {
+    // 切り返し）では、しきい値を半分にした「本当の静止」が swingStillMs 続いたときだけ構え直す（頂点の前後でゆっくり減速する
+    // 時間を静止に数えないための緩和。外部レビュー指摘: 頂点で 0.3s 止まると振りを丸ごと捨てていた）。戻ってこない振りは maxSwingMs が捨てる
+    if (rawSpeed < (inSwing ? this.opts.stillDps * 0.5 : this.opts.stillDps)) {
       this.accelSum[0] += accel[0];
       this.accelSum[1] += accel[1];
       this.accelSum[2] += accel[2];
@@ -135,7 +137,6 @@ export class SwingDetector {
       if (this.stillSinceMs === null) this.stillSinceMs = now;
       else {
         const still = now - this.stillSinceMs;
-        const inSwing = this.phase === "backswing" || this.phase === "forward";
         // idle → 構え。address で漂っていたら（1° 以上）構え直して漂いを消す。振りの途中は長めの静止（持ち替え）でだけ構え直す
         if (
           (!inSwing && still >= this.opts.stillMs && (this.phase === "idle" || Math.hypot(this.theta[0], this.theta[1], this.theta[2]) > 1)) ||

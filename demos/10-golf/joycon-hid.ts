@@ -160,9 +160,10 @@ class HidJoyCon implements JoyCon {
       try {
         await this.device.sendReport(OUTPUT_REPORT_SUBCOMMAND, packet);
       } catch (e: unknown) {
+        // 送れない台は使えないので初期化ごと止める（adopt が除去し、失敗の理由は status に残る）
         this.ackWaiters.delete(subcommand);
         this.setStatus(`sendReport 失敗: ${errorText(e)}`);
-        return false;
+        throw e;
       }
       if (await acked) return true;
     }
@@ -183,7 +184,7 @@ class HidJoyCon implements JoyCon {
     }
     this.device.addEventListener("inputreport", this.listener);
     this.setStatus("imu");
-    const imuOk = await this.send(SUBCMD_ENABLE_IMU, [0x01]);
+    const imuOk = await this.send(SUBCMD_ENABLE_IMU, [0x01]); // sendReport 自体が失敗したら throw（adopt が除去）
     this.setStatus(imuOk ? "mode" : "mode (IMU の ACK 無し)");
     const modeOk = await this.send(SUBCMD_SET_INPUT_REPORT_MODE, [INPUT_REPORT_STANDARD_FULL]);
     await this.setLights(lightIndex);
@@ -193,7 +194,7 @@ class HidJoyCon implements JoyCon {
 
   async setLights(index: number): Promise<void> {
     const mask = 1 << Math.max(0, Math.min(3, index - 1));
-    await this.send(SUBCMD_SET_PLAYER_LIGHTS, [mask]).catch(() => false);
+    await this.send(SUBCMD_SET_PLAYER_LIGHTS, [mask]).catch(() => false); // LED は必須でないので失敗は無視
   }
 
   async close(): Promise<void> {
@@ -268,7 +269,6 @@ export class JoyConHub {
         this.events.onConnect(jc);
       } catch {
         this.remove(jc);
-        continue;
       }
     }
     return added;

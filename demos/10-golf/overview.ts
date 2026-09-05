@@ -715,7 +715,7 @@ function renderPanel() {
     ? "この環境では WebHID が使えません（PC の Chrome で開いてください）。?fakeJoycon=1 で合成の振りを流せます"
     : slots.size === 0
       ? "Joy-Con を Mac の Bluetooth 設定で接続してから「Joy-Con を接続」→ 選択。以後はページを開くだけで再接続します。\n使い方: パターのように握って静止（構え）→ バックスイング → 振り戻す。A（L は →）で狙いを固定（スマホで見ている床の点）、B（L は ↓）で狙いを消す"
-      : `静止すると構え直します（角 0°）。バックスイング ${SWING_OPTS.minBackswingDeg}° 以上・戻り ${SWING_OPTS.minImpactDps} deg/s 以上で 1 打。速さ = 角速度 × 腕 ${ARM_M}m × 補正 ${STROKE_GAIN}（?armM= ?strokeGain= ?minBackswing= ?minImpactDps=）`;
+      : `静止すると構え直します（角 0°。持ち直したら ${(SWING_OPTS.swingStillMs / 1000).toFixed(1)} 秒止めるか A で構え直す）。バックスイング ${SWING_OPTS.minBackswingDeg}° 以上・戻り ${SWING_OPTS.minImpactDps} deg/s 以上で 1 打。速さ = 角速度 × 腕 ${ARM_M}m × 補正 ${STROKE_GAIN}（?armM= ?strokeGain= ?minBackswing= ?minImpactDps=）`;
   playersEl.replaceChildren(
     ...playerRows.map(({ p, marker, strokes, holed, done, cards, total, turn, win, jc }) => {
       const li = document.createElement("li");

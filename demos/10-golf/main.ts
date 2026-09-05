@@ -328,7 +328,7 @@ let flash: { text: string; untilMs: number } | null = null;
 /** 同じ tick で複数のイベント（hole + turn など）が来たとき、後のものを消さずに順に見せる */
 const flashQueue: { text: string; ms: number }[] = [];
 function pushFlash(text: string, ms: number, now: number) {
-  if (flash && now < flash.untilMs) flashQueue.push({ text, ms });
+  if ((flash && now < flash.untilMs) || flashQueue.length > 0) flashQueue.push({ text, ms });
   else flash = { text, untilMs: now + ms };
 }
 let lastEventKey = "";

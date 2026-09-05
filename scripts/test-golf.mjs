@@ -235,7 +235,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
     for (let t = 0; t < 0.4; t += DT) step([0, 0, 0]); // 構え
     for (let t = 0; t < 0.2; t += DT) step([-40, 0, 0]); // 持ち直し -8°
-    for (let t = 0; t < 0.5; t += DT) step([0, 0, 0]); // 0.5s 静止 → 構え直し（swingStillMs 450 超）
+    for (let t = 0; t < DEFAULT_SWING_OPTIONS.swingStillMs / 1000 + 0.1; t += DT) step([0, 0, 0]); // swingStillMs 超の静止 → 構え直し
     for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]); // 本当のバックスイング
     for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]); // 戻り
     check("持ち直し → 0.5s 静止 → 本当の振り: インパクトは 1 回で 300 deg/s（持ち直しの戻りではない）", impacts.length === 1 && near(impacts[0].dps, 300, 2), JSON.stringify(impacts));
@@ -252,12 +252,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
     for (let t = 0; t < 0.4; t += DT) step([0, 0, 0]);
     for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]);
-    for (let t = 0; t < 2.0; t += DT) step([0, 0, 0]); // 頂点で 2s（swingStillMs で構え直し = その振りは捨てる）
+    for (let t = 0; t < 2.0; t += DT) step([0, 0, 0]); // 頂点で 2s（swingStillMs で構え直し = その振りは捨てる。maxSwingMs より先に起きる）
     for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]); // 戻し（構え直した位置からの動きなので新しいバックスイング）
-    for (let t = 0; t < 0.6; t += DT) step([0, 0, 0]);
+    for (let t = 0; t < DEFAULT_SWING_OPTIONS.swingStillMs / 1000 + 0.15; t += DT) step([0, 0, 0]);
     for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]);
     for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]);
-    check("頂点で長く止めた振りは捨て、次の振りは検出する", impacts.length >= 1 && near(impacts[impacts.length - 1].dps, 300, 2), JSON.stringify(impacts));
+    check("頂点で長く止めた振りは捨て、次の振りだけを検出する（1 回）", impacts.length === 1 && near(impacts[0].dps, 300, 2), JSON.stringify(impacts));
   }
   // 静止 → 持ち替え（動く）→ 別の姿勢で静止 → 構え: 「上」は直近の静止だけから決まる（外部レビュー指摘）
   const det11 = new SwingDetector();
@@ -269,7 +269,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
     for (let t = 0; t < 0.5; t += DT) step([0, 0, 0], [0, 0, 1]); // 上 = +Z で構え
     for (let t = 0; t < 0.3; t += DT) step([200, 0, 0], [0, 0, 1]); // 持ち替え（動く）
-    for (let t = 0; t < 1.0; t += DT) step([0, 0, 0], [1, 0, 0]); // 上 = +X で静止（swingStillMs 超）→ 構え直し
+    for (let t = 0; t < DEFAULT_SWING_OPTIONS.swingStillMs / 1000 + 0.3; t += DT) step([0, 0, 0], [1, 0, 0]); // 上 = +X で静止（swingStillMs 超）→ 構え直し
     check("持ち替え（振りの途中扱い）のあと長めに静止すると構え直す", det11.phase === "address" && det11.addresses === 2, `phase=${det11.phase} addresses=${det11.addresses}`);
     // +X まわりに回す（新しい「上」まわり = フェイスの開き）。古い上（+Z）が混ざっていれば faceDeg が小さくなる
     let impact = null;
@@ -279,7 +279,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   // 角速度 → 速さ: 300 deg/s × 0.9m × gain 1 = 4.71 m/s
   check("impactSpeed = ω[rad/s] × 腕の長さ × gain", near(impactSpeed(300, 0.9, 1), (300 * Math.PI / 180) * 0.9));
-  check("既定のしきい値（HUD で見せる）", DEFAULT_SWING_OPTIONS.minBackswingDeg === 6 && DEFAULT_SWING_OPTIONS.stillMs === 250);
+  // 滑らかに減速する振り（半正弦のバックスイング 20°/0.5s → 頂点で 0.35s → 戻り）も検出する（頂点の前後の減速を静止に数えない）
+  const det14 = new SwingDetector();
+  {
+    let now = 0;
+    const impacts = [];
+    const step = (g) => {
+      const r = det14.sample(now, g, [0, 0, 1], DT);
+      if (r) impacts.push(r);
+      now += DT * 1000;
+    };
+    for (let t = 0; t < 0.4; t += DT) step([0, 0, 0]);
+    const backSec = 0.5;
+    const amp = 20;
+    for (let t = 0; t < backSec; t += DT) step([(amp * Math.PI) / (2 * backSec) * Math.sin((Math.PI * t) / backSec), 0, 0]); // 半正弦（積分 = amp）
+    for (let t = 0; t < 0.35; t += DT) step([0, 0, 0]);
+    for (let t = 0; t < 0.25; t += DT) step([-200, 0, 0]);
+    check("滑らかに減速して頂点で 0.35s 止まる振りも検出する", impacts.length === 1 && near(impacts[0].dps, 200, 2) && near(impacts[0].backswingDeg, amp, 1), JSON.stringify(impacts));
+  }
 }
 
 // ================= 4. game =================
