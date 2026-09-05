@@ -18,6 +18,7 @@ import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { CourseView } from "./course-view";
 import { FakeJoyCon, JoyConHub, hidSupported } from "./joycon-hid";
+import { startRemoteLog } from "../../src/shared/remote-log";
 import type { JoyCon } from "./joycon-hid";
 
 // Phase 10: PC の俯瞰画面 + Joy-Con のハブ。08 の俯瞰画面（コート全体・全員の位置・運営の操作）に、
@@ -55,6 +56,9 @@ const FAKE_JOYCON = params.has("fakeJoycon");
 const FAKE_SWING_SEC = numParam("fakeSwingSec", 2, { min: 0.2, max: 60 });
 /** フェイク Joy-Con のフェイスの開きを作る戻り中のひねり [deg/s]（0 で真っ直ぐ） */
 const FAKE_YAW_DPS = numParam("fakeYawDps", 0, { min: -500, max: 500 });
+
+// Joy-Con の状態を含む HUD を dev サーバーのファイル（logs/client.log）へ残す（実機の切り分け用）
+startRemoteLog({ tag: "golf-overview", snapshot: () => lastHudText, snapshotMs: 3000 });
 
 // ---- シーン ----
 const scene = new THREE.Scene();

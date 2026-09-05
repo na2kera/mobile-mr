@@ -24,6 +24,7 @@ import type { PlayerPose } from "../../src/shared/golf-protocol";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { CourseView } from "./course-view";
+import { startRemoteLog } from "../../src/shared/remote-log";
 
 // Phase 10: MR パターゴルフ。08 の箱型コート（壁のマーカー + 床）をグリーンにして、Joy-Con をパターにする統合ゲーム第 4 弾。
 //   - コート: 08 と同じ field 座標系（正面の壁のマーカーが原点、床 = Y=-floorDrop）。床がグリーン、四方の壁はクッション。
@@ -87,6 +88,10 @@ const FAKE_STROKE_SEC = params.has("fakeStroke") ? numParam("fakeStroke", 1.5, {
 const FAKE_STROKE_FACE = numParam("fakeStrokeFace", 0, { min: -90, max: 90 });
 
 const touch = isTouchDevice();
+
+// 実機（ゴーグルに入れた iPhone）では console も HUD も読めないので、ログを dev サーバーのファイル
+// （logs/client.log）へ残す。HUD の全文を定期的に送るので、あとから「いつ何が起きたか」を追える
+startRemoteLog({ tag: "golf-phone", snapshot: () => lastHudText, snapshotMs: 3000 });
 
 // ---- シーン ----
 const scene = new THREE.Scene();

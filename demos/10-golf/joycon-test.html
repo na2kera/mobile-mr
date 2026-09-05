@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>10. Joy-Con 診断 — Mobile MR</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 20px;
+        background: #14161a;
+        color: #e8eaed;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+        margin: 0 0 16px;
+      }
+      button {
+        font-size: 1rem;
+        font-weight: 700;
+        padding: 12px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        cursor: pointer;
+      }
+      button:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      section {
+        border: 1px solid #3c4043;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 12px 0;
+      }
+      section h2 {
+        font-size: 0.85rem;
+        color: #9aa0a6;
+        margin: 0 0 8px;
+        font-weight: 600;
+      }
+      .big {
+        font-size: 1.6rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .ok {
+        color: #81c995;
+      }
+      .warn {
+        color: #fdd663;
+      }
+      .ng {
+        color: #f28b82;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        color: #bdc1c6;
+      }
+      #log {
+        max-height: 40vh;
+        overflow-y: auto;
+      }
+      .bar {
+        height: 10px;
+        background: #3c4043;
+        border-radius: 5px;
+        overflow: hidden;
+        margin-top: 4px;
+      }
+      .bar > div {
+        height: 100%;
+        background: #8ab4f8;
+        width: 0;
+      }
+      a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Joy-Con 診断（WebHID）</h1>
+    <p class="sub">
+      ゲームの通信・カメラ・マーカーと切り離して、<strong>Joy-Con から生のレポートが届いているか</strong>だけを確認します。
+      PC の Chrome で開いてください。Joy-Con は先に macOS の Bluetooth 設定で接続しておきます。
+    </p>
+    <button id="connect" type="button">Joy-Con を接続</button>
+    <button id="resend" type="button" disabled>サブコマンドを送り直す</button>
+
+    <section>
+      <h2>1. 環境</h2>
+      <pre id="env"></pre>
+    </section>
+
+    <section>
+      <h2>2. 受信しているレポート（動かすと増えます）</h2>
+      <div class="big" id="counts">まだ 1 件も受信していません</div>
+      <pre id="raw"></pre>
+    </section>
+
+    <section>
+      <h2>3. IMU（0x30 が来ていれば動きます）</h2>
+      <div class="big" id="imu">-</div>
+      <div class="bar"><div id="imubar"></div></div>
+      <pre id="imuraw"></pre>
+    </section>
+
+    <section>
+      <h2>4. ボタン（押すと出ます）</h2>
+      <div class="big" id="buttons">-</div>
+    </section>
+
+    <section>
+      <h2>5. 振りの検出（構え → 引く → 戻す）</h2>
+      <div class="big" id="swing">-</div>
+      <pre id="swinglog"></pre>
+    </section>
+
+    <section>
+      <h2>ログ</h2>
+      <pre id="log"></pre>
+    </section>
+
+    <p><a href="./overview.html">← 俯瞰画面へ</a> ／ <a href="/">デモ一覧</a></p>
+    <script type="module" src="./joycon-test.ts"></script>
+  </body>
+</html>
