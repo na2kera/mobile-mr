@@ -41,9 +41,11 @@ import {
 } from "../src/shared/splat-shape.ts";
 import { centered, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SPLATOON_PATH, SPLATOON_PROTOCOL_VERSION } from "../src/shared/splatoon-protocol.ts";
+import { dragAxes, draggedMarkerPos, faceNormal, rayPlaneHit, roundCm } from "../src/shared/marker-drag.ts";
 import {
   MAX_EXTRA_MARKERS,
   MARKER_FACES,
+  MARKER_POS_LIMIT_M,
   describeMarkers,
   fusePoseCandidates,
   invertRigid,
@@ -335,6 +337,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("projectFakeMarkers: 見下ろしていると原点は視野外で、床のマーカーだけ", all.length === 1 && all[0].id === 1);
   check("fakeCameraToField: pitch 90 で真下、yaw 90 で左を向く", nearV(fakeCameraToField([0, 0, 0], 0, 90).slice(8, 11).map((v) => -v), [0, -1, 0]) && nearV(fakeCameraToField([0, 0, 0], 90, 0).slice(8, 11).map((v) => -v), [-1, 0, 0]));
   check("parseFakeMarkersParam: 不正な要素（形・辞書の範囲外の ID）は捨てる", JSON.stringify(parseFakeMarkersParam("1:floor:0,-1.2,0.6;5:wall:0.25,0,0;bad;7:left:x,0,0;250:left:0,0,0;-1:left:0,0,0")) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -1.2, 0.6] }, { id: 5, face: "wall", pos: [0.25, 0, 0] }]) && parseFakeMarkersParam(null).length === 0);
+}
+
+// ================= 1e. 俯瞰画面のマーカーのドラッグ（marker-drag.ts。issue #43）=================
+{
+  const nearV = (a, b) => a.every((v, i) => near(v, b[i]));
+  check("dragAxes: 正面 / 背面は X・Y、左右は Z・Y、床は X・Z", JSON.stringify([dragAxes("wall"), dragAxes("back"), dragAxes("left"), dragAxes("right"), dragAxes("floor")]) === JSON.stringify([[0, 1], [0, 1], [2, 1], [2, 1], [0, 2]]));
+  check("faceNormal: markerAxes の Z と同じ（壁は +Z、床は +Y、左は +X）", nearV(faceNormal("wall"), [0, 0, 1]) && nearV(faceNormal("floor"), [0, 1, 0]) && nearV(faceNormal("left"), [1, 0, 0]));
+  // 視点 (0, 0, 2) から正面の壁（Z = 0 の平面）へ: 斜めのレイが壁の上の点に当たる
+  const hit = rayPlaneHit([0, 0, 2], [0.25, 0.1, -1], [0, 0, 0], [0, 0, 1]);
+  check("rayPlaneHit: レイと平面の交点（Z = 0 に t = 2 で当たる）", hit && nearV(hit, [0.5, 0.2, 0]), JSON.stringify(hit));
+  check("rayPlaneHit: 平面に平行なレイ・視点の後ろの平面は null", rayPlaneHit([0, 0, 2], [1, 0, 0], [0, 0, 0], [0, 0, 1]) === null && rayPlaneHit([0, 0, 2], [0, 0, 1], [0, 0, 0], [0, 0, 1]) === null);
+  check("roundCm: cm に丸める", roundCm(0.12345) === 0.12 && roundCm(0.126) === 0.13 && roundCm(-0.126) === -0.13);
+  // 正面の壁のマーカー (0.25, 0, 0) を掴んだ点から右 0.3・上 0.1 動かす → X・Y だけ変わり Z は 0 のまま
+  const pos0 = [0.25, 0, 0];
+  const moved = draggedMarkerPos("wall", pos0, [0.3, 0.02, 0], [0.6, 0.12, 0], false);
+  check("draggedMarkerPos: 正面の壁は掴んだ点からの差だけ X・Y が動く（枠の中心に吸い付かない）、Z はそのまま", nearV(moved, [0.55, 0.1, 0]), JSON.stringify(moved));
+  const lockedX = draggedMarkerPos("wall", pos0, [0.3, 0.02, 0], [0.6, 0.12, 0], true);
+  const lockedY = draggedMarkerPos("wall", pos0, [0.3, 0.02, 0], [0.35, 0.42, 0], true);
+  check("draggedMarkerPos: Shift（lockAxis）は動きの大きい軸だけ（右 0.3 > 上 0.1 なら水平、上 0.4 > 右 0.05 なら垂直）", nearV(lockedX, [0.55, 0, 0]) && nearV(lockedY, [0.25, 0.4, 0]), JSON.stringify([lockedX, lockedY]));
+  const floor = draggedMarkerPos("floor", [0, -1, 0.75], [0.1, -1, 0.7], [0.4, -1, 1.2], false);
+  check("draggedMarkerPos: 床は X・Z が動き Y（床の高さ）はそのまま", nearV(floor, [0.3, -1, 1.25]), JSON.stringify(floor));
+  const left = draggedMarkerPos("left", [-1, 0, 0.75], [-1, 0.1, 0.5], [-1, 0.3, 0.9], false);
+  check("draggedMarkerPos: 左の壁は Z・Y が動き X（壁の位置）はそのまま", nearV(left, [-1, 0.2, 1.15]), JSON.stringify(left));
+  check("draggedMarkerPos: cm に丸め、上限（±20m）で止まる", nearV(draggedMarkerPos("wall", [0, 0, 0], [0, 0, 0], [0.123456, 0.0049, 0], false), [0.12, 0, 0]) && nearV(draggedMarkerPos("wall", [0, 0, 0], [0, 0, 0], [50, -50, 0], false), [MARKER_POS_LIMIT_M, -MARKER_POS_LIMIT_M, 0]));
 }
 
 // ================= 2. hand shape =================

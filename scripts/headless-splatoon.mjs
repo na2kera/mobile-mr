@@ -356,6 +356,84 @@ try {
   check("俯瞰画面の一覧に各プレイヤーが使っているマーカーが出る（p1 は 0+5、p2 は 0）", /^(0\+5|5\+0)$/.test(mkOv.peerMarkers[mk1.me] ?? "") && mkOv.peerMarkers[mk2.me] === "0", JSON.stringify(mkOv.peerMarkers));
   const markerListText = await p3.eval("document.querySelector('#players')?.textContent");
   check("俯瞰画面のプレイヤー一覧に「位置合わせ: マーカー」の行がある", /位置合わせ: マーカー (0\+5|5\+0)/.test(markerListText ?? ""), (markerListText ?? "").slice(0, 120));
+  // ---- 3D の枠のドラッグ（issue #43）: CDP の実マウスで俯瞰画面の枠（正面 2 枚目 = 行 4）を掴んで動かす ----
+  // 枠の中心の画面座標（overview.ts の __overviewDebug）。CDP の座標は CSS px（ビューポート基準）
+  const mouse = async (type, x, y, extra = {}) => p3.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, ...extra });
+  const rowPos = async (i) => p3.eval(`Array.from(document.querySelectorAll('#marker-rows .row')[${i}].querySelectorAll('input[type=number]')).slice(1).map((el) => el.valueAsNumber)`);
+  const cam0 = await p3.eval("window.__overviewDebug?.cameraPos()");
+  const screen5 = await p3.eval("window.__overviewDebug?.markerScreen(4)");
+  console.log(`drag: frame of row 4 at ${JSON.stringify(screen5)} camera=${JSON.stringify(cam0?.map((v) => v.toFixed(2)))}`);
+  check("俯瞰画面に正面 2 枚目（行 4）の枠が映っている（配置を配った後は行 = サーバーの配置）", Array.isArray(screen5) && screen5.every(Number.isFinite), JSON.stringify(screen5));
+  const before5 = await rowPos(4);
+  if (Array.isArray(screen5)) {
+    // 枠の中心から少し外れた点（掴み領域の内側。枠そのものは十数 px しかない）で掴み、
+    // 斜め（右 60px・下 25px）にドラッグ。Shift 無し → X が増え Y が減る（画面の下 = 壁の下）、Z は 0 のまま
+    const [sx, sy] = [screen5[0] + 10, screen5[1] + 8];
+    await mouse("mouseMoved", sx, sy);
+    await mouse("mousePressed", sx, sy);
+    await mouse("mouseMoved", sx + 20, sy + 8);
+    await mouse("mouseMoved", sx + 60, sy + 25);
+    await mouse("mouseReleased", sx + 60, sy + 25);
+    await sleep(300);
+  }
+  const after5 = await rowPos(4);
+  const cam1 = await p3.eval("window.__overviewDebug?.cameraPos()");
+  const ovDrag = await readOverview();
+  console.log(`drag: row 4 ${JSON.stringify(before5)} → ${JSON.stringify(after5)} markerDrags=${(await p3.eval("document.querySelector('#hud')?.textContent"))?.match(/markerDrags=(\d+)/)?.[1]}`);
+  check("枠を斜めにドラッグすると行 4 の X が増え Y が減り（正面の壁の面内）、Z は 0 のまま", after5[0] > before5[0] + 0.02 && after5[1] < before5[1] - 0.005 && after5[2] === 0, `${JSON.stringify(before5)} → ${JSON.stringify(after5)}`);
+  check("枠のドラッグでは視点（OrbitControls）が動かない", Array.isArray(cam0) && Array.isArray(cam1) && cam0.every((v, i) => Math.abs(v - cam1[i]) < 1e-6), `${JSON.stringify(cam0)} → ${JSON.stringify(cam1)}`);
+  const hintDraft = await p3.eval("document.querySelector('#markers-hint')?.textContent");
+  check("ドラッグ後は未送信の下書きとして「反映」が押せる（サーバーの配置はまだ前のまま）", /反映/.test(hintDraft ?? "") && ovDrag.markers === "1:floor,5:wall" && (await p3.eval("!document.querySelector('#apply-markers').disabled")) === true, hintDraft);
+  // Shift を押しながら（modifiers 8）ほぼ水平に動かす → X だけ変わり Y はそのまま
+  const screen5b = await p3.eval("window.__overviewDebug?.markerScreen(4)");
+  const beforeShift = await rowPos(4);
+  if (Array.isArray(screen5b)) {
+    const [sx, sy] = screen5b;
+    await mouse("mouseMoved", sx, sy);
+    await mouse("mousePressed", sx, sy);
+    await mouse("mouseMoved", sx - 15, sy + 4, { modifiers: 8 });
+    await mouse("mouseMoved", sx - 30, sy + 8, { modifiers: 8 });
+    await mouse("mouseReleased", sx - 30, sy + 8, { modifiers: 8 });
+    await sleep(300);
+  }
+  const afterShift = await rowPos(4);
+  console.log(`shift-drag: row 4 ${JSON.stringify(beforeShift)} → ${JSON.stringify(afterShift)}`);
+  check("Shift を押しながらのドラッグは水平に固定（X だけ減り、Y はそのまま）", afterShift[0] < beforeShift[0] - 0.02 && afterShift[1] === beforeShift[1] && afterShift[2] === 0, `${JSON.stringify(beforeShift)} → ${JSON.stringify(afterShift)}`);
+  // 枠以外（パネルの外の右下の空）をドラッグすると空間が回る（視点が動く）。ウィンドウの大きさは新しいウィンドウごとに違い得るので測る
+  const [vw, vh] = await p3.eval("[innerWidth, innerHeight]");
+  const ox = Math.round(vw * 0.85);
+  const oy = Math.round(vh * 0.85);
+  await mouse("mouseMoved", ox, oy);
+  await mouse("mousePressed", ox, oy);
+  await mouse("mouseMoved", ox - 60, oy - 20);
+  await mouse("mouseMoved", ox - 120, oy - 40);
+  await mouse("mouseReleased", ox - 120, oy - 40);
+  await sleep(600);
+  const cam2 = await p3.eval("window.__overviewDebug?.cameraPos()");
+  const afterOrbit = await rowPos(4);
+  console.log(`orbit: viewport ${vw}x${vh} drag from (${ox},${oy}) camera ${JSON.stringify(cam1?.map((v) => v.toFixed(2)))} → ${JSON.stringify(cam2?.map((v) => v.toFixed(2)))}`);
+  check("枠以外を掴んでドラッグすると視点が回り、行は変わらない", Array.isArray(cam2) && cam2.some((v, i) => Math.abs(v - cam1[i]) > 0.05) && JSON.stringify(afterOrbit) === JSON.stringify(afterShift), `${JSON.stringify(cam1)} → ${JSON.stringify(cam2)}`);
+  // ドラッグした下書きを「反映」→ 全員に新しい位置が届く
+  await p3.eval("document.querySelector('#apply-markers').click()");
+  await sleep(2500);
+  const dragOv = await readOverview();
+  const dragServerLine = serverLines.filter((l) => /markers → 1:floor,5:wall/.test(l)).length;
+  const dragged1 = await readHud(p1);
+  check("ドラッグした配置を反映すると全員に届く（サーバーが 2 回目の markers → を記録、俯瞰画面の markersSent=2、下書きの色が戻る）", dragOv.markersSent === 2 && dragServerLine >= 2 && dragged1.layout === "1:floor,5:wall" && /いま:/.test((await p3.eval("document.querySelector('#markers-hint')?.textContent")) ?? ""), `sent=${dragOv.markersSent} lines=${dragServerLine}`);
+  // ウィンドウ 1 のフェイクカメラには ID 5 が (0.25, 0, 0) で映っているのに配置は動かしたので、2 枚から出す原点の位置がばらつく（貼りズレの診断が効いている）
+  await sleep(1500);
+  const shifted1 = await readHud(p1);
+  const draggedDist = Math.hypot(afterShift[0] - 0.25, afterShift[1], afterShift[2]);
+  console.log(`dragged window1: marker=${shifted1.marker} spread=${shifted1.spread} (moved ${draggedDist.toFixed(3)}m)`);
+  check("配置を実際と違う位置に動かすと、ウィンドウ 1 の 2 枚の合成の spread がずれのぶん大きくなる（診断表示）", shifted1.markerIds.size === 2 && draggedDist > 0.02 && shifted1.spread > draggedDist * 0.5, `spread=${shifted1.spread} moved=${draggedDist.toFixed(3)} ids=${[...shifted1.markerIds]}`);
+  // 元の位置（右 0.25m）に戻して以降の確認を続ける
+  await p3.eval(`(() => { const nums = document.querySelectorAll('#marker-rows .row')[4].querySelectorAll('input[type=number]'); [0.25, 0, 0].forEach((v, i) => { nums[i + 1].value = String(v); nums[i + 1].dispatchEvent(new Event('input')); }); })()`);
+  await sleep(300);
+  await p3.eval("document.querySelector('#apply-markers').click()");
+  await sleep(2500);
+  const restored1 = await readHud(p1);
+  check("配置を元に戻すと spread が小さく戻る", restored1.markerIds.size === 2 && restored1.spread < 0.05, `spread=${restored1.spread}`);
+
   // 原点マーカーを隠す → ID 5 だけで追跡が続き、位置（self）は変わらない
   await p1.eval("window.__fakeMarkers.hidden.add(0)");
   await sleep(1500);
