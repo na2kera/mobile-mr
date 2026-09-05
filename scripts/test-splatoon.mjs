@@ -348,6 +348,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const hit = rayPlaneHit([0, 0, 2], [0.25, 0.1, -1], [0, 0, 0], [0, 0, 1]);
   check("rayPlaneHit: レイと平面の交点（Z = 0 に t = 2 で当たる）", hit && nearV(hit, [0.5, 0.2, 0]), JSON.stringify(hit));
   check("rayPlaneHit: 平面に平行なレイ・視点の後ろの平面は null", rayPlaneHit([0, 0, 2], [1, 0, 0], [0, 0, 0], [0, 0, 1]) === null && rayPlaneHit([0, 0, 2], [0, 0, 1], [0, 0, 0], [0, 0, 1]) === null);
+  const back = rayPlaneHit([0, 0, -2], [0.25, 0, 1], [0, 0, 0], [0, 0, 1]);
+  check("rayPlaneHit: 裏側（法線と同じ向き）から見た面にも当たる（背面の壁を部屋の外から見る俯瞰の視点）", back && nearV(back, [0.5, 0, 0]), JSON.stringify(back));
+  const tie = draggedMarkerPos("wall", [0, 0, 0], [0, 0, 0], [0.3, 0.3, 0], true);
+  check("draggedMarkerPos: Shift で動きが同じ大きさなら水平を優先", nearV(tie, [0.3, 0, 0]), JSON.stringify(tie));
   check("roundCm: cm に丸める", roundCm(0.12345) === 0.12 && roundCm(0.126) === 0.13 && roundCm(-0.126) === -0.13);
   // 正面の壁のマーカー (0.25, 0, 0) を掴んだ点から右 0.3・上 0.1 動かす → X・Y だけ変わり Z は 0 のまま
   const pos0 = [0.25, 0, 0];

@@ -413,6 +413,36 @@ try {
   const afterOrbit = await rowPos(4);
   console.log(`orbit: viewport ${vw}x${vh} drag from (${ox},${oy}) camera ${JSON.stringify(cam1?.map((v) => v.toFixed(2)))} → ${JSON.stringify(cam2?.map((v) => v.toFixed(2)))}`);
   check("枠以外を掴んでドラッグすると視点が回り、行は変わらない", Array.isArray(cam2) && cam2.some((v, i) => Math.abs(v - cam1[i]) > 0.05) && JSON.stringify(afterOrbit) === JSON.stringify(afterShift), `${JSON.stringify(cam1)} → ${JSON.stringify(cam2)}`);
+  // 空間を回した直後（慣性が残っている間）に枠を掴む → 掴んだ時点で慣性を使い切り、ドラッグ中はカメラが動かない（codex レビュー指摘）。
+  // 慣性はフレームごとに減る（damping 0.12）ので、描画の遅いヘッドレス（swiftshader）では実時間で長く残る。
+  // 1.5 秒待って残りを小さくしてから掴む（大きく残ったままだと使い切った瞬間に枠が掴み領域の外へ出て、回転になる）
+  await mouse("mouseMoved", ox, oy);
+  await mouse("mousePressed", ox, oy);
+  await mouse("mouseMoved", ox + 40, oy + 10);
+  await mouse("mouseMoved", ox + 80, oy + 20);
+  await mouse("mouseReleased", ox + 80, oy + 20);
+  await sleep(1500);
+  const screen5c = await p3.eval("window.__overviewDebug?.markerScreen(4)");
+  let camGrab = null;
+  let camDrop = null;
+  if (Array.isArray(screen5c)) {
+    await mouse("mouseMoved", screen5c[0], screen5c[1]);
+    await mouse("mousePressed", screen5c[0], screen5c[1]);
+    await sleep(50);
+    camGrab = await p3.eval("window.__overviewDebug?.cameraPos()");
+    await mouse("mouseMoved", screen5c[0] + 20, screen5c[1]);
+    await sleep(150);
+    await mouse("mouseMoved", screen5c[0] + 40, screen5c[1]);
+    await sleep(150);
+    camDrop = await p3.eval("window.__overviewDebug?.cameraPos()");
+    await mouse("mouseReleased", screen5c[0] + 40, screen5c[1]);
+    await sleep(200);
+  }
+  console.log(`grab-after-orbit: frame at ${JSON.stringify(screen5c?.map((v) => v.toFixed(0)))} camera ${JSON.stringify(camGrab?.map((v) => v.toFixed(3)))} → ${JSON.stringify(camDrop?.map((v) => v.toFixed(3)))}`);
+  check("空間を回した直後に枠を掴んでも、ドラッグ中はカメラが止まっている（慣性を掴んだ時点で使い切る）", Array.isArray(camGrab) && Array.isArray(camDrop) && camGrab.every((v, i) => Math.abs(v - camDrop[i]) < 1e-6), `${JSON.stringify(camGrab)} → ${JSON.stringify(camDrop)}`);
+  const afterGrab = await rowPos(4);
+  const grabMoved = Math.hypot(afterGrab[0] - afterShift[0], afterGrab[1] - afterShift[1]);
+  check("その枠のドラッグで行は動いている（掴めている）が、40px で 1m も飛ばない（掴み点が跳んだ後のカメラで計算されていない）", Array.isArray(screen5c) && grabMoved > 0.02 && grabMoved < 1, `${JSON.stringify(afterShift)} → ${JSON.stringify(afterGrab)} (${grabMoved.toFixed(3)}m)`);
   // ドラッグした下書きを「反映」→ 全員に新しい位置が届く
   await p3.eval("document.querySelector('#apply-markers').click()");
   await sleep(2500);
@@ -423,7 +453,7 @@ try {
   // ウィンドウ 1 のフェイクカメラには ID 5 が (0.25, 0, 0) で映っているのに配置は動かしたので、2 枚から出す原点の位置がばらつく（貼りズレの診断が効いている）
   await sleep(1500);
   const shifted1 = await readHud(p1);
-  const draggedDist = Math.hypot(afterShift[0] - 0.25, afterShift[1], afterShift[2]);
+  const draggedDist = Math.hypot(afterGrab[0] - 0.25, afterGrab[1], afterGrab[2]);
   console.log(`dragged window1: marker=${shifted1.marker} spread=${shifted1.spread} (moved ${draggedDist.toFixed(3)}m)`);
   check("配置を実際と違う位置に動かすと、ウィンドウ 1 の 2 枚の合成の spread がずれのぶん大きくなる（診断表示）", shifted1.markerIds.size === 2 && draggedDist > 0.02 && shifted1.spread > draggedDist * 0.5, `spread=${shifted1.spread} moved=${draggedDist.toFixed(3)} ids=${[...shifted1.markerIds]}`);
   // 元の位置（右 0.25m）に戻して以降の確認を続ける

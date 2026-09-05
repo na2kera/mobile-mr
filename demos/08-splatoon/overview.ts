@@ -125,6 +125,9 @@ function syncMarkerFrames() {
   const key = rows.map(({ row, i }) => `${i}:${row.face.value}:${row.id.value}`).join("|");
   if (key !== markerFramesKey) {
     markerFramesKey = key;
+    // 古い枠を指したままにしない（作り直した枠は次の pointermove で当て直す）
+    hoverFrame = null;
+    updateCursor();
     for (const f of markerFrameList) {
       f.mesh.removeFromParent();
       f.mesh.material.dispose();
@@ -157,6 +160,8 @@ function syncMarkerFrames() {
     f.mesh.material.color.setHex(sent ? MARKER_FRAME_COLOR : MARKER_DRAFT_COLOR);
     f.mesh.material.opacity = hovered ? 0.9 : 0.6;
   }
+  // 作り直した直後の pointerdown でも当たるよう、描画を待たずワールド行列を更新しておく
+  markerFrames.updateMatrixWorld(true);
 }
 
 // 視点: コートの後方上空から壁を見下ろす。OrbitControls で回せる（回転の中心はコートの箱の中心）
@@ -679,10 +684,37 @@ function updateCursor() {
   renderer.domElement.style.cursor = drag ? "grabbing" : hoverFrame ? "grab" : "";
 }
 
+/**
+ * OrbitControls の慣性の残りを使い切る。`enabled = false` は入力を止めるだけで、毎フレームの `update()` が残った damping を
+ * 適用し続けるので、空間を回した直後に枠を掴むとドラッグ中もカメラが動いてレイがずれる（codex レビュー指摘）。
+ * damping を切って 1 回 update すると残りの回転を一度に適用して 0 に戻す（レイを計算する前に呼ぶ）
+ */
+function settleOrbit() {
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = true;
+}
+/** ドラッグを中断する（行の同期・編集不可への遷移・ポインタの解放。行の値はその時点のまま） */
+function cancelDrag() {
+  if (!drag) return;
+  try {
+    renderer.domElement.releasePointerCapture(drag.pointerId);
+  } catch {
+    // 取れていなければ何もしない
+  }
+  drag = null;
+  controls.enabled = true;
+  updateCursor();
+}
+
 appEl.addEventListener(
   "pointerdown",
   (e) => {
     if (e.button !== 0 || drag || !markersEditable()) return;
+    if (!frameAt(e)) return;
+    // 枠に当たった。慣性の残りを使い切ってから、同じカメラで当たり判定と掴み点をやり直す
+    // （慣性で跳んだ後のカメラで掴み点を計算すると平面の遠い点になり、少しの移動で枠が数 m 飛ぶ）
+    settleOrbit();
     const frame = frameAt(e);
     if (!frame) return;
     const row = markerRows[frame.rowIndex];
@@ -693,6 +725,8 @@ appEl.addEventListener(
     if (!hit0) return;
     e.stopPropagation();
     e.preventDefault();
+    // 伝播を止めるので window の pointerdown（着弾の音の解錠）に届かない。ここで解錠しておく
+    splatSound.unlock();
     controls.enabled = false;
     drag = { frame, row, face: m.face, pos0: m.pos, hit0, normal, pointerId: e.pointerId };
     try {
@@ -708,6 +742,12 @@ appEl.addEventListener(
 renderer.domElement.addEventListener("pointermove", (e) => {
   if (drag) {
     if (e.pointerId !== drag.pointerId) return;
+    // ドラッグ中に試合が始まる・切断するなどで編集できなくなったら、そこで止める（行は無効化されているのに書き換え続けない）
+    if (!markersEditable()) {
+      cancelDrag();
+      renderPanel();
+      return;
+    }
     const { origin, dir } = pointerRay(e);
     const hit = rayPlaneHit(origin, dir, drag.pos0, drag.normal);
     if (!hit) return;
@@ -728,19 +768,15 @@ renderer.domElement.addEventListener("pointermove", (e) => {
 });
 function endDrag(e: PointerEvent) {
   if (!drag || e.pointerId !== drag.pointerId) return;
-  try {
-    renderer.domElement.releasePointerCapture(e.pointerId);
-  } catch {
-    // 取れていなければ何もしない
-  }
-  drag = null;
-  controls.enabled = true;
+  cancelDrag();
   hoverFrame = frameAt(e);
   updateCursor();
   renderPanel();
 }
-renderer.domElement.addEventListener("pointerup", endDrag);
-renderer.domElement.addEventListener("pointercancel", endDrag);
+// pointerup は window で受ける（setPointerCapture が取れなかったとき canvas の外で離しても取りこぼさない）
+addEventListener("pointerup", endDrag);
+addEventListener("pointercancel", endDrag);
+renderer.domElement.addEventListener("lostpointercapture", endDrag);
 renderer.domElement.addEventListener("pointerleave", () => {
   if (drag || !hoverFrame) return;
   hoverFrame = null;
@@ -757,6 +793,8 @@ function markerRowsChanged(): boolean {
  * 残りの行は使わない状態にしておすすめの値を入れる
  */
 function syncMarkerRows() {
+  // ドラッグ中に届いたら（自分の「反映」の応答か、別の俯瞰画面の変更）ドラッグは中断し、行はサーバーの配置に揃える
+  cancelDrag();
   const markers = fieldCfg.markers ?? [];
   const assigned = new Map<MarkerRow, MarkerPlacement>();
   const pending: MarkerPlacement[] = [];
