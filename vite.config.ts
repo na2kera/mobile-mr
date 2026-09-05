@@ -9,6 +9,8 @@ import { dartsServer } from "./server/darts.ts";
 import { surfaceServer } from "./server/surface.ts";
 import { splatoonServer } from "./server/splatoon.ts";
 import { personServer } from "./server/person.ts";
+import { golfServer } from "./server/golf.ts";
+import { clientLogServer } from "./server/client-log.ts";
 
 // js-aruco2（demos/03 で使用）は top-level this へ代入する古い CJS 形式で、
 // Vite(rolldown) が exports を静的検出できず named import が組めない。
@@ -59,7 +61,7 @@ function jsAruco2Esm(): Plugin {
 // iOS Safari はセンサー/カメラ API が HTTPS 必須のため、dev サーバーを
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
-  plugins: [basicSsl(), jsAruco2Esm(), sharedRoomServer(), volleyballServer(), dartsServer(), surfaceServer(), splatoonServer(), personServer()],
+  plugins: [basicSsl(), jsAruco2Esm(), sharedRoomServer(), volleyballServer(), dartsServer(), surfaceServer(), splatoonServer(), personServer(), golfServer(), clientLogServer()],
   server: {
     host: true,
   },
@@ -117,6 +119,9 @@ export default defineConfig({
         "demo-09-person-id": fileURLToPath(
           new URL("./demos/09-person-id/index.html", import.meta.url),
         ),
+        "demo-10-golf": fileURLToPath(new URL("./demos/10-golf/index.html", import.meta.url)),
+        "demo-10-golf-overview": fileURLToPath(new URL("./demos/10-golf/overview.html", import.meta.url)),
+        "demo-10-golf-joycon-test": fileURLToPath(new URL("./demos/10-golf/joycon-test.html", import.meta.url)),
       },
     },
   },

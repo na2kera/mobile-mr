@@ -470,6 +470,20 @@
 - **SDK ならどう解決するか（案）**: `@mobile-mr/spatial` に `MarkerField`（原点 + 相対姿勢の集合）を一級の概念として持ち、配置は「面 + 位置」のような人間が測れる表現で受け取る。診断（各マーカー由来の原点推定の分散、使用中の ID、枠の描画）は SDK 側の標準機能にし、将来の自動キャリブレーションは「複数フレームの同時観測を最小二乗で解いて配置を提案し、人間が採用を決める」半自動にする（全自動で誤差を固定しない）
 - **関連**: `src/shared/marker-layout.ts`（`validateMarkerLayout` / `fusePoseCandidates`）、`src/shared/marker-anchor.ts` の `extraMarkers` / `spreadM`、`demos/08-splatoon/overview.ts` の `markerRows` / `syncMarkerRows`、docs/CONCEPT.md「将来の拡張案：マルチマーカー」
 
+## [2026-09-05] Phase 10 / 10-golf: スマホのブラウザからは Joy-Con の IMU が読めず、PC の Chrome を「入力機器のハブ」として挟むしかなかった
+
+- **何が苦しかったか**: 「Joy-Con をパターにする」には振り（角速度）が要るが、iOS Safari で Joy-Con を読む手段は Gamepad API だけで、取れるのはボタンとスティック（ex2-1 で確認済み）。WebHID は iOS にも Android Chrome にも無い。つまり「スマホだけで完結する」コンセプトの中では、外付けの入力機器の生センサーには一切触れない。結局 PC の Chrome（WebHID あり）で Joy-Con を開き、振りを検出してサーバー経由でスマホに届ける構成にした（CONCEPT.md の「外付けハードはスマホに繋がず、サーバーで合流させる」の初の実装）。副作用として (1) 入力の遅延が Bluetooth → PC → WebSocket → スマホの合算になる（パットは結果が出てから転がるので許容） (2) Joy-Con と人の対応（誰の 1 打か）を運営が割り当てる UI が要る (3) スマホ側は「自分の入力機器」を持たないので、構え（狙い）だけをスマホの視線で決め、強さは PC 経由、という分担になった。さらに Joy-Con の位置は取れない（IMU だけ）ので、パターの見た目は「ボールの真上を支点にした振り子」に割り切った
+- **どう対処したか**: 役割 `overview` を「俯瞰画面 + 入力機器のハブ」に広げ、`stroke` / `address` に `playerId` を付けて代理で送れるようにした（スマホは自分の分だけ）。割り当ては「手番の人（自動）」を既定にして 1 台を回す運用を簡単にした。Joy-Con の HID プロトコル（サブコマンド・レポート 0x30 のレイアウト・換算係数・L/R の軸差）は一次資料と codex の照合で `docs/joycon-webhid-notes.md` にまとめ、解析は純粋関数（`joycon-report.ts`）にして Node で検証した。振り検出は軸を決め打ちせず「バックスイングの回転ベクトルの向き」を軸にして持ち方に依存させない（`swing-detector.ts`）
+- **SDK ならどう解決するか（案）**: 「入力機器はどの端末に繋がっていても、Room の中では Player に紐づく入力ストリーム」として抽象化する（`InputSource { playerId, kind, samples }`）。ハブ役（PC・別スマホ・将来のマイコン）は SDK の役割の 1 つにし、割り当て UI と代理送信（権限）は Room 機能に含める。スマホからも将来 Gamepad API のボタンだけは取れるので、「ボタンはスマホ、IMU はハブ」のように 1 台の機器を 2 経路で扱う想定も入れる
+- **関連**: `demos/10-golf/joycon-hid.ts`、`demos/10-golf/overview.ts` の `playerOf` / `onImpact`、`server/golf.ts` の `actorOf`、`src/shared/swing-detector.ts`、`docs/joycon-webhid-notes.md`、CONCEPT.md Phase 3「外付けハードによる 6DoF」
+
+## [2026-09-05] Phase 10 / 10-golf: 俯瞰画面の「寸法 + 追加マーカー」の入力欄を 2 本目で複製しかけ、共通化した（08 の複製はそのまま）
+
+- **何が苦しかったか**: 08 の俯瞰画面の寸法入力・追加マーカーの行（生成・サーバーの値との同期・検証・「反映」の活性）は約 200 行がモジュール内の状態（`fieldCfg` / `client` / pending フラグ）に直接触れていて、そのままでは再利用できない。10 でも同じ入力欄が要り、2 本目の複製になるところだった
+- **どう対処したか**: DOM の生成と検証・同期だけを `src/shared/field-setup-panel.ts`（`createFieldSetupPanel`）に切り出し、送信と pending は呼ぶ側のコールバックにした。08 の overview.ts は過去のデモとして触らず複製のまま（06 → 05 のときと同じ方針）。変更時の文言（08「塗りが消える」/ 10「最初からになる」）はオプションで差し替える
+- **SDK ならどう解決するか（案）**: 段階4（フレームワーク化）の master 画面に「フィールドの寸法・マーカー配置の編集」を標準搭載する前提なので、この部品はそのまま master 側の既定 UI の材料になる。DOM の構造（id / class）を固定して CSS を流用したのは暫定で、SDK では部品が自前のスタイルを持つ
+- **関連**: `src/shared/field-setup-panel.ts`、`demos/10-golf/overview.ts`、`demos/08-splatoon/overview.ts`（複製元）、CONCEPT.md「段階4：フレームワーク化」
+
 ## [2026-09-05] Phase 8 マルチマーカー / 08-splatoon 俯瞰画面: 「3D の枠を掴んで面の上を動かす」は、OrbitControls との pointerdown の取り合い・面ごとの拘束・下書きと配信済みの二重状態を全部自前で組むことになった
 
 - **何が苦しかったか**: issue #43「マーカーの位置をカーソルで動かせるように」は一見ただの UI 改善だが、(1) 同じ canvas を OrbitControls（空間の回転）も見ているので、枠に当たったときだけ OrbitControls に pointerdown を渡さない仕組みが要る（`controls.enabled = false` は始まったドラッグを止めない。親要素の capture で先に受けて `stopPropagation` する）(2) 枠は貼った面から浮かないので「その面の平面とレイの交点」で動かす必要があり、面ごとに動かせる 2 軸が違う（壁は横 + 上、床は X + Z。床の高さは寸法で決まる）(3) 枠は「サーバーが配った配置」ではなく「入力欄の未送信の下書き」を描かないとドラッグ中に追従せず、下書き / 配信済みの二重の状態と色分けが要る (4) 10cm の枠は俯瞰の距離では十数 px しかなく、見えない掴み領域を別に置かないと掴めない (5) ヘッドレスでの確認は合成 `PointerEvent` では `setPointerCapture` が効かないので CDP の実マウス（`Input.dispatchMouseEvent`、Shift は modifiers=8）が要る
