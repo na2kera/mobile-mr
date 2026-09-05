@@ -5,9 +5,9 @@
 //
 // 座標系（field 座標系）: 08 と同じ、壁に貼ったマーカーのマーカー座標系そのもの。
 //   X = マーカーの右, Y = マーカーの上（= 鉛直上。天地を合わせて貼る前提）, +Z = 壁から部屋側。
-//   壁面 = Z=0。床（グリーン）= Y = -floorDrop の水平面（X: ±wallW/2、Z: 0〜floorDepth）。単位 m
+//   壁面 = Z=0。床 = Y = -floorDrop + slopeX*X + slopeZ*Z（X: ±wallW/2、Z: 0〜floorDepth）。単位 m
 // ボールは床の上を転がるだけなので、位置と速度は床の 2 次元 [x, z] で持つ（V2）。
-// 転がりは「一定の減速度で直線に減速」（摩擦だけ。芝の傾斜は無い）。コートの四方の壁はクッション（反発係数 restitution）で、
+// 一定の摩擦と勾配による加速を積分。四方の壁と円柱障害物はクッション（反発係数 restitution）で、
 // 場外には出ない。カップは半径 cupR の円で、中心からの距離が capture 以内を通過したときの速さが cupMaxSpeed 以下なら入る
 // （速すぎると「リップアウト」して通過する）。
 // 転がりの経過は固定刻み（STEP_SEC）で積分して全サンプルを返す（両端で同じ結果になる決定的な計算）。
@@ -23,7 +23,7 @@ export { FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, validateFieldSize };
 /** validateFieldSize に渡すセルの大きさ [m]。ゴルフは格子を持たないので、08 のセル数上限が効かない大きな値にする */
 export const GOLF_SIZE_CELL_M = 1;
 
-/** 床の 2 次元座標 [x, z]（field 座標系の X と Z。Y は床の高さで固定） */
+/** 床の 2 次元座標 [x, z]（field 座標系の X と Z。Y は地形から求める） */
 export type V2 = [number, number];
 
 /** ゴルフボールの半径 [m]（直径 42.67mm） */
@@ -94,12 +94,13 @@ export function validateGolfRules(rules: GolfRules): string | null {
   return null;
 }
 
-/** ホールの定義（カップとティーの床の位置） */
-export type HoleDef = { cup: V2; tee: V2 };
+export type GolfObstacle = { center: V2; radius: number; height: number };
+/** slope は床の高さの変化率 [dy/dx, dy/dz]。マーカーは実際の床に固定したまま */
+export type HoleDef = { cup: V2; tee: V2; slope: V2; obstacles: GolfObstacle[] };
 
 /**
- * コートの寸法からホールを作る。ティーは部屋側（奥）、カップは壁側で、ホールごとに左右へ振る。
- * 同じティーから左右へ向きを変える一打勝負。9 ラウンドまで角度と距離の組み合わせを変える。
+ * カップは常に正面の壁寄り。平坦 → 横勾配 → 正面の障害物、の3種類を繰り返す。
+ * 4ラウンド以降は距離・勾配方向・障害物の大きさを変える（最大9ラウンド）。
  */
 export function makeHoles(size: FieldSize, count: number): HoleDef[] {
   const halfW = size.wallW / 2;
@@ -107,21 +108,43 @@ export function makeHoles(size: FieldSize, count: number): HoleDef[] {
   // 壁・端から少し内側に置く（ボールがクッションに触れない余裕）
   const margin = Math.min(0.25, halfW * 0.5, d * 0.15);
   const teeZ = round3(d - margin);
-  const cupZ = round3(Math.max(margin, Math.min(d * 0.25, d - margin)));
-  const side = round3(Math.max(0, halfW - margin) * 0.7);
-  const patterns = [[-0.8, 0], [1, 0.25], [-1, 0.55], [0.65, 0.1], [-0.7, 0.4], [1, 0.6], [-1, 0.15], [0.8, 0.45], [-0.65, 0.6]];
   return Array.from({ length: Math.max(1, count) }, (_, i) => {
-    const [x, depth] = patterns[i % patterns.length];
-    return { tee: [0, teeZ], cup: [round3(side * x), round3(cupZ + (teeZ - cupZ) * depth)] };
+    const tier = Math.floor((i % 9) / 3);
+    const cupZ = round3(margin + (2 - tier) * d * 0.025);
+    const slopeX = i % 3 === 1 ? [0.02, -0.02, 0.025][tier] : 0;
+    return {
+      tee: [0, teeZ], cup: [0, cupZ], slope: [slopeX, 0],
+      obstacles: i % 3 === 2 ? [{
+        center: [0, round3((teeZ + cupZ) / 2)],
+        radius: Math.min(size.wallW * (0.09 + tier * 0.02), (teeZ - cupZ) * 0.15),
+        height: 0.1,
+      }] : [],
+    };
   });
 }
 
-/** カップの方向と距離。角度は正面（-Z）から。左右はプレイヤー画面と俯瞰で共通。 */
+/** 地形の高さ。球の中心・地面・視線の交点で共有する */
+export function greenHeight(p: V2, hole?: HoleDef | null): number {
+  return hole ? hole.slope[0] * p[0] + hole.slope[1] * p[1] : 0;
+}
+
+/** マーカー座標系の視線と傾斜グリーンの交点（範囲外・裏側・平行なら null） */
+export function intersectGreen(origin: V3, direction: V3, cfg: FieldSize, hole?: HoleDef): V2 | null {
+  const [sx, sz] = hole?.slope ?? [0, 0];
+  const denominator = direction[1] - sx * direction[0] - sz * direction[2];
+  if (denominator >= -1e-4) return null;
+  const t = (-cfg.floorDrop + sx * origin[0] + sz * origin[2] - origin[1]) / denominator;
+  if (t <= 0) return null;
+  const x = origin[0] + direction[0] * t, z = origin[2] + direction[2] * t;
+  return Math.abs(x) <= cfg.wallW / 2 && z >= 0 && z <= cfg.floorDepth ? [x, z] : null;
+}
+
+/** カップの距離と、そのラウンドの攻略の手掛かり */
 export function holeHint(hole: HoleDef): string {
-  const dx = hole.cup[0] - hole.tee[0];
-  const dz = hole.tee[1] - hole.cup[1];
-  const angle = Math.atan2(Math.abs(dx), dz) * 180 / Math.PI;
-  return `${dx < 0 ? "左" : "右"} ${angle.toFixed(0)}°・${Math.hypot(dx, dz).toFixed(2)}m`;
+  const distance = Math.hypot(hole.cup[0] - hole.tee[0], hole.cup[1] - hole.tee[1]);
+  const terrain = hole.obstacles.length ? "障害物・左右か壁反射で回避" : hole.slope[0] !== 0
+    ? `${hole.slope[0] > 0 ? "左" : "右"}へ流れる勾配 ${Math.abs(hole.slope[0] * 100).toFixed(1)}%` : "平坦・強さで勝負";
+  return `正面 ${distance.toFixed(2)}m・${terrain}`;
 }
 
 /** 床の点を field 座標系（3 次元）に上げる（ボールの中心 = 床 + 半径） */
@@ -166,7 +189,7 @@ export type RollResult = {
  * 1 打の転がり。from（床の位置）から vel（床の速度 [m/s]）で転がり、摩擦で止まるかカップインするまで。
  * 固定刻みで積分するので、同じ入力なら両端で同じ結果になる
  */
-export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig): RollResult {
+export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig, hole?: HoleDef): RollResult {
   const halfW = cfg.wallW / 2;
   const minX = -halfW + BALL_R;
   const maxX = halfW - BALL_R;
@@ -176,6 +199,8 @@ export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig): RollR
   let z = clamp(from[1], minZ, maxZ);
   let vx = vel[0];
   let vz = vel[1];
+  const [sx, sz] = hole?.slope ?? [0, 0];
+  const gravity = 9.81 / (1 + sx * sx + sz * sz);
   const samples: V2[] = [[x, z]];
   let bounces = 0;
   const maxSteps = Math.ceil(cfg.maxRollSec / STEP_SEC);
@@ -184,18 +209,52 @@ export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig): RollR
   let steps = 0;
   // Math.hypot はエンジン間で同じ値が保証されない（正しく丸められない）ので、両端で同じ結果にするため sqrt(x²+z²) で書く（外部レビュー指摘）
   while (steps < maxSteps) {
+    // 生成する勾配の加速度は最小摩擦より小さい。止まった球は再び滑り出さない。
+    if (vx * vx + vz * vz <= 1e-12) break;
+    const oldVx = vx;
+    const oldVz = vz;
+    vx -= gravity * sx * STEP_SEC;
+    vz -= gravity * sz * STEP_SEC;
     const speed = Math.sqrt(vx * vx + vz * vz);
-    if (speed <= 1e-6) break;
     // 減速（摩擦は速度と逆向きに一定）。この刻みで止まるならそこまで
     const drop = cfg.decel * STEP_SEC;
     const newSpeed = Math.max(0, speed - drop);
-    const k = newSpeed / speed;
+    const k = speed > 0 ? newSpeed / speed : 0;
     // 位置は平均速度で進める
-    const avg = (1 + k) / 2;
-    x += vx * avg * STEP_SEC;
-    z += vz * avg * STEP_SEC;
     vx *= k;
     vz *= k;
+    let dxStep = (oldVx + vx) * 0.5 * STEP_SEC;
+    let dzStep = (oldVz + vz) * 0.5 * STEP_SEC;
+    // 球の半径を加えた円へ線分を当てる。高速でも薄い障害物をすり抜けない。
+    for (let contact = 0; contact < 4; contact++) {
+      let hit: GolfObstacle | null = null;
+      let hitT = 1;
+      for (const obstacle of hole?.obstacles ?? []) {
+        const ox = x - obstacle.center[0], oz = z - obstacle.center[1];
+        const radius = obstacle.radius + BALL_R;
+        const a = dxStep * dxStep + dzStep * dzStep;
+        const b = ox * dxStep + oz * dzStep;
+        const c = ox * ox + oz * oz - radius * radius;
+        const discriminant = b * b - a * c;
+        if (a <= 1e-18 || b >= 0 || discriminant < 0) continue;
+        const t = Math.max(0, (-b - Math.sqrt(discriminant)) / a);
+        if (t <= hitT) { hitT = t; hit = obstacle; }
+      }
+      if (!hit) { x += dxStep; z += dzStep; break; }
+      x += dxStep * hitT;
+      z += dzStep * hitT;
+      const nx0 = x - hit.center[0], nz0 = z - hit.center[1];
+      const len = Math.sqrt(nx0 * nx0 + nz0 * nz0);
+      const nx = len > 0 ? nx0 / len : 0, nz = len > 0 ? nz0 / len : 1;
+      x = hit.center[0] + nx * (hit.radius + BALL_R + 1e-8);
+      z = hit.center[1] + nz * (hit.radius + BALL_R + 1e-8);
+      const normalV = vx * nx + vz * nz;
+      if (normalV < 0) { vx -= (1 + cfg.restitution) * normalV * nx; vz -= (1 + cfg.restitution) * normalV * nz; }
+      const normalStep = dxStep * nx + dzStep * nz;
+      dxStep = (dxStep - (1 + cfg.restitution) * normalStep * nx) * (1 - hitT);
+      dzStep = (dzStep - (1 + cfg.restitution) * normalStep * nz) * (1 - hitT);
+      bounces++;
+    }
     // 壁（クッション）: はみ出したら折り返して反発
     if (x < minX) {
       x = minX + (minX - x);

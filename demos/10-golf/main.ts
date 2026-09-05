@@ -16,7 +16,7 @@ import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, project
 import type { FakeMarker } from "../../src/shared/fake-markers";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import { BALL_R, CUP_R, DEFAULT_GOLF, holeHint, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance } from "../../src/shared/golf-sim";
+import { BALL_R, CUP_R, DEFAULT_GOLF, holeHint, intersectGreen, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance } from "../../src/shared/golf-sim";
 import { scoreTotal, shotLabel } from "../../src/shared/golf-score";
 import type { GolfConfig, RollResult, V2, V3 } from "../../src/shared/golf-sim";
 import type { GameSnapshot } from "../../src/shared/golf-game";
@@ -397,7 +397,7 @@ function onState(state: GameSnapshot) {
   const roll = state.roll;
   if (roll && roll.seq !== liveRoll?.seq) {
     const cup = state.holes[state.hole]?.cup ?? [0, 0];
-    const result = simulateRoll(roll.from, roll.vel, cup, cfg);
+    const result = simulateRoll(roll.from, roll.vel, cup, cfg, state.holes[state.hole]);
     const startLocalMs = localTimeOf(roll.startedAt, state.t, now);
     // 入室・再接続で受け取った過去の転がり（もう止まっている）は「カップイン！」を出さない（外部レビュー指摘）
     const elapsed0 = (now - startLocalMs) / 1000;
@@ -495,14 +495,9 @@ function updateGaze() {
   gazeDir.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(tmpQuat));
   field.getWorldQuaternion(tmpQuat).invert();
   gazeDir.applyQuaternion(tmpQuat);
-  const floorY = -cfg.floorDrop;
-  if (gazeDir.y >= -1e-4) return;
-  const t = (floorY - gazeOrigin.y) / gazeDir.y;
-  if (t <= 0) return;
-  const x = gazeOrigin.x + gazeDir.x * t;
-  const z = gazeOrigin.z + gazeDir.z * t;
-  if (Math.abs(x) > cfg.wallW / 2 || z < 0 || z > cfg.floorDepth) return;
-  gaze = [round3(x), round3(z)];
+  const hole = auth?.state.holes[auth.state.hole];
+  const hit = intersectGreen(gazeOrigin.toArray(), gazeDir.toArray(), cfg, hole);
+  if (hit) gaze = [round3(hit[0]), round3(hit[1])];
 }
 
 let lastSendMs = -Infinity;
@@ -660,8 +655,8 @@ function updateCourse(now: number) {
     }
     balls.push({ id: p.id, pos, color: playerColorHex(p.color), holed: b.holed, sunk });
   }
-  course.setBalls(balls, now);
   course.setHole(s.holes[s.hole] ?? null, s.hole);
+  course.setBalls(balls, now);
   // 狙い線: 構えていなければ正面（サーバーと同じ既定）
   const turnId = s.phase === "aim" ? s.turn : null;
   if (turnId && s.balls[turnId]) {

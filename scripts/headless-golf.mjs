@@ -1,5 +1,5 @@
 // demos/10-golf のブラウザ経路（マーカー → field 座標変換・視線の交点・Joy-Con の振り → 1 打 → 転がり → カップイン →
-// 手番交代 → ラウンド結果 → 次の斜め配置）をヘッドレス Chrome で確認する。`npm run check:golf` で実行する。
+// 手番交代 → ラウンド結果 → 勾配コース）をヘッドレス Chrome で確認する。`npm run check:golf` で実行する。
 // 仕組みは headless-splatoon.mjs と同じ（CDP を ws で直接叩く。Chrome が無ければスキップ）。
 //
 // 確認内容: フェイクカメラ（正面 + 床のマーカー）のスマホ 2 台と、フェイク Joy-Con（?fakeJoycon=1）を繋いだ俯瞰画面を同じ room に入れて、
@@ -10,7 +10,7 @@
 //   - 俯瞰画面の「最初から」でホール 1 に戻る
 //   - 例外が出ていない
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
@@ -77,7 +77,9 @@ class Page {
     this.ws.on("message", (d) => {
       const m = JSON.parse(d.toString());
       if (m.id && this.pending.has(m.id)) {
-        this.pending.get(m.id)(m);
+        const pending = this.pending.get(m.id);
+        clearTimeout(pending.timer);
+        pending.resolve(m);
         this.pending.delete(m.id);
       } else if (m.method === "Runtime.consoleAPICalled") {
         this.logs.push(m.params.args.map((a) => a.value ?? a.description ?? "").join(" "));
@@ -85,14 +87,25 @@ class Page {
         this.exceptions.push(`${m.params.exceptionDetails.text} ${m.params.exceptionDetails.exception?.description ?? ""}`);
       }
     });
+    this.ws.on("close", () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`${this.name}: ブラウザ検証接続が切れました`));
+      }
+      this.pending.clear();
+    });
   }
   ready() {
     return new Promise((r) => this.ws.on("open", r));
   }
   send(method, params = {}) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const id = ++this.id;
-      this.pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${this.name}: ${method} が10秒以内に応答しませんでした`));
+      }, 10000);
+      this.pending.set(id, { resolve, reject, timer });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -168,6 +181,14 @@ function parseOverviewHud(hud) {
 }
 
 const profile = mkdtempSync(join(tmpdir(), "mobile-mr-chrome-"));
+const screenshots = mkdtempSync(join(tmpdir(), "mobile-mr-golf-visual-"));
+async function capture(page, name) {
+  const shot = await page.send("Page.captureScreenshot", { format: "png" });
+  if (!shot.result?.data) throw new Error(`スクリーンショット取得失敗: ${name}`);
+  const path = join(screenshots, `${name}.png`);
+  writeFileSync(path, Buffer.from(shot.result.data, "base64"));
+  console.log(`SCREENSHOT: ${path}`);
+}
 let chrome = null;
 let exitCode = 1;
 try {
@@ -225,6 +246,16 @@ try {
   check("サーバーが markers → 1:floor を記録している", serverLines.some((l) => /markers → 1:floor/.test(l)));
 
   const p1 = await newPage("1");
+  // 振り角は短時間で消えるので、初期化中もHUDの表示を監視して取り逃さない。
+  await p1.send("Page.addScriptToEvaluateOnNewDocument", { source: `
+    window.__golfPutterSeen = false;
+    addEventListener('DOMContentLoaded', () => {
+      const hud = document.querySelector('#hud');
+      const record = () => { if (/\\bputter=-?\\d/.test(hud?.textContent ?? '')) window.__golfPutterSeen = true; };
+      if (hud) new MutationObserver(record).observe(hud, { childList: true, characterData: true, subtree: true });
+      record();
+    });
+  ` });
   await p1.send("Page.navigate", { url: `${BASE}?${COMMON}&name=One&fakeCamPos=0.1,-0.5,1.2` });
   // 2 台目は自動打ち（手番から 1s 後にカップに届く速さで）
   const p2 = await newPage("2");
@@ -254,7 +285,7 @@ try {
   check("下を向いているので視線と床の交点（gaze）が取れている", a1.gaze !== null && a2.gaze !== null, `${a1.gaze} / ${a2.gaze}`);
   check("最初の手番は参加順の 1 人目（1 台目のスマホ）", (a1.phase === "aim" && a1.turn === a1.me) || (a1.phase === "rolling" && a1.roll.includes(`:${a1.me}:`)), `${a1.phase} turn=${a1.turn} roll=${a1.roll}`);
   const phaseGuide = await ov.eval("document.querySelector('#phase')?.textContent");
-  check("俯瞰画面にラウンドの左右・角度・距離が出る", /一打勝負 1 \/ 3.*左.*°.*m/.test(phaseGuide ?? ""), phaseGuide ?? "-");
+  check("俯瞰画面に正面の距離と平坦コースの説明が出る", /一打勝負 1 \/ 3.*正面.*m.*平坦/.test(phaseGuide ?? ""), phaseGuide ?? "-");
 
   // ---- p1 の番: フェイク Joy-Con（手番の人に自動）が振る → stroke → カップイン ----
   const tSwing = Date.now();
@@ -273,7 +304,7 @@ try {
   check("サーバーが俯瞰画面からの代理 stroke（1 台目のスマホの分）を受理して転がりを計算した", serverLines.some((l) => new RegExp(`\\] ${sOv.me} stroke\\(${s1.me}\\) #\\d+:`).test(l)), `${sOv.me} for ${s1.me}`);
   check("1 台目のスマホのボールがカップイン（1 打）", (s1.balls[s1.me]?.holed && s1.balls[s1.me].strokes === 1) || s1.cards[s1.me] === "1", JSON.stringify(s1.balls));
   check("スマホ側でも同じ転がりを描き、HOLED の roll を受け取った", p1.logs.some((l) => /\[game\] event stroke/.test(l)) && !p1.logs.some((l) => /roll end mismatch/.test(l)));
-  check("振り角（putter）が俯瞰画面からスマホに届き、HUD の putter= に出た", putterSeen, `putter=${s1.putter}`);
+  check("振り角（putter）が俯瞰画面からスマホに届き、HUD の putter= に出た", putterSeen || await p1.eval("window.__golfPutterSeen === true"), `putter=${s1.putter}`);
 
   // ---- p2 の番: 自動打ち（fakeStroke）でカップイン → 全員終了 → マスターが次へ ----
   const tHole = Date.now();
@@ -305,6 +336,8 @@ try {
   h2 = await readHud(p2);
   hOv = await readOverview();
   check("マスター操作で次ラウンドへ進む", h1.hole === 2 && h2.hole === 2 && hOv.hole === 2, `${h1.hole}/${h2.hole}/${hOv.hole}`);
+  const slopeGuide = await ov.eval("document.querySelector('#phase')?.textContent");
+  check("第2ラウンドに正面のカップと左へ流れる勾配の案内が出る", /正面.*左へ流れる勾配/.test(slopeGuide ?? ""), slopeGuide ?? "-");
   check("第1ラウンドの順位点を保持し、新ラウンドでは打数が0に戻る", h1.cards[h1.me] !== "-" && h1.cards[h2.me] !== "-" && h1.balls[h1.me]?.strokes === 0 && h1.turn === h1.me, JSON.stringify(h1.balls));
 
   // ---- 俯瞰画面の「構え」（Joy-Con の A 相当）: window.__fakeJoycon で A を押す → address が受理され狙いが固定される ----
@@ -322,6 +355,32 @@ try {
   const aimed = await readHud(p1);
   check("フェイク Joy-Con の A で俯瞰画面が手番の人の代わりに構え（address）、サーバーがその人の視線から狙いを決めた", pressed === true && okAfter > okBefore && (await readOverview()).addresses > addressesBefore, `ok ${okBefore}→${okAfter} rejected=${serverLines.filter((l) => addrRej.test(l)).length - rejBefore}`);
   check("構えた狙いは視線の交点（gaze）の向き（HUD の gaze が取れている）", aimed.gaze !== null, `gaze=${aimed.gaze}`);
+
+  // ---- 地形コースの表示・軌道再現・総合結果まで ----
+  await capture(ov, "slope-overview");
+  for (const round of [2, 3]) {
+    const deadline = Date.now() + 25000;
+    let state = await readHud(p1);
+    while (Date.now() < deadline && !(state.hole === round && state.phase === "roundResult")) {
+      await sleep(250);
+      state = await readHud(p1);
+    }
+    check("地形コースでも両者の一打が終わると結果を保持", state.hole === round && state.phase === "roundResult", `round=${round} phase=${state.phase}`);
+    if (state.phase !== "roundResult") throw new Error("地形コースの結果待ちがタイムアウト");
+    const buttonLabel = await ov.eval("document.querySelector('#advance-round')?.textContent");
+    check("最終ラウンドだけ進行ボタンが総合結果へになる", buttonLabel === (round === 3 ? "総合結果へ" : "次のラウンドへ"), buttonLabel);
+    await ov.eval("document.querySelector('#advance-round').click()");
+    await sleep(400);
+    if (round === 2) {
+      const obstacleGuide = await ov.eval("document.querySelector('#phase')?.textContent");
+      check("第3ラウンドに正面の障害物コースの案内が出る", /一打勝負 3.*正面.*障害物/.test(obstacleGuide ?? ""), obstacleGuide ?? "-");
+      await capture(ov, "obstacle-overview");
+      await capture(p1, "obstacle-player");
+    }
+  }
+  check("地形を含む全ラウンドでクライアントの終点とサーバーの終点が一致", [p1, p2, ov].every(p => !p.logs.some(l => /roll end mismatch/.test(l))));
+  await sleep(1500);
+  check("最終操作後は総合結果を保持する", (await readHud(p1)).phase === "result" && (await readOverview()).phase === "result");
 
   // ---- 最初から ----
   await ov.eval("document.querySelector('#restart').click()");

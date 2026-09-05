@@ -270,7 +270,7 @@ function onState(state: GameSnapshot) {
   const roll = state.roll;
   if (roll && roll.seq !== liveRoll?.seq) {
     const cup = state.holes[state.hole]?.cup ?? [0, 0];
-    liveRoll = { seq: roll.seq, by: roll.by, result: simulateRoll(roll.from, roll.vel, cup, cfg), startLocalMs: localTimeOf(roll.startedAt, state.t, now) };
+    liveRoll = { seq: roll.seq, by: roll.by, result: simulateRoll(roll.from, roll.vel, cup, cfg, state.holes[state.hole]), startLocalMs: localTimeOf(roll.startedAt, state.t, now) };
   }
   if (!roll) liveRoll = null;
   renderPanel();
@@ -515,8 +515,8 @@ function updateCourse(now: number) {
       }
       return { id: p.id, pos, color: playerColorHex(p.color), holed: b.holed, sunk };
     });
-  course.setBalls(balls, now);
   course.setHole(s.holes[s.hole] ?? null, s.hole);
+  course.setBalls(balls, now);
   const turnId = s.phase === "aim" ? s.turn : null;
   if (turnId && s.balls[turnId]) {
     const ball = s.balls[turnId];

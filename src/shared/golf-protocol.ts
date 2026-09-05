@@ -14,7 +14,7 @@ import type { MarkerPlacement } from "./marker-layout.ts";
 export const GOLF_PATH = "/api/golf";
 
 /** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否） */
-export const GOLF_PROTOCOL_VERSION = 2;
+export const GOLF_PROTOCOL_VERSION = 3;
 
 export const NAME_MAX_LENGTH = 12;
 

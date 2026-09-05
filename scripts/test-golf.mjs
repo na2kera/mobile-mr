@@ -13,6 +13,8 @@ import {
   DEFAULT_GOLF,
   STEP_SEC,
   makeHoles,
+  greenHeight,
+  intersectGreen,
   rollAt,
   rollDistance,
   rotate2,
@@ -89,10 +91,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ホールの配置
   const holes = makeHoles({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }, 3);
   check("3 ホール: ティーは奥（z 大）、カップは壁側（z 小）、コートの中", holes.length === 3 && holes.every((h) => h.tee[1] > h.cup[1] && h.cup[1] > 0 && h.tee[1] < 2.5 && Math.abs(h.tee[0]) < 1.5 && Math.abs(h.cup[0]) < 1.5), JSON.stringify(holes));
-  check("同じティーから左・右・左へ角度と距離を変える", holes.every(h => JSON.stringify(h.tee) === JSON.stringify(holes[0].tee)) && holes[0].cup[0] < 0 && holes[1].cup[0] > 0 && holes[2].cup[0] < 0 && holes[0].cup[1] < holes[1].cup[1] && holes[1].cup[1] < holes[2].cup[1]);
+  check("正面の遠いカップへ、平坦・横勾配・障害物の順で進む", holes.every(h => h.tee[0] === 0 && h.cup[0] === 0 && h.tee[1] - h.cup[1] > cfg.floorDepth * 0.65) && holes[0].slope[0] === 0 && holes[0].obstacles.length === 0 && holes[1].slope[0] > 0 && holes[1].obstacles.length === 0 && holes[2].slope[0] === 0 && holes[2].obstacles.length === 1);
   for (const size of [{ ...DEFAULT_GOLF }, { ...DEFAULT_GOLF, wallW: 0.4, floorDepth: 0.5 }, { ...DEFAULT_GOLF, wallW: 1, floorDepth: 8 }]) {
     const all = makeHoles(size, 9);
-    check("9 配置すべて斜め・異なる配置・カップがコート内", new Set(all.map(h => JSON.stringify(h))).size === 9 && all.every(h => Math.abs(h.cup[0]) > 0 && Math.abs(h.cup[0]) + CUP_R < size.wallW / 2 && h.cup[1] > CUP_R && h.cup[1] < h.tee[1]), `${size.wallW}x${size.floorDepth}`);
+    check("9 配置すべて正面・異なる地形・カップと障害物がコート内", new Set(all.map(h => JSON.stringify(h))).size === 9 && all.every(h => h.cup[0] === 0 && h.cup[1] > CUP_R && h.cup[1] < h.tee[1] && h.obstacles.every(o => o.radius + 2 * BALL_R < size.wallW / 2 && o.center[1] - o.radius > h.cup[1] + CUP_R && o.center[1] + o.radius < h.tee[1] - BALL_R)), `${size.wallW}x${size.floorDepth}`);
   }
   check("5 ホールは繰り返し", makeHoles({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }, 5).length === 5);
   check("小さいコートでも配置がコートの中", (() => { const h = makeHoles({ wallW: 0.4, wallH: 1, floorDepth: 0.5, floorDrop: 1 }, 3); return h.every((x) => Math.abs(x.tee[0]) < 0.2 && x.tee[1] < 0.5 && x.cup[1] > 0); })());
@@ -103,6 +105,50 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("rotate2: 0° は恒等", near(rotate2([0.6, -0.8], 0)[0], 0.6));
 
   check("validateGolfRules: 範囲外と非整数を弾く", validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, holes: 3 }) === null && validateGolfRules({ decel: 0, cupMaxSpeed: 1.4, holes: 3 }) !== null && validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, holes: 2.5 }) !== null);
+}
+
+// 地形: 勾配を読んだ狙い・障害物の回避が実際に攻略として成立すること
+{
+  const cfg = { ...DEFAULT_GOLF };
+  const [flat, slope, blocked] = makeHoles(cfg, 3);
+  const speed = speedForDistance(flat.tee[1] - flat.cup[1], cfg.decel) + 0.2;
+  const shoot = (hole, angle, v = speed, config = cfg) => {
+    const dir = rotate2([0, -1], angle);
+    return simulateRoll(hole.tee, dir.map(x => Math.round(x * v * 1000) / 1000), hole.cup, config, hole);
+  };
+  check("平坦コースでは正面への適切な強さで入る", shoot(flat, 0).holed);
+  const drift = shoot(slope, 0);
+  check("横勾配では同じ正面ショットが左へ曲がって外れる", !drift.holed && drift.end[0] < -0.15 && !drift.truncated);
+  check("横勾配でも右4度に狙うとカップインできる", shoot(slope, -4).holed);
+  const mirror = shoot({ ...slope, slope: [-slope.slope[0], 0] }, 0);
+  check("反対向きの勾配では右へ同じだけ曲がる", near(mirror.end[0], -drift.end[0]) && near(mirror.end[1], drift.end[1]));
+  const stopped = simulateRoll(drift.end, [0, 0], slope.cup, cfg, slope);
+  check("止まった球は勾配上でも滑り続けない", stopped.duration === 0 && JSON.stringify(stopped.end) === JSON.stringify(drift.end));
+  check("最小摩擦でも最大勾配上で通常ショットが停止する", !shoot({ ...slope, slope: [0.025, 0] }, 0, 1, { ...cfg, decel: 0.3 }).truncated);
+  const bump = shoot(blocked, 0);
+  const obstacle = blocked.obstacles[0];
+  check("正面の障害物がボールを手前へ跳ね返す", !bump.holed && bump.bounces === 1 && bump.end[1] > obstacle.center[1] + obstacle.radius + BALL_R);
+  for (const v of [0.15, 2, cfg.maxStrokeSpeed]) {
+    for (const angle of [0, -16, 16, -45, 45]) {
+      const r = shoot(blocked, angle, v);
+      check("高速・斜めの衝突でも障害物へ侵入せずコート内に収まる", r.samples.every(p => Math.hypot(p[0] - obstacle.center[0], p[1] - obstacle.center[1]) >= obstacle.radius + BALL_R - 1e-8 && Math.abs(p[0]) <= cfg.wallW / 2 - BALL_R + 1e-8 && p[1] >= BALL_R - 1e-8 && p[1] <= cfg.floorDepth - BALL_R + 1e-8), `${v}m/s ${angle}deg`);
+    }
+  }
+  const bank = shoot(blocked, -57, 3.5);
+  check("障害物コースも右へ狙い壁反射でカップインできる", bank.holed && bank.bounces >= 1);
+  check("障害物の左側にも同じ攻略ルートがある", shoot(blocked, 57, 3.5).holed);
+  check("勾配と障害物を含む軌道はJSONで配信した地形から同じ結果に復元できる", [slope, blocked].every(h => JSON.stringify(shoot(h, -12)) === JSON.stringify(shoot(JSON.parse(JSON.stringify(h)), -12))));
+  const target = [0.8, 1];
+  const origin = [0, 0, 2.4];
+  const direction = [target[0], -cfg.floorDrop + greenHeight(target, slope), target[1] - origin[2]];
+  const hit = intersectGreen(origin, direction, cfg, slope);
+  check("視線が実際に描かれた勾配の高さで交差する", hit && near(hit[0], target[0]) && near(hit[1], target[1]));
+  check("視線が上向き・範囲外・地面の裏からの場合は狙いを作らない", intersectGreen(origin, [0, 1, 0], cfg, slope) === null && intersectGreen(origin, [10, -1, 0], cfg, slope) === null && intersectGreen([0, -cfg.floorDrop - 1, 1], [0, -1, 0], cfg, slope) === null);
+  const g = new GolfGame();
+  const snapshot = g.snapshot(0);
+  snapshot.holes[1].slope[0] = 10;
+  snapshot.holes[2].obstacles[0].center[0] = 10;
+  check("配信用地形を変更してもサーバーの勾配と障害物を変えない", g.holes[1].slope[0] === 0.02 && g.holes[2].obstacles[0].center[0] === 0);
 }
 
 // ================= 2. joycon-report =================
@@ -322,7 +368,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("視線が無い構えは拒否", g.address("p1", undefined) === false && /gaze/.test(g.lastRejectReason));
   g.updateGaze("p1", [0.5, 0.2]);
   check("視線の交点から構えられる（狙い = ボール → 交点）", g.address("p1", undefined) === true && g.aims.get("p1")[0] > 0 && g.aims.get("p1")[1] < 0);
-  check("構えが無ければ正面（斜めのカップへ自動照準しない）", (() => { g.clearAim("p1"); return JSON.stringify(g.aimOf("p1")) === "[0,-1]" && g.holes[0].cup[0] !== 0; })());
+  check("構えが無ければ正面（勾配や障害物の自動補正はしない）", (() => { g.clearAim("p1"); return JSON.stringify(g.aimOf("p1")) === "[0,-1]" && g.holes[0].cup[0] === 0; })());
   check("手番でなくても自分の構えはできる", g.address("p2", [0, 0]) === true);
   // 1 打（弱い）: 転がり → rolling → settle 後に p2 の手番
   const e1 = g.stroke("p1", 0.5, 0, now);
@@ -365,8 +411,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const b2 = g.balls.get("p2");
   const d2 = Math.hypot(g.holes[1].cup[0] - b2.pos[0], g.holes[1].cup[1] - b2.pos[1]);
   g.address("p2", g.holes[1].cup);
-  g.stroke("p2", speedForDistance(d2, g.config.decel) + 0.2, 0, now);
-  check("p2 の 2 ホール目カップイン", g.balls.get("p2").holed);
+  g.stroke("p2", speedForDistance(d2, g.config.decel) + 0.2, -4, now);
+  check("p2 は横勾配を見越して右4度を狙うとカップイン", g.balls.get("p2").holed);
   now += g.roll.duration * 1000 + 200;
   const e8 = g.tick(now);
   check("次は途中参加の p3", e8[0]?.playerId === "p3");
@@ -557,6 +603,9 @@ try {
   const old = connect({ ...cfg, v: "1" });
   check("旧ゴルフv1は入室拒否（一打ルール・得点の誤表示を防止）", (await old.waitFor(m => m.type === "error")) !== null);
   old.ws.close();
+  const oldTerrain = connect({ ...cfg, v: "2" });
+  check("地形を描けない旧v2は入室拒否", (await oldTerrain.waitFor(m => m.type === "error")) !== null);
+  oldTerrain.ws.close();
 
   // スマホから: 視線付き pose → 構え → 1 打
   b.send({ type: "stroke", speed: 1, faceDeg: 0 });
@@ -621,7 +670,25 @@ try {
   check("プレイヤーからの進行は拒否", (await a.waitFor(m => m.type === "rejected" && /not overview/.test(m.reason))) !== null);
   ov.send({ type: "advanceRound" });
   const nextRound = await a.waitFor(m => m.type === "state" && m.state.event?.kind === "hole" && m.state.hole === 1);
-  check("俯瞰画面の進行で次の斜め配置、全員未打・点数を保持", nextRound && nextRound.state.holes[1].cup[0] > 0 && nextRound.state.balls.p1.strokes === 0 && nextRound.state.balls.p1.distanceMm === null && nextRound.state.cards.p2[0] === 2);
+  check("俯瞰画面の進行で正面の横勾配コース、全員未打・点数を保持", nextRound && nextRound.state.holes[1].cup[0] === 0 && nextRound.state.holes[1].slope[0] > 0 && nextRound.state.balls.p1.strokes === 0 && nextRound.state.balls.p1.distanceMm === null && nextRound.state.cards.p2[0] === 2);
+  for (const holeIndex of [1, 2]) {
+    for (const id of ["p1", "p2"]) {
+      const speed = holeIndex === 2 && id === "p2" ? 3.5 : 1.932;
+      const faceDeg = id === "p1" ? 0 : holeIndex === 1 ? -4 : -57;
+      ov.send({ type: "stroke", playerId: id, speed, faceDeg });
+      const message = await a.waitFor(m => m.type === "state" && m.state.hole === holeIndex && m.state.event?.kind === "stroke" && m.state.event.by === id);
+      if (!message) throw new Error(`地形ラウンド ${holeIndex + 1} の ${id} のショットが届かない`);
+      const s = message.state, r = s.roll, h = s.holes[s.hole];
+      const replay = simulateRoll(r.from, r.vel, h.cup, wa.config, h);
+      check("配信された地形と初速だけでサーバーの軌道・判定を再現できる", JSON.stringify(replay.end) === JSON.stringify(r.end) && replay.holed === r.holed && replay.duration === r.duration && replay.bounces === r.bounces, `round=${holeIndex + 1} player=${id}`);
+      check("地形を見越して狙ったp2だけがカップイン", r.holed === (id === "p2"), `round=${holeIndex + 1} player=${id}`);
+      const settled = await a.waitFor(m => m.type === "state" && m.state.hole === holeIndex && (id === "p1" ? m.state.phase === "aim" && m.state.turn === "p2" : m.state.phase === "roundResult"), 10000);
+      if (!settled) throw new Error("転がりが完了しない");
+    }
+    ov.send({ type: "advanceRound" });
+    const advanced = await a.waitFor(m => m.type === "state" && (holeIndex === 1 ? m.state.hole === 2 : m.state.phase === "result"));
+    check("地形ラウンドもマスター操作でのみ次へ進む", advanced !== null, `round=${holeIndex + 1}`);
+  }
   ov.send({ type: "rules", decel: 1, cupMaxSpeed: 1.2, holes: 2 });
   const cfgMsg = await a.waitFor((m) => m.type === "config");
   check("ルール変更で config + state（最初から。ホール 2 つ）が全員に届く", cfgMsg && cfgMsg.config.decel === 1 && cfgMsg.config.holes === 2 && cfgMsg.state.holes.length === 2 && cfgMsg.state.event?.kind === "rules" && cfgMsg.state.balls.p1.strokes === 0);

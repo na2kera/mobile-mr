@@ -2,7 +2,7 @@
 // スマホ（main.ts）と俯瞰画面（overview.ts）で同じ見た目にするために分けた。group を field（マーカー座標系）の子にして使う。
 // 座標は golf-sim.ts の field 座標系（床 = Y=-floorDrop、床の 2 次元 [x, z]）
 import * as THREE from "three";
-import { BALL_R, CUP_R } from "../../src/shared/golf-sim";
+import { BALL_R, CUP_R, greenHeight } from "../../src/shared/golf-sim";
 import type { GolfConfig, HoleDef, V2 } from "../../src/shared/golf-sim";
 import { TextPanel } from "../../src/shared/text-panel";
 
@@ -23,6 +23,9 @@ const tmpDir = new THREE.Vector3();
 
 export class CourseView {
   readonly group = new THREE.Group();
+  private readonly terrain = new THREE.Group();
+  private readonly terrainDetails = new THREE.Group();
+  private hole: HoleDef | null = null;
   private readonly green: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
   private readonly cushions: THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial>;
   private readonly cushionFill: THREE.Mesh[] = [];
@@ -46,26 +49,29 @@ export class CourseView {
 
   constructor(opts: CourseViewOptions) {
     this.opts = opts;
+    this.terrain.matrixAutoUpdate = false;
+    this.group.add(this.terrain);
+    this.terrain.add(this.terrainDetails);
     this.ballGeometry = new THREE.SphereGeometry(BALL_R, opts.ballDetail, Math.round(opts.ballDetail * 0.75));
     // グリーン（床の矩形。半透明の緑）
     this.green = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ color: 0x2e8b57, transparent: true, opacity: 0.45, side: THREE.DoubleSide, roughness: 0.9 }));
     this.green.rotation.x = -Math.PI / 2;
-    this.group.add(this.green);
+    this.terrain.add(this.green);
     // クッション（四方の低い壁）: 半透明の面 + 縁の線
     for (let i = 0; i < 4; i++) {
       const m = new THREE.Mesh(new THREE.PlaneGeometry(1, CUSHION_H), new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.25, side: THREE.DoubleSide }));
       this.cushionFill.push(m);
-      this.group.add(m);
+      this.terrain.add(m);
     }
     this.cushions = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, CUSHION_H, 1)), new THREE.LineBasicMaterial({ color: 0x8ab4f8 }));
-    this.group.add(this.cushions);
+    this.terrain.add(this.cushions);
     // カップ（黒い円 + 白い縁）と旗
     this.cup = new THREE.Mesh(new THREE.CircleGeometry(CUP_R, 32), new THREE.MeshBasicMaterial({ color: 0x101214 }));
     this.cup.rotation.x = -Math.PI / 2;
-    this.group.add(this.cup);
+    this.terrain.add(this.cup);
     this.cupRim = new THREE.Mesh(new THREE.RingGeometry(CUP_R, CUP_R + 0.012, 32), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }));
     this.cupRim.rotation.x = -Math.PI / 2;
-    this.group.add(this.cupRim);
+    this.terrain.add(this.cupRim);
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1.0, 8), new THREE.MeshStandardMaterial({ color: 0xe8eaed }));
     pole.position.y = 0.5;
     this.flag.add(pole);
@@ -79,14 +85,14 @@ export class CourseView {
     // ティー（白い輪）
     this.tee = new THREE.Mesh(new THREE.RingGeometry(0.04, 0.05, 24), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.7 }));
     this.tee.rotation.x = -Math.PI / 2;
-    this.group.add(this.tee);
+    this.terrain.add(this.tee);
     // 狙い線（破線）と先端の三角。線は「原点 → +X に AIM_LEN」の固定 geometry を置いて回す（毎フレーム geometry を作らない）
     const aimGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(AIM_LEN, 0, 0)]);
     this.aim = new THREE.Line(aimGeometry, new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.05, gapSize: 0.03, transparent: true }));
     this.aim.computeLineDistances();
-    this.group.add(this.aim);
+    this.terrain.add(this.aim);
     this.aimHead = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.06, 12), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-    this.group.add(this.aimHead);
+    this.terrain.add(this.aimHead);
     // 振り子パター: 支点をボールの真上（armM）に置き、シャフトが -Y、ヘッドがその先
     this.putterShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, opts.armM, 8), new THREE.MeshStandardMaterial({ color: 0xbdc1c6, metalness: 0.6, roughness: 0.4 }));
     this.putterShaft.position.y = -opts.armM / 2;
@@ -100,7 +106,7 @@ export class CourseView {
     this.gazeCursor = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.04, 20), new THREE.MeshBasicMaterial({ color: 0xfdd663, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }));
     this.gazeCursor.rotation.x = -Math.PI / 2;
     this.gazeCursor.visible = false;
-    this.group.add(this.gazeCursor);
+    this.terrain.add(this.gazeCursor);
   }
 
   /** 寸法からグリーンとクッションを作り直す */
@@ -134,18 +140,70 @@ export class CourseView {
   setHole(hole: HoleDef | null, index: number) {
     if (!this.cfg) return;
     const y = -this.cfg.floorDrop;
+    this.hole = hole;
     if (!hole) {
+      this.terrainDetails.visible = false;
+      this.terrain.matrix.identity();
+      this.terrain.matrixWorldNeedsUpdate = true;
+      this.holeIndex = -1;
       this.cup.visible = this.cupRim.visible = this.flag.visible = this.tee.visible = false;
       return;
     }
     this.cup.visible = this.cupRim.visible = this.flag.visible = this.tee.visible = true;
     this.cup.position.set(hole.cup[0], y + 0.003, hole.cup[1]);
     this.cupRim.position.set(hole.cup[0], y + 0.004, hole.cup[1]);
-    this.flag.position.set(hole.cup[0], y, hole.cup[1]);
+    this.flag.position.set(hole.cup[0], y + greenHeight(hole.cup, hole), hole.cup[1]);
     this.tee.position.set(hole.tee[0], y + 0.003, hole.tee[1]);
     if (index !== this.holeIndex) {
       this.holeIndex = index;
       this.flagLabel.set(`H${index + 1}`, "#e8eaed");
+      this.rebuildTerrain(hole);
+    }
+  }
+
+  private rebuildTerrain(hole: HoleDef) {
+    const cfg = this.cfg!;
+    const [sx, sz] = hole.slope;
+    // 高さだけを変える shear。X/Z のコート境界・球の軌道とマーカー位置を維持する。
+    this.terrain.matrix.set(1, 0, 0, 0, sx, 1, sz, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+    this.terrain.matrixWorldNeedsUpdate = true;
+    this.terrainDetails.traverse(obj => {
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
+        obj.geometry.dispose();
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        materials.forEach(m => m.dispose());
+      }
+    });
+    this.terrainDetails.clear();
+    this.terrainDetails.visible = true;
+    const y = -cfg.floorDrop;
+    // グリッドと下り方向の矢印。半透明の地面でも勾配を読めるようにする。
+    const points: THREE.Vector3[] = [];
+    for (let i = 1; i < 10; i++) {
+      const x = cfg.wallW * (i / 10 - 0.5), z = cfg.floorDepth * i / 10;
+      points.push(new THREE.Vector3(x, y + 0.007, 0), new THREE.Vector3(x, y + 0.007, cfg.floorDepth));
+      points.push(new THREE.Vector3(-cfg.wallW / 2, y + 0.007, z), new THREE.Vector3(cfg.wallW / 2, y + 0.007, z));
+    }
+    this.terrainDetails.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0xa8d5ae, transparent: true, opacity: 0.25 })));
+    if (sx !== 0) {
+      const arrowPoints: THREE.Vector3[] = [];
+      const direction = -Math.sign(sx), length = Math.min(0.23, cfg.wallW * 0.16);
+      for (const side of [-1, 1]) for (const depth of [0.25, 0.5, 0.75]) {
+        const x = side * cfg.wallW * 0.3, z = cfg.floorDepth * depth;
+        const tip = new THREE.Vector3(x + direction * length / 2, y + 0.012, z);
+        arrowPoints.push(new THREE.Vector3(x - direction * length / 2, y + 0.012, z), tip);
+        for (const dz of [-1, 1]) arrowPoints.push(tip, new THREE.Vector3(tip.x - direction * length * 0.3, y + 0.012, z + dz * length * 0.25));
+      }
+      this.terrainDetails.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(arrowPoints), new THREE.LineBasicMaterial({ color: 0xfdd663 })));
+    }
+    for (const obstacle of hole.obstacles) {
+      const block = new THREE.Mesh(new THREE.CylinderGeometry(obstacle.radius, obstacle.radius, obstacle.height, 48), new THREE.MeshStandardMaterial({ color: 0xe5a34b, roughness: 0.8 }));
+      block.position.set(obstacle.center[0], y + obstacle.height / 2, obstacle.center[1]);
+      this.terrainDetails.add(block);
+      const rim = new THREE.Mesh(new THREE.RingGeometry(obstacle.radius * 0.84, obstacle.radius, 48), new THREE.MeshBasicMaterial({ color: 0xffdf94, side: THREE.DoubleSide }));
+      rim.rotation.x = -Math.PI / 2;
+      rim.position.set(obstacle.center[0], y + obstacle.height + 0.001, obstacle.center[1]);
+      this.terrainDetails.add(rim);
     }
   }
 
@@ -161,14 +219,15 @@ export class CourseView {
         const mesh = new THREE.Mesh(this.ballGeometry, new THREE.MeshStandardMaterial({ color: s.color, roughness: 0.35 }));
         const shadow = new THREE.Mesh(this.shadowGeometry, new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 }));
         shadow.rotation.x = -Math.PI / 2;
-        this.group.add(mesh, shadow);
+        this.group.add(mesh);
+        this.terrain.add(shadow);
         b = { mesh, shadow };
         this.balls.set(s.id, b);
       }
       b.mesh.material.color.setHex(s.color);
       b.mesh.visible = !s.sunk;
       b.shadow.visible = !s.sunk;
-      b.mesh.position.set(s.pos[0], y + BALL_R, s.pos[1]);
+      b.mesh.position.set(s.pos[0], y + greenHeight(s.pos, this.hole) + BALL_R, s.pos[1]);
       b.shadow.position.set(s.pos[0], y + 0.005, s.pos[1]);
     }
     for (const [id, b] of this.balls) {
@@ -209,7 +268,7 @@ export class CourseView {
       this.putter.visible = false;
       return;
     }
-    const y = -this.cfg.floorDrop;
+    const y = -this.cfg.floorDrop + greenHeight(ball, this.hole);
     this.putter.visible = true;
     const back = 0.03;
     this.putter.position.set(ball[0] - dir[0] * back, y + this.opts.armM + 0.01, ball[1] - dir[1] * back);

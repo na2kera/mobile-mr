@@ -265,7 +265,7 @@ export class GolfGame {
     return true;
   }
 
-  /** いまの狙い（構えが無ければ正面。斜めのカップへは自分で狙いを合わせる） */
+  /** いまの狙い（構えが無ければ正面。勾配・障害物は自分で狙いを調整する） */
   aimOf(id: string): V2 {
     const custom = this.aims.get(id);
     if (custom) return custom;
@@ -306,7 +306,7 @@ export class GolfGame {
     const vel: V2 = [round3(dir[0] * speed), round3(dir[1] * speed)];
     const from: V2 = [ball.pos[0], ball.pos[1]];
     const cup = this.holes[this.hole].cup;
-    const result = simulateRoll(from, vel, cup, c);
+    const result = simulateRoll(from, vel, cup, c, this.holes[this.hole]);
     ball.pos = result.end;
     ball.strokes++;
     ball.holed = result.holed;
@@ -541,7 +541,10 @@ export class GolfGame {
       seq: this.seq,
       phase: this.phase,
       hole: this.hole,
-      holes: this.holes.map((h) => ({ cup: [h.cup[0], h.cup[1]], tee: [h.tee[0], h.tee[1]] })),
+      holes: this.holes.map((h) => ({
+        cup: [...h.cup] as V2, tee: [...h.tee] as V2, slope: [...h.slope] as V2,
+        obstacles: h.obstacles.map(o => ({ ...o, center: [...o.center] as V2 })),
+      })),
       players: this.order.map((id) => ({ ...this.players.get(id)! })),
       balls,
       aims,
