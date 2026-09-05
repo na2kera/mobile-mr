@@ -483,3 +483,10 @@
 - **どう対処したか**: DOM の生成と検証・同期だけを `src/shared/field-setup-panel.ts`（`createFieldSetupPanel`）に切り出し、送信と pending は呼ぶ側のコールバックにした。08 の overview.ts は過去のデモとして触らず複製のまま（06 → 05 のときと同じ方針）。変更時の文言（08「塗りが消える」/ 10「最初からになる」）はオプションで差し替える
 - **SDK ならどう解決するか（案）**: 段階4（フレームワーク化）の master 画面に「フィールドの寸法・マーカー配置の編集」を標準搭載する前提なので、この部品はそのまま master 側の既定 UI の材料になる。DOM の構造（id / class）を固定して CSS を流用したのは暫定で、SDK では部品が自前のスタイルを持つ
 - **関連**: `src/shared/field-setup-panel.ts`、`demos/10-golf/overview.ts`、`demos/08-splatoon/overview.ts`（複製元）、CONCEPT.md「段階4：フレームワーク化」
+
+## [2026-09-05] Phase 8 マルチマーカー / 08-splatoon 俯瞰画面: 「3D の枠を掴んで面の上を動かす」は、OrbitControls との pointerdown の取り合い・面ごとの拘束・下書きと配信済みの二重状態を全部自前で組むことになった
+
+- **何が苦しかったか**: issue #43「マーカーの位置をカーソルで動かせるように」は一見ただの UI 改善だが、(1) 同じ canvas を OrbitControls（空間の回転）も見ているので、枠に当たったときだけ OrbitControls に pointerdown を渡さない仕組みが要る（`controls.enabled = false` は始まったドラッグを止めない。親要素の capture で先に受けて `stopPropagation` する）(2) 枠は貼った面から浮かないので「その面の平面とレイの交点」で動かす必要があり、面ごとに動かせる 2 軸が違う（壁は横 + 上、床は X + Z。床の高さは寸法で決まる）(3) 枠は「サーバーが配った配置」ではなく「入力欄の未送信の下書き」を描かないとドラッグ中に追従せず、下書き / 配信済みの二重の状態と色分けが要る (4) 10cm の枠は俯瞰の距離では十数 px しかなく、見えない掴み領域を別に置かないと掴めない (5) ヘッドレスでの確認は合成 `PointerEvent` では `setPointerCapture` が効かないので CDP の実マウス（`Input.dispatchMouseEvent`、Shift は modifiers=8）が要る
+- **どう対処したか**: 純粋関数 `src/shared/marker-drag.ts`（面 → 動かせる 2 軸、レイと平面の交点、Shift の軸ロック、cm 丸め）を three 非依存で切り出して Node で検証し、`overview.ts` は「行 = 真実」のまま 3D の枠を行から描いて（サーバーと違えばオレンジ）、ドラッグは行の X/Y/Z を書き換えるだけにした（送信は今までどおり「反映」）。掴み領域は 30cm の見えない板。ヘッドレス確認は CDP の実マウスで「枠を掴むと行が変わり視点は動かない / Shift で水平固定 / 枠以外を掴むと視点が回る / 反映で全員に届き spread がずれのぶん増える」を取った
+- **SDK ならどう解決するか（案）**: CONCEPT.md 段階 4 の「master 画面にマーカー位置調整をデフォルト搭載」の具体形がこれ。`MarkerField` の配置を編集する 3D エディタ（面拘束のドラッグ・軸ロック・下書き / 配信済みの表示・掴み領域・視点操作との共存）はゲームに依らないので、フレームワークの master 画面に標準部品として持ち、利用者は配置の保存先（サーバーの状態）だけを差し込む。純粋関数（面 → 軸、レイと平面）はライブラリ側、DOM / three の結線は部品側に分ける
+- **関連**: `src/shared/marker-drag.ts`、`demos/08-splatoon/overview.ts` の `syncMarkerFrames` / `frameAt` / `appEl` の capture リスナー、`scripts/headless-splatoon.mjs` の「3D の枠のドラッグ」節、docs/CONCEPT.md「段階4」
