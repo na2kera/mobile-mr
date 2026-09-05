@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>10. MR Golf 俯瞰画面 — Mobile MR</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100dvh;
+        overflow: hidden;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #panel {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 5;
+        width: 320px;
+        max-height: calc(100dvh - 24px);
+        overflow-y: auto;
+        box-sizing: border-box;
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: rgba(20, 22, 26, 0.88);
+        border: 1px solid #3c4043;
+        font-size: 0.85rem;
+      }
+      #panel h1 {
+        font-size: 1rem;
+        margin: 0 0 6px;
+      }
+      #panel .sub {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        margin: 0 0 10px;
+      }
+      #phase {
+        font-size: 1.15rem;
+        font-weight: 700;
+        margin: 6px 0;
+      }
+      #turn {
+        color: #fdd663;
+        margin: 0 0 8px;
+      }
+      fieldset {
+        border: 1px solid #3c4043;
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin: 0 0 8px;
+      }
+      legend {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        padding: 0 4px;
+      }
+      .primary {
+        width: 100%;
+        font-size: 0.95rem;
+        font-weight: 700;
+        padding: 10px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        cursor: pointer;
+      }
+      .primary:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      .secondary {
+        width: 100%;
+        font-size: 0.85rem;
+        font-weight: 700;
+        padding: 8px;
+        margin: 6px 0 0;
+        border-radius: 999px;
+        border: 1px solid #f28b82;
+        background: transparent;
+        color: #f28b82;
+        cursor: pointer;
+      }
+      .secondary:disabled {
+        border-color: #3c4043;
+        color: #5f6368;
+        cursor: default;
+      }
+      /* Joy-Con の一覧: 1 行 = 1 台（名前 / 状態 / 割り当て / 振り） */
+      #joycon-rows .jc {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 4px 8px;
+        align-items: center;
+        padding: 6px 0;
+        border-top: 1px solid #3c4043;
+      }
+      #joycon-rows .jc .name {
+        font-weight: 600;
+      }
+      #joycon-rows .jc .meta {
+        grid-column: 1 / -1;
+        color: #9aa0a6;
+        font-size: 0.7rem;
+        white-space: pre-wrap;
+      }
+      #joycon-rows select {
+        padding: 4px 6px;
+        border-radius: 6px;
+        border: 1px solid #5f6368;
+        background: #14161a;
+        color: #e8eaed;
+        font-size: 0.8rem;
+      }
+      #joycon-hint {
+        color: #9aa0a6;
+        font-size: 0.7rem;
+        margin-top: 6px;
+        white-space: pre-wrap;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+        align-items: end;
+        margin-bottom: 6px;
+      }
+      .grid.three {
+        grid-template-columns: repeat(3, 1fr);
+      }
+      .grid.apply {
+        grid-template-columns: 1fr auto;
+      }
+      label.field {
+        display: grid;
+        gap: 2px;
+        font-size: 0.7rem;
+        color: #9aa0a6;
+      }
+      label.field input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px;
+        border-radius: 6px;
+        border: 1px solid #5f6368;
+        background: #14161a;
+        color: #e8eaed;
+        font-size: 0.9rem;
+      }
+      input:disabled {
+        color: #9aa0a6;
+      }
+      .apply-button {
+        padding: 7px 12px;
+        border-radius: 6px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .apply-button:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      .hint {
+        margin-top: 6px;
+        color: #9aa0a6;
+        font-size: 0.7rem;
+        min-height: 1em;
+      }
+      /* 追加マーカーの配置（08 と同じ構造。field-setup-panel.ts が行を作る） */
+      #markers .head,
+      #markers .row {
+        display: grid;
+        grid-template-columns: 18px 1fr 40px 46px 46px 46px;
+        gap: 4px;
+        align-items: center;
+        margin-bottom: 4px;
+      }
+      #markers .head {
+        font-size: 0.65rem;
+        color: #9aa0a6;
+      }
+      #markers input[type="number"],
+      #markers select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px 2px;
+        border-radius: 6px;
+        border: 1px solid #5f6368;
+        background: #14161a;
+        color: #e8eaed;
+        font-size: 0.8rem;
+      }
+      #markers .row.off input[type="number"],
+      #markers .row.off select {
+        opacity: 0.5;
+      }
+      #markers .foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      #markers .foot a {
+        font-size: 0.7rem;
+      }
+      #players {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 6px;
+      }
+      #players li {
+        display: grid;
+        grid-template-columns: 14px 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+      #players .swatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+      }
+      #players .score {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+      #players .marker {
+        font-size: 0.65rem;
+        color: #9aa0a6;
+        grid-column: 2 / -1;
+      }
+      #status {
+        margin-top: 10px;
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        white-space: pre-wrap;
+      }
+      #panel a {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #hud {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="panel">
+      <h1>10. MR Golf 俯瞰画面</h1>
+      <p class="sub">
+        コート全体・全員のボールと位置をリアルタイムに表示し、<strong>Joy-Con をパターとして読み取る</strong>PC 用の画面（Chrome。カメラ・マーカー不要）。
+        スマホと同じ room（既定 demo。?room=）に入ります。ドラッグで回転、ホイールで拡大。
+        役割は URL の ?role=overview の自己申告（LAN デモ前提）で、この画面から他人の代わりの 1 打・最初から・ルール変更を送れます。
+      </p>
+      <div id="phase">接続中…</div>
+      <div id="turn"></div>
+      <fieldset id="joycons">
+        <legend>Joy-Con（Bluetooth で Mac に繋いでから）</legend>
+        <button id="connect-joycon" type="button" class="primary">Joy-Con を接続</button>
+        <div id="joycon-rows"></div>
+        <div id="joycon-hint"></div>
+      </fieldset>
+      <ul id="players"></ul>
+      <button id="restart" type="button" class="secondary" disabled>最初から</button>
+      <fieldset id="rules" style="margin-top: 8px">
+        <legend>ルール（変えると最初から）</legend>
+        <div class="grid">
+          <label class="field">芝の減速 [m/s²]<input id="rule-decel" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <label class="field">入る速さの上限 [m/s]<input id="rule-cupMaxSpeed" type="number" step="0.1" inputmode="decimal" disabled /></label>
+        </div>
+        <div class="grid three">
+          <label class="field">打数の上限<input id="rule-maxStrokes" type="number" step="1" inputmode="numeric" disabled /></label>
+          <label class="field">ホール数<input id="rule-holes" type="number" step="1" inputmode="numeric" disabled /></label>
+          <button id="apply-rules" type="button" class="apply-button" disabled>反映</button>
+        </div>
+        <div id="rules-hint" class="hint"></div>
+      </fieldset>
+      <fieldset id="size">
+        <legend>コートの大きさ [m]（変えると最初から）</legend>
+        <div class="grid three">
+          <label class="field">幅<input id="size-wallW" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <label class="field">壁の高さ<input id="size-wallH" type="number" step="0.1" inputmode="decimal" disabled /></label>
+          <label class="field">奥行き<input id="size-floorDepth" type="number" step="0.1" inputmode="decimal" disabled /></label>
+        </div>
+        <div class="grid apply">
+          <label class="field">マーカーの高さ（床から中心まで。実測）<input id="size-floorDrop" type="number" step="0.05" inputmode="decimal" disabled /></label>
+          <button id="apply-size" type="button" class="apply-button" disabled>反映</button>
+        </div>
+        <div id="size-hint" class="hint"></div>
+      </fieldset>
+      <fieldset id="markers">
+        <legend>追加マーカーの配置 [m]（原点 = 正面のマーカー）</legend>
+        <div class="head"><span></span><span>面</span><span>ID</span><span>X 右+</span><span>Y 上+</span><span>Z 奥+</span></div>
+        <div id="marker-rows"></div>
+        <div class="foot">
+          <a href="../08-splatoon/markers.html" target="_blank">マーカーを印刷</a>
+          <button id="apply-markers" type="button" class="apply-button" disabled>反映</button>
+        </div>
+        <div id="markers-hint" class="hint"></div>
+      </fieldset>
+      <div id="status"></div>
+      <p><a href="./">← プレイヤー画面（スマホ用）</a> ／ <a href="/">デモ一覧</a></p>
+    </div>
+    <div id="hud"></div>
+    <script type="module" src="./overview.ts"></script>
+  </body>
+</html>
