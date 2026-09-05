@@ -4,6 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { DeviceOrientationControls } from "three-stdlib";
 import { numParam, params, resolutionParam } from "../../src/shared/url-params";
 import {
+  CAM_FOV_WIDE,
   createFakeCameraStream,
   drawCheckerboard,
   startPassthrough,
@@ -12,7 +13,12 @@ import type { Passthrough } from "../../src/shared/passthrough-camera";
 import { isTouchDevice, runStartFlow, setupFullscreen } from "../../src/shared/start-flow";
 import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
-import type { MarkerAnchor } from "../../src/shared/marker-anchor";
+import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
+import { markerBits } from "../../src/shared/marker-detector";
+import { FACE_LABELS, MARKER_FACES, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
+import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
+import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
+import type { FakeMarker } from "../../src/shared/fake-markers";
 import { createHandTracker } from "../../src/shared/hand-tracker";
 import type { HandTracker } from "../../src/shared/hand-tracker";
 import { HandView } from "../../src/shared/hand-view";
@@ -22,7 +28,6 @@ import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
 import type { HandResultLike, HandSlot } from "../../src/shared/hand-slots";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import markerSvgUrl from "../../src/shared/marker-0.svg";
 import {
   DEFAULT_FIELD,
   fieldSurfaces,
@@ -56,6 +61,9 @@ import { createSplatSound } from "./splat-sound";
 //     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 → 練習に戻る。
 //     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
 //     対戦中は視界の上に自分の塗り率と順位を大きく出す（issue #32「パーセント表示がもう少し大きく」）
+//   - マルチマーカー（issue #30）: 正面のマーカー（原点）に加えて床・左右・背面の壁に貼った追加マーカーの配置を
+//     俯瞰画面から配り、どれが見えてもアンカー（原点の姿勢）に直す（marker-anchor.ts の extraMarkers）。
+//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
 //   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
@@ -147,6 +155,15 @@ const FAKE_SHIFT = numParam("fakeShift", 0, { min: -200, max: 200 });
 const FAKE_SHIFT_Y = numParam("fakeShiftY", 0, { min: -240, max: 240 });
 const FAKE_MARKER_PX = numParam("fakeMarkerPx", 80, { min: 30, max: 400 });
 const FAKE_HANDS = params.has("fakehands");
+// フェイクカメラのマルチマーカー（fake-markers.ts）: 追加マーカーを field 座標系に置き、フェイクカメラの姿勢から投影する。
+// ?fakeMarkers=1:floor:0,-1.2,0.6;5:wall:0.25,0,0（ID:面:x,y,z）。カメラは ?fakeCamPos=x,y,z（未指定なら
+// fakeMarkerPx / fakeShift / fakeShiftY から「原点マーカーがその大きさ・位置に映る」正面の位置）+ ?fakeYaw=（+ で左）&fakePitch=（+ で下）。
+// ?fakeHideOrigin=1 で原点マーカーを描かない（追加マーカーだけで位置合わせできるかの確認）
+const FAKE_MARKERS = parseFakeMarkersParam(params.get("fakeMarkers"));
+const FAKE_CAM_POS = (params.get("fakeCamPos") ?? "").split(",").map(Number);
+const FAKE_YAW = numParam("fakeYaw", 0, { min: -180, max: 180 });
+const FAKE_PITCH = numParam("fakePitch", 0, { min: -90, max: 90 });
+const FAKE_HIDE_ORIGIN = params.get("fakeHideOrigin") === "1";
 /** 合成の手の パー → グー → 休み の時間 [s]（?fakeOpenSec=9 でタンクが空になるまで撃ち続ける） */
 const FAKE_TIMING = {
   openSec: numParam("fakeOpenSec", FAKE_OPEN_SEC, { min: 0, max: 60 }),
@@ -176,13 +193,55 @@ anchor.visible = false;
 scene.add(anchor);
 const field = anchor;
 
-const markerFrameMaterial = new THREE.MeshBasicMaterial({
-  color: 0x8ab4f8,
-  transparent: true,
-  opacity: 0.4,
-  side: THREE.DoubleSide,
-});
-anchor.add(new THREE.Mesh(new THREE.PlaneGeometry(MARKER_SIZE_M, MARKER_SIZE_M), markerFrameMaterial));
+// マーカーの枠（原点 + 追加マーカー。配置どおりの位置に描く。見えているものは青、それ以外は灰、ロスト中は赤）。
+// 追加マーカーを別のマーカー越しに見たとき、枠が実物のマーカーに重ならなければ「貼りズレ か 配置の入力ミス」と分かる
+type MarkerFrame = { id: number; mesh: THREE.Mesh; material: THREE.MeshBasicMaterial; label: TextPanel | null };
+const markerFrameGeometry = new THREE.PlaneGeometry(MARKER_SIZE_M, MARKER_SIZE_M);
+function createMarkerFrame(id: number, labelText: string | null): MarkerFrame {
+  const material = new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(markerFrameGeometry, material);
+  let label: TextPanel | null = null;
+  if (labelText !== null) {
+    label = new TextPanel(MARKER_SIZE_M * 1.6, MARKER_SIZE_M * 0.5, 256, 6);
+    label.mesh.position.set(0, MARKER_SIZE_M * 0.85, 0.005);
+    label.set(labelText, "#e8eaed");
+    mesh.add(label.mesh);
+  }
+  return { id, mesh, material, label };
+}
+const originFrame = createMarkerFrame(MARKER_ID, null);
+anchor.add(originFrame.mesh);
+/** 追加マーカーの枠（配置が変わるたび作り直す） */
+let extraFrames: MarkerFrame[] = [];
+/** 追加マーカー（marker-anchor.ts に渡す。配置が変わるたび差し替える） */
+let extraMarkers: ExtraMarker[] = [];
+let markerLayoutKey = "";
+
+/** サーバーの配置（config.markers）を取り込む。変わっていれば枠とアンカーの候補を作り直す */
+function applyMarkerLayout(markers: MarkerPlacement[]): boolean {
+  const key = JSON.stringify(markers);
+  if (key === markerLayoutKey) return false;
+  markerLayoutKey = key;
+  for (const f of extraFrames) {
+    f.mesh.removeFromParent();
+    f.material.dispose();
+    f.label?.mesh.material.map?.dispose();
+    f.label?.mesh.material.dispose();
+    f.label?.mesh.geometry.dispose();
+  }
+  extraFrames = [];
+  extraMarkers = [];
+  for (const m of markers) {
+    const toAnchor = new THREE.Matrix4().fromArray(markerToFieldMatrix(m));
+    extraMarkers.push({ id: m.id, toAnchor });
+    const frame = createMarkerFrame(m.id, `${FACE_LABELS[m.face]} ${m.id}`);
+    frame.mesh.matrixAutoUpdate = false;
+    frame.mesh.matrix.copy(toAnchor);
+    anchor.add(frame.mesh);
+    extraFrames.push(frame);
+  }
+  return true;
+}
 
 // ---- フィールド（壁 + 床）----
 // 寸法はサーバーが権威（welcome / field で届く）。届くまでは既定の寸法で枠だけ出しておく
@@ -214,11 +273,12 @@ function buildField() {
 }
 buildField();
 
-/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（塗りは直後の state の格子で描き直される） */
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（塗りは直後の state の格子で描き直される）。追加マーカーの配置も反映する */
 function applyFieldConfig(cfg: FieldConfig): boolean {
   const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
   fieldCfg = cfg;
   if (changed) buildField();
+  applyMarkerLayout(cfg.markers ?? []);
   return changed;
 }
 const message = new TextPanel(0.9, 0.24);
@@ -411,22 +471,44 @@ function resize() {
 resize();
 addEventListener("resize", resize);
 
-// ---- パススルー（PC デバッグ用フェイクカメラは 06-2 / 07 と同じ描き方） ----
-const markerImg = new Image();
-markerImg.src = markerSvgUrl;
+// ---- パススルー（PC デバッグ用フェイクカメラ） ----
+// 06-2 / 07 は「マーカー画像を画面の決まった位置に貼る」だけだったが、マルチマーカーは全マーカーを同じ視点で
+// 投影しないと位置合わせが検証できないので、field 座標系に置いたマーカーをピンホールで投影する（fake-markers.ts）。
+// 原点マーカーだけなら従来と同じ見え方（余白込みが fakeMarkerPx の大きさで、fakeShift / fakeShiftY の位置）になる
+const FAKE_CAM_W = 640;
+const FAKE_CAM_H = 480;
+/** フェイクカメラの焦点距離 [px]。検出側（marker-anchor.ts）と同じ換算（長辺 / 2 / tan(水平 FOV / 2)。FOV はラベル無し = 標準カメラ扱い） */
+const FAKE_FOCAL_PX = FAKE_CAM_W / 2 / Math.tan(THREE.MathUtils.degToRad(params.has("camFov") ? numParam("camFov", CAM_FOV_WIDE, { min: 10, max: 170 }) : CAM_FOV_WIDE) / 2);
+/** 描かないマーカーの ID（ヘッドレス確認から window.__fakeMarkers.hidden で切り替えて、ロスト → 別マーカーへの切り替えを見る） */
+const fakeHidden = new Set<number>(FAKE_HIDE_ORIGIN ? [MARKER_ID] : []);
+if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = { hidden: fakeHidden };
+function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
+  const markers: FakeMarker[] = [{ id: MARKER_ID, bits: markerBits(MARKER_ID), toField: markerToFieldMatrix({ id: MARKER_ID, face: "wall", pos: [0, 0, 0] }) }];
+  for (const m of FAKE_MARKERS) {
+    if (m.id === MARKER_ID || !(MARKER_FACES as readonly string[]).includes(m.face)) continue;
+    markers.push({ id: m.id, bits: markerBits(m.id), toField: markerToFieldMatrix({ id: m.id, face: m.face as MarkerFace, pos: m.pos }) });
+  }
+  let pos: [number, number, number];
+  if (FAKE_CAM_POS.length === 3 && FAKE_CAM_POS.every(Number.isFinite)) {
+    pos = [FAKE_CAM_POS[0], FAKE_CAM_POS[1], FAKE_CAM_POS[2]];
+  } else {
+    // 原点マーカーが fakeMarkerPx の大きさで、中央から (fakeShift, fakeShiftY) px ずれて映る正面の位置。
+    // 従来は余白込みの SVG（10 セル）を fakeMarkerPx で描いていたので黒い正方形は 0.8 倍。同じ見え方にするため 0.8 を掛ける
+    const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / (0.8 * FAKE_MARKER_PX);
+    pos = [(-FAKE_SHIFT * d) / FAKE_FOCAL_PX, (FAKE_SHIFT_Y * d) / FAKE_FOCAL_PX, d];
+  }
+  return { markers, camToField: fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH) };
+}
 function fakeStream(): MediaStream {
-  return createFakeCameraStream((ctx, canvas, frame) => {
-    drawCheckerboard(ctx, canvas, frame);
-    if (markerImg.complete && markerImg.naturalWidth > 0) {
-      ctx.drawImage(
-        markerImg,
-        (canvas.width - FAKE_MARKER_PX) / 2 + FAKE_SHIFT,
-        (canvas.height - FAKE_MARKER_PX) / 2 + FAKE_SHIFT_Y,
-        FAKE_MARKER_PX,
-        FAKE_MARKER_PX,
-      );
-    }
-  });
+  const world = fakeWorld();
+  return createFakeCameraStream(
+    (ctx, canvas, frame) => {
+      drawCheckerboard(ctx, canvas, frame);
+      const visible = world.markers.filter((m) => !fakeHidden.has(m.id));
+      drawProjectedMarkers(ctx, projectFakeMarkers(visible, world.camToField, FAKE_FOCAL_PX, canvas.width, canvas.height, MARKER_SIZE_M));
+    },
+    { width: FAKE_CAM_W, height: FAKE_CAM_H },
+  );
 }
 
 async function startCameraAndMarker(onProgress: (step: string) => void) {
@@ -449,6 +531,7 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     anchor,
     markerSizeM: MARKER_SIZE_M,
     markerId: MARKER_ID,
+    extraMarkers: () => extraMarkers,
     maxPoseError: MAX_POSE_ERROR,
     detW: MARKER_DET_W,
     smooth: MARKER_SMOOTH,
@@ -706,6 +789,13 @@ function connect(name: string) {
         onState(state);
         console.log(`[game] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop}`);
       },
+      onMarkers: (cfg) => {
+        // 追加マーカーの配置が変わった（issue #30）: アンカーの候補と枠を作り直す。塗りはそのまま
+        applyFieldConfig(cfg);
+        const names = cfg.markers.map((m) => `${FACE_LABELS[m.face]} ${m.id}`).join("・");
+        flash = { text: cfg.markers.length === 0 ? "追加マーカーが無くなりました\n正面のマーカーだけで位置合わせします" : `マーカーの配置が変わりました\n${names}`, untilMs: performance.now() + 3000 };
+        console.log(`[game] markers ${describeMarkers(cfg.markers)}`);
+      },
     },
   );
 }
@@ -719,6 +809,8 @@ const poseScale = new THREE.Vector3();
 let lastSendMs = -Infinity;
 /** 入室後に pose を送った回数。サーバーは pose が届く前の発射を拒否するので、最初の pose まで撃たない */
 let posesSent = 0;
+/** 直近に送った自分の位置（field 座標系。HUD の self= 用。実機でマーカーからどこに居ると推定されているかを見る） */
+let lastSelfPos: V3 | null = null;
 
 function sendPoseIfDue(now: number) {
   if (!client || !markerAnchor?.everDetected) return;
@@ -739,13 +831,17 @@ function sendPoseIfDue(now: number) {
     }
     hands.push(flat);
   }
+  const tracking = markerAnchor.isTracking(now, MARKER_LOST_MS);
   const pose: PlayerPose = {
     pos: [round3(posePos.x), round3(posePos.y), round3(posePos.z)],
     quat: [poseQuat.x, poseQuat.y, poseQuat.z, poseQuat.w],
-    tracking: markerAnchor.isTracking(now, MARKER_LOST_MS),
+    tracking,
   };
+  lastSelfPos = pose.pos;
   if (hands.length > 0) pose.hands = hands;
   if (isFist()) pose.fist = true;
+  // いまどのマーカーで位置合わせしているか（俯瞰画面の診断表示。ロスト中は付けない）
+  if (tracking && markerAnchor.usedIds.length > 0) pose.markerIds = [...markerAnchor.usedIds];
   if (client.sendPose(pose)) posesSent++;
 }
 
@@ -999,7 +1095,8 @@ function updateMessages(now: number) {
   } else if (!passthrough) {
     text = "カメラを起動中…";
   } else if (!markerAnchor?.everDetected) {
-    text = "壁のマーカーを見てください";
+    // 追加マーカーが配られていれば、どれを見ても位置合わせできる
+    text = (fieldCfg.markers ?? []).length > 0 ? "マーカーを見てください\n（正面の壁か、追加マーカーのどれか）" : "壁のマーカーを見てください";
     color = "#fdd663";
   } else if (trackerStatus.startsWith("error")) {
     text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";
@@ -1178,7 +1275,7 @@ function renderHud() {
     hudState.fsResult && `fs=${hudState.fsResult}`,
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
     hudState.wake && `wake=${hudState.wake}`,
-    `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (holding last pose)" : ""}`,
+    `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (holding last pose)" : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
@@ -1292,7 +1389,11 @@ renderer.setAnimationLoop(() => {
   markerAnchor?.update(now);
   if (markerAnchor?.everDetected && !anchor.visible) anchor.visible = true;
   const tracking = markerAnchor?.isTracking(now, MARKER_LOST_MS) ?? false;
-  markerFrameMaterial.color.setHex(tracking ? 0x8ab4f8 : 0xf28b82);
+  // 枠の色: 追跡中に使っているマーカーは青、使っていないマーカーは灰、ロスト中は全部赤
+  const usedIds = markerAnchor?.usedIds ?? [];
+  for (const f of [originFrame, ...extraFrames]) {
+    f.material.color.setHex(!tracking ? 0xf28b82 : usedIds.includes(f.id) ? 0x8ab4f8 : 0x9aa0a6);
+  }
   for (const v of inkViews.values()) v.setFrameColor(tracking ? 0x8ab4f8 : 0xf28b82);
   anchor.updateMatrixWorld(true);
   updateHands(now);

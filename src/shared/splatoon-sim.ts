@@ -12,6 +12,7 @@
 import type { V2, V3 } from "./surface.ts";
 import { insideSplat, splatExtent } from "./splat-shape.ts";
 import type { SplatShape } from "./splat-shape.ts";
+import type { MarkerPlacement } from "./marker-layout.ts";
 
 export type { V2, V3 };
 
@@ -61,6 +62,11 @@ export type FieldConfig = {
   waitSec: number;
   /** 格子の 1 セル [m] */
   cellM: number;
+  /**
+   * 追加マーカーの配置（issue #30。原点 = 正面のマーカーは含まない）。俯瞰画面の markers で変えて全員に配る。
+   * 塗りの格子には関係しない（位置合わせだけ）
+   */
+  markers: MarkerPlacement[];
 };
 
 export const DEFAULT_FIELD: FieldConfig = {
@@ -82,6 +88,7 @@ export const DEFAULT_FIELD: FieldConfig = {
   inkRegenDelaySec: 1,
   waitSec: 5,
   cellM: 0.02,
+  markers: [],
 };
 
 /**

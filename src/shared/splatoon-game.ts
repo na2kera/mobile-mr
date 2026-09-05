@@ -23,6 +23,8 @@ import {
   type V3,
 } from "./splatoon-sim.ts";
 import { impactDirUv, isWallSurface, splatShape } from "./splat-shape.ts";
+import { withFloorDrop } from "./marker-layout.ts";
+import type { MarkerPlacement } from "./marker-layout.ts";
 
 export type Phase = "practice" | "waiting" | "play" | "result";
 
@@ -141,13 +143,36 @@ export class SplatoonGame {
       this.lastRejectReason = `cannot resize during ${this.phase}`;
       return [];
     }
-    this.config = { ...this.config, wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop };
+    // 床のマーカーは床に置くものなので、マーカーの高さが変わったら床の高さに追従させる（marker-layout.ts）
+    this.config = {
+      ...this.config,
+      wallW: size.wallW,
+      wallH: size.wallH,
+      floorDepth: size.floorDepth,
+      floorDrop: size.floorDrop,
+      markers: withFloorDrop(this.config.markers, size.floorDrop),
+    };
     this.buildField();
     // 結果表示中なら練習に戻す（結果の格子は消えたので、勝者の表示だけ残っても意味がない）
     this.phase = "practice";
     this.phaseEndsAt = Infinity;
     this.resetField(now);
     return [{ kind: "field" }];
+  }
+
+  /**
+   * 俯瞰画面からの追加マーカーの配置の変更（issue #30）。寸法と同じく練習中か結果表示中だけ受け付ける
+   * （試合中にアンカーが動くと発射の向きがずれる）。格子には関係しないので塗りは消えない。
+   * 配置の検証（ID の重複・範囲・床の高さ）は呼ぶ側（サーバー）が validateMarkerLayout で行う
+   */
+  setMarkers(markers: MarkerPlacement[], now: number): boolean {
+    void now;
+    if (this.phase !== "practice" && this.phase !== "result") {
+      this.lastRejectReason = `cannot change markers during ${this.phase}`;
+      return false;
+    }
+    this.config = { ...this.config, markers: markers.map((m) => ({ id: m.id, face: m.face, pos: [m.pos[0], m.pos[1], m.pos[2]] })) };
+    return true;
   }
 
   get totalCells(): number {

@@ -41,6 +41,22 @@ import {
 } from "../src/shared/splat-shape.ts";
 import { centered, syntheticHandShape } from "../src/shared/fake-hands.ts";
 import { SPLATOON_PATH, SPLATOON_PROTOCOL_VERSION } from "../src/shared/splatoon-protocol.ts";
+import {
+  MAX_EXTRA_MARKERS,
+  MARKER_FACES,
+  describeMarkers,
+  fusePoseCandidates,
+  invertRigid,
+  markerAxes,
+  markerToFieldMatrix,
+  mulMat4,
+  suggestedMarkerPos,
+  transformPoint,
+  validateMarkerLayout,
+  withFloorDrop,
+} from "../src/shared/marker-layout.ts";
+import { fakeCameraToField, parseFakeMarkersParam, projectFakeMarker, projectFakeMarkers } from "../src/shared/fake-markers.ts";
+import { Matrix4, Quaternion, Vector3 } from "three";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -222,6 +238,103 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("順序が逆転すると格子が違う（そのままでは 1 が 2 を上書きしてしまう）", gClient.encode() !== gServer.encode() && naive !== gServer.encode());
   gClient.stampSplat([0.52, 0.5], s2, 2); // 後ろの seq を塗り直す
   check("後ろの seq を塗り直すとサーバーの格子と完全一致", gClient.encode() === gServer.encode());
+}
+
+// ================= 1d. マルチマーカーの配置（marker-layout.ts）と合成カメラの投影（fake-markers.ts）=================
+{
+  const cfg = { ...DEFAULT_FIELD, wallW: 2, wallH: 1, floorDrop: 1, floorDepth: 1.5 };
+  const surfaces = fieldSurfaces(cfg);
+  const nearV = (a, b) => a.every((v, i) => near(v, b[i]));
+  const crossV = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  // 面ごとの軸: 右手系で、コートの面（SurfaceFrame）と同じ向き（x = xAxis, y = -yAxis（上）, z = normal）
+  for (const face of MARKER_FACES) {
+    const ax = markerAxes(face);
+    const surface = surfaces.find((s) => s.id === face);
+    check(`markerAxes(${face}): 右手系（x = y × z）で SurfaceFrame の向きと一致`, nearV(ax.x, crossV(ax.y, ax.z)) && nearV(ax.x, surface.xAxis) && nearV(ax.y, surface.yAxis.map((v) => -v)) && nearV(ax.z, surface.normal), JSON.stringify(ax));
+  }
+  check("床のマーカーの「上」は正面の壁の向き（-Z）", nearV(markerAxes("floor").y, [0, 0, -1]));
+  // 4x4: 原点と軸
+  const floorM = markerToFieldMatrix({ id: 1, face: "floor", pos: [0.2, -1, 0.6] });
+  check("markerToFieldMatrix: マーカーの原点は pos、X 軸は右 (+X)", nearV(transformPoint(floorM, [0, 0, 0]), [0.2, -1, 0.6]) && nearV(transformPoint(floorM, [0.1, 0, 0]), [0.3, -1, 0.6]));
+  check("markerToFieldMatrix: 床マーカーの Y（上）は正面の壁へ（-Z）、Z（法線）は上（+Y）", nearV(transformPoint(floorM, [0, 0.1, 0]), [0.2, -1, 0.5]) && nearV(transformPoint(floorM, [0, 0, 0.1]), [0.2, -0.9, 0.6]));
+  const inv = invertRigid(floorM);
+  const ident = mulMat4(floorM, inv);
+  check("invertRigid: M × M⁻¹ = I", ident.every((v, i) => near(v, i % 5 === 0 ? 1 : 0)));
+  // アンカーの式（marker-anchor.ts）: 観測 obs = camera⁻¹ × M のとき anchor = camWorld × obs × M⁻¹ = camWorld × camera⁻¹、
+  // 送る pose = anchor⁻¹ × camWorld = camera（フェイクカメラの field 座標系での姿勢そのもの）
+  const camToField = fakeCameraToField([0.15, -0.5, 0.75], 10, 65);
+  const obs = mulMat4(invertRigid(camToField), floorM);
+  const camWorld = fakeCameraToField([0, 1.6, 0], 0, 0);
+  const anchor = mulMat4(camWorld, mulMat4(obs, invertRigid(floorM)));
+  const pose = mulMat4(invertRigid(anchor), camWorld);
+  check("invertRigid / mulMat4 の整合: アンカーの式（camWorld × obs × M⁻¹）で送る pose がフェイクカメラの field 姿勢に戻る", pose.every((v, i) => near(v, camToField[i], 1e-9)));
+  // three.js との整合（marker-anchor.ts は Matrix4 で同じ式を計算する）: 列優先の 16 要素を fromArray でそのまま読め、
+  // 点の変換・積・逆行列・decompose が純粋関数と一致する
+  const t3 = (m) => new Matrix4().fromArray(m);
+  const p3 = new Vector3(0.1, 0.2, 0.3).applyMatrix4(t3(floorM));
+  const pp = transformPoint(floorM, [0.1, 0.2, 0.3]);
+  check("three.js: Matrix4.fromArray（列優先）で読んだ行列の点の変換が transformPoint と一致", near(p3.x, pp[0]) && near(p3.y, pp[1]) && near(p3.z, pp[2]));
+  const anchor3 = t3(camWorld).multiply(t3(obs)).multiply(t3(floorM).clone().invert());
+  check("three.js: multiply / invert で計算したアンカーが mulMat4 / invertRigid と一致", anchor3.elements.every((v, i) => near(v, anchor[i], 1e-9)));
+  const dp = new Vector3();
+  const dq = new Quaternion();
+  const ds = new Vector3();
+  anchor3.decompose(dp, dq, ds);
+  const rebuilt = new Matrix4().compose(dp, dq, ds);
+  check("three.js: decompose → compose で元に戻る（回転が正規直交 = markerAxes が右手系の単位ベクトル）", rebuilt.elements.every((v, i) => near(v, anchor[i], 1e-9)) && near(ds.x, 1) && near(ds.y, 1) && near(ds.z, 1));
+  // 候補の合成
+  const one = fusePoseCandidates([{ pos: [1, 2, 3], quat: [0, 0, 0, 1], weight: 4 }]);
+  check("fusePoseCandidates: 1 つならそのまま、spread=0", one && nearV(one.pos, [1, 2, 3]) && nearV(one.quat, [0, 0, 0, 1]) && one.spread === 0);
+  const two = fusePoseCandidates([
+    { pos: [0, 0, 0], quat: [0, 0, 0, 1], weight: 1 },
+    { pos: [0.1, 0, 0], quat: [0, 0, 0, -1], weight: 3 },
+  ]);
+  check("fusePoseCandidates: 重み付き平均（3:1 で 0.075）、反対符号の四元数も同じ半球に揃える、spread=0.1", two && near(two.pos[0], 0.075) && nearV(two.quat, [0, 0, 0, 1]) && near(two.spread, 0.1));
+  const s = Math.SQRT1_2;
+  const rot = fusePoseCandidates([
+    { pos: [0, 0, 0], quat: [0, 0, 0, 1], weight: 1 },
+    { pos: [0, 0, 0], quat: [0, s, 0, s], weight: 1 },
+  ]);
+  check("fusePoseCandidates: 0° と 90°（Y）の等重み → 45°", rot && near(rot.quat[1], Math.sin(Math.PI / 8), 1e-9) && near(rot.quat[3], Math.cos(Math.PI / 8), 1e-9));
+  check("fusePoseCandidates: 空なら null、重み 0 だけでも null", fusePoseCandidates([]) === null && fusePoseCandidates([{ pos: [0, 0, 0], quat: [0, 0, 0, 1], weight: 0 }]) === null);
+  // 検証
+  const ok = [
+    { id: 1, face: "floor", pos: [0, -1, 0.75] },
+    { id: 2, face: "left", pos: [-1, 0, 0.75] },
+  ];
+  check("validateMarkerLayout: 正しい配置は null", validateMarkerLayout(ok, 0, 1) === null);
+  check("validateMarkerLayout: 空でも良い", validateMarkerLayout([], 0, 1) === null);
+  check("validateMarkerLayout: 原点と同じ ID は拒否", /原点/.test(validateMarkerLayout([{ id: 0, face: "left", pos: [0, 0, 0] }], 0, 1) ?? ""));
+  check("validateMarkerLayout: ID の重複は拒否", /重複/.test(validateMarkerLayout([ok[0], { ...ok[1], id: 1 }], 0, 1) ?? ""));
+  check("validateMarkerLayout: 知らない面は拒否", /face/.test(validateMarkerLayout([{ id: 1, face: "ceiling", pos: [0, 0, 0] }], 0, 1) ?? ""));
+  check("validateMarkerLayout: 範囲外の位置・数値でない位置は拒否", /位置/.test(validateMarkerLayout([{ id: 1, face: "left", pos: [99, 0, 0] }], 0, 1) ?? "") && /位置/.test(validateMarkerLayout([{ id: 1, face: "left", pos: ["0", 0, 0] }], 0, 1) ?? ""));
+  check("validateMarkerLayout: 床のマーカーは床の高さ（-floorDrop）でないと拒否", /床/.test(validateMarkerLayout([{ id: 1, face: "floor", pos: [0, -1.2, 0.5] }], 0, 1) ?? ""));
+  check("validateMarkerLayout: 辞書に無い ID・枚数の上限超えは拒否", /ID/.test(validateMarkerLayout([{ id: 250, face: "left", pos: [0, 0, 0] }], 0, 1) ?? "") && /枚まで/.test(validateMarkerLayout(Array.from({ length: MAX_EXTRA_MARKERS + 1 }, (_, i) => ({ id: i + 1, face: "left", pos: [0, 0, 0] })), 0, 1) ?? ""));
+  check("withFloorDrop: 床のマーカーだけ高さが追従する", JSON.stringify(withFloorDrop(ok, 0.8)) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -0.8, 0.75] }, ok[1]]));
+  check("suggestedMarkerPos: 床は床の高さ・コートの中央、左右は壁の位置、背面は奥", nearV(suggestedMarkerPos("floor", cfg), [0, -1, 0.75]) && nearV(suggestedMarkerPos("left", cfg), [-1, 0, 0.75]) && nearV(suggestedMarkerPos("right", cfg), [1, 0, 0.75]) && nearV(suggestedMarkerPos("back", cfg), [0, 0, 1.5]));
+  check("describeMarkers", describeMarkers(ok) === "1:floor,2:left" && describeMarkers([]) === "-");
+  // 合成カメラの投影: 正面の原点マーカーを距離 d から見ると、一辺 s·f/d [px] の正方形が中央に映る
+  const bits = Array.from({ length: 6 }, (_, y) => Array.from({ length: 6 }, (_, x) => (x + y) % 2 === 0));
+  const f = 320 / Math.tan((68 / 2) * (Math.PI / 180));
+  const d = (0.1 * f) / 80;
+  const origin = { id: 0, bits, toField: markerToFieldMatrix({ id: 0, face: "wall", pos: [0, 0, 0] }) };
+  const front = fakeCameraToField([0, 0, d], 0, 0);
+  const pj = projectFakeMarker(origin, invertRigid(front), f, 640, 480, 0.1);
+  check("projectFakeMarker: 正面から距離 d で一辺 80px・中央（fakeMarkerPx と同じ見え方）", pj && near(pj.sidePx, 80, 1e-6) && near(pj.black[0][0], 280, 1e-6) && near(pj.black[0][1], 200, 1e-6) && near(pj.black[2][0], 360, 1e-6) && near(pj.black[2][1], 280, 1e-6), JSON.stringify(pj?.black));
+  check("projectFakeMarker: 白いセルの数 = ビットの 1 の数、余白は黒枠の 10/8 倍", pj && pj.cells.length === 18 && near(Math.hypot(pj.quiet[1][0] - pj.quiet[0][0], pj.quiet[1][1] - pj.quiet[0][1]), 100, 1e-6));
+  const shifted = fakeCameraToField([(-40 * d) / f, (24 * d) / f, d], 0, 0);
+  const pjs = projectFakeMarker(origin, invertRigid(shifted), f, 640, 480, 0.1);
+  check("projectFakeMarker: fakeShift=40 / fakeShiftY=24 に相当するカメラ位置で、右に 40px・下に 24px ずれる", pjs && near(pjs.black[0][0], 320, 1e-6) && near(pjs.black[0][1], 224, 1e-6));
+  check("projectFakeMarker: カメラの後ろのマーカーは描かない", projectFakeMarker(origin, invertRigid(fakeCameraToField([0, 0, -1], 0, 0)), f, 640, 480, 0.1) === null);
+  // 床のマーカーを見下ろすカメラ: 画面内に映り、上下が正しい（マーカーの「上」= 正面の壁側 = 画面の上）
+  const floorMarker = { id: 1, bits, toField: floorM };
+  const down = fakeCameraToField([0.15, -0.5, 0.75], 0, 65);
+  const pjf = projectFakeMarker(floorMarker, invertRigid(down), f, 640, 480, 0.1);
+  check("projectFakeMarker: 見下ろした床のマーカーが画面内に映り、上辺（壁側）が画面の上に来る", pjf && pjf.black.every(([u, v]) => u >= 0 && u <= 640 && v >= 0 && v <= 480) && pjf.black[0][1] < pjf.black[3][1] && pjf.sidePx > 60, JSON.stringify(pjf?.black.map((c) => c.map(Math.round))));
+  const all = projectFakeMarkers([origin, floorMarker], down, f, 640, 480, 0.1);
+  check("projectFakeMarkers: 見下ろしていると原点は視野外で、床のマーカーだけ", all.length === 1 && all[0].id === 1);
+  check("fakeCameraToField: pitch 90 で真下、yaw 90 で左を向く", nearV(fakeCameraToField([0, 0, 0], 0, 90).slice(8, 11).map((v) => -v), [0, -1, 0]) && nearV(fakeCameraToField([0, 0, 0], 90, 0).slice(8, 11).map((v) => -v), [-1, 0, 0]));
+  check("parseFakeMarkersParam: 不正な要素（形・辞書の範囲外の ID）は捨てる", JSON.stringify(parseFakeMarkersParam("1:floor:0,-1.2,0.6;5:wall:0.25,0,0;bad;7:left:x,0,0;250:left:0,0,0;-1:left:0,0,0")) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -1.2, 0.6] }, { id: 5, face: "wall", pos: [0.25, 0, 0] }]) && parseFakeMarkersParam(null).length === 0);
 }
 
 // ================= 2. hand shape =================
@@ -475,6 +588,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("結果表示中の setFieldSize は受け付け、練習に戻る（勝者の表示も消える）", g.phase === "result" && g.setFieldSize(base, 11600)[0]?.kind === "field" && g.phase === "practice" && g.winners === null && g.totalCells === before);
 }
 
+// ================= 3f. 追加マーカーの配置（俯瞰画面から。練習中か結果表示中だけ。塗りは消えない）=================
+{
+  const g = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
+  g.join("p1", "A", 0);
+  g.updatePose("p1", [0, 0.1, 1], 10);
+  g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 20);
+  const scoreBefore = g.scores().p1;
+  check("既定の配置は空（原点のマーカーだけ）", Array.isArray(g.config.markers) && g.config.markers.length === 0 && DEFAULT_FIELD.markers.length === 0);
+  const layout = [{ id: 1, face: "floor", pos: [0, -1.2, 1.25] }, { id: 2, face: "left", pos: [-1.5, 0, 1.25] }];
+  check("練習中の setMarkers は受け付け、config.markers に入る（塗りは消えない・練習のまま）", g.setMarkers(layout, 100) === true && describeMarkers(g.config.markers) === "1:floor,2:left" && g.scores().p1 === scoreBefore && g.phase === "practice");
+  layout[0].pos[0] = 9;
+  check("setMarkers は配列をコピーする（呼び出し側の配列を書き換えても影響しない）", g.config.markers[0].pos[0] === 0);
+  g.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 200);
+  check("寸法の変更で床のマーカーは新しい床の高さに追従し、壁のマーカーはそのまま", g.config.markers[0].pos[1] === -1 && g.config.markers[1].pos[1] === 0 && g.config.markers.length === 2);
+  g.start(400);
+  check("カウントダウン中の setMarkers は拒否", g.setMarkers([], 500) === false && /waiting/.test(g.lastRejectReason) && g.config.markers.length === 2);
+  g.tick(1500);
+  check("試合中の setMarkers は拒否", g.phase === "play" && g.setMarkers([], 1600) === false && /play/.test(g.lastRejectReason));
+  g.tick(11500);
+  check("結果表示中の setMarkers は受け付け（結果表示のまま）", g.phase === "result" && g.setMarkers([], 11600) === true && g.config.markers.length === 0 && g.phase === "result");
+}
+
 // ================= 4. server =================
 const PORT = 5187;
 const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -579,6 +714,18 @@ try {
   ov.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 });
   const rejFieldPlay = await ov.waitFor((m) => m.type === "rejected" && /resize/.test(m.reason));
   check("試合中の field は俯瞰画面に rejected: cannot resize during play", rejFieldPlay && /play/.test(rejFieldPlay.reason));
+  ov.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1.2, 1.25] }] });
+  const rejMarkersPlay = await ov.waitFor((m) => m.type === "rejected" && /markers/.test(m.reason));
+  check("試合中の markers は俯瞰画面に rejected: cannot change markers during play", rejMarkersPlay && /play/.test(rejMarkersPlay.reason));
+  // pose の markerIds（いまどのマーカーで位置合わせしているか）は中継される。不正なら pose ごと捨てる
+  b.send({ type: "pose", pos: [0.3, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, markerIds: [0, 1] });
+  const poseIds = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.3);
+  check("pose の markerIds が中継される", poseIds && JSON.stringify(poseIds.markerIds) === "[0,1]");
+  b.send({ type: "pose", pos: [0.31, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, markerIds: ["0"] });
+  b.send({ type: "pose", pos: [0.32, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, markerIds: Array.from({ length: 10 }, (_, i) => i) });
+  b.send({ type: "pose", pos: [0.33, 0, 1.5], quat: [0, 0, 0, 1], tracking: true, markerIds: [] });
+  const poseEmptyIds = await a.waitFor((m) => m.type === "pose" && m.id === "p2" && m.pos[0] === 0.33);
+  check("markerIds が数値でない・多すぎる pose は捨てられ、空の markerIds は付けずに中継", poseEmptyIds && poseEmptyIds.markerIds === undefined && !a.msgs.some((m) => m.type === "pose" && (m.pos[0] === 0.31 || m.pos[0] === 0.32)));
   // 練習中の state を拾わないよう、試合開始後の state に限定する
   const st = await a.waitFor((m) => m.type === "state" && m.state.phase === "play" && m.state.t > playSt.state.t && (m.state.scores.p2 ?? 0) > 0, 2500);
   check("試合中の state に得点が反映される（p2 が塗った。練習の分は消えている）", st !== null && (st.state.scores.p1 ?? 0) === 0);
@@ -658,6 +805,45 @@ try {
     const late = connect({ ...cfg, room: "size" }, "Late");
     const wlate = await late.waitFor((m) => m.type === "welcome");
     check("あとから入った人の welcome は新しい寸法（マーカーの高さも）", wlate && wlate.config.wallW === 2 && wlate.config.floorDepth === 4 && wlate.config.floorDrop === 1 && wlate.state.totalCells === fPhone.state.totalCells);
+    // 追加マーカーの配置（issue #30）: 俯瞰画面だけが変えられ、検証の理由が rejected で返り、全員（あとから入る人も）に配られる
+    check("welcome の config.markers は既定で空", Array.isArray(wlate.config.markers) && wlate.config.markers.length === 0);
+    sz.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1, 2] }] });
+    const rejPhoneMarkers = await sz.waitFor((m) => m.type === "rejected" && /not overview/.test(m.reason) && m !== rejPhoneField);
+    check("スマホからの markers は rejected: not overview", rejPhoneMarkers !== null);
+    szOv.send({ type: "markers", markers: [{ id: 0, face: "left", pos: [-1, 0, 2] }] });
+    const rejOrigin = await szOv.waitFor((m) => m.type === "rejected" && /原点/.test(m.reason));
+    check("原点と同じ ID の markers は rejected（理由付き）", rejOrigin !== null);
+    szOv.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1.2, 2] }] });
+    const rejFloorY = await szOv.waitFor((m) => m.type === "rejected" && /床/.test(m.reason));
+    check("床のマーカーの高さが床（-floorDrop=-1）と違う markers は rejected", rejFloorY !== null);
+    szOv.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1, 2] }, { id: 1, face: "left", pos: [-1, 0, 2] }] });
+    const rejDup = await szOv.waitFor((m) => m.type === "rejected" && /重複/.test(m.reason));
+    check("ID が重複する markers は rejected", rejDup !== null);
+    szOv.send({ type: "markers", markers: [{ id: 1, face: "roof", pos: [0, 0, 2] }] });
+    szOv.send({ type: "markers", markers: "x" });
+    szOv.send({ type: "markers", markers: [{ id: 1, face: "left", pos: [0, 0] }] });
+    await sleep(150);
+    check("形が不正な markers（面が文字列でも配列でない・位置が 3 要素でない）は黙って捨てる / 知らない面は rejected", !szOv.msgs.some((m) => m.type === "markers") && szOv.msgs.some((m) => m.type === "rejected" && /face/.test(m.reason)));
+    // 寸法の変更で塗りは消えているので、塗り直してから配置を変える（配置の変更で塗りが残ることを見るため）
+    sz.send({ type: "pose", pos: [0, 0.1, 1], quat: [0, 0, 0, 1], tracking: true });
+    await sleep(50);
+    sz.send({ type: "shot", pos: [0, 0, 1], vel: [0, 0, -5], radius: 0.09 });
+    const scoreBeforeMarkers = (await sz.waitFor((m) => m.type === "state" && (m.state.scores[wsz.id] ?? 0) > 0 && sz.msgs.indexOf(m) > sz.msgs.indexOf(fPhone), 2500))?.state.scores[wsz.id];
+    szOv.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1, 2] }, { id: 2, face: "left", pos: [-1, 0, 2] }] });
+    const mkPhone = await sz.waitFor((m) => m.type === "markers");
+    const mkOv = await szOv.waitFor((m) => m.type === "markers");
+    const mkLate = await late.waitFor((m) => m.type === "markers");
+    check("俯瞰画面の markers で全員（俯瞰画面も）に markers が届く: config.markers に配置、寸法はそのまま", mkPhone && mkOv && mkLate && describeMarkers(mkPhone.config.markers) === "1:floor,2:left" && mkPhone.config.wallW === 2 && mkPhone.config.floorDrop === 1);
+    // markers より後に届いた state（1 秒ごとの定期配信）で得点を見る
+    const stateAfterMarkers = await sz.waitFor((m) => m.type === "state" && sz.msgs.indexOf(m) > sz.msgs.indexOf(mkPhone), 2500);
+    check("配置の変更で塗りは消えない（field は配られず、直後の state の得点もそのまま）", !sz.msgs.some((m) => m.type === "field" && m !== fPhone) && stateAfterMarkers !== null && stateAfterMarkers.state.scores[wsz.id] === scoreBeforeMarkers && scoreBeforeMarkers > 0, `${scoreBeforeMarkers} → ${stateAfterMarkers?.state.scores[wsz.id]}`);
+    const later = connect({ ...cfg, room: "size" }, "Later");
+    const wlater = await later.waitFor((m) => m.type === "welcome");
+    check("あとから入った人の welcome にも配置が入っている", wlater && describeMarkers(wlater.config.markers) === "1:floor,2:left");
+    szOv.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 0.8 });
+    const fDrop = await later.waitFor((m) => m.type === "field" && m.config.floorDrop === 0.8);
+    check("マーカーの高さを変えると床のマーカーが新しい床の高さに追従して配られる", fDrop && fDrop.config.markers[0].pos[1] === -0.8 && fDrop.config.markers[1].pos[1] === 0);
+    later.ws.close();
     // 広げた床の奥（z=3.5）から撃つ → 床に着弾（変更前の 2.5m の床なら当たらない位置）
     late.send({ type: "pose", pos: [0, 0.1, 3.5], quat: [0, 0, 0, 1], tracking: true });
     await sleep(50);
@@ -685,7 +871,8 @@ try {
     check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && typeof cResult.state.phaseEndsAt === "number");
     const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 10000);
     check("一周: 結果表示のあと練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
-    check("一周: 俯瞰画面にも同じ event が届く", cycOv.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice"));
+    // 俯瞰画面のソケットは別なので、届くまで少し待つ（同時判定だとレースで落ちることがあった）
+    check("一周: 俯瞰画面にも同じ event が届く", (await cycOv.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 1000)) !== null);
     cyc.ws.close();
     cycOv.ws.close();
   }

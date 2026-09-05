@@ -154,11 +154,84 @@
         color: #9aa0a6;
         cursor: default;
       }
-      #size-hint {
+      #size-hint,
+      #markers-hint {
         margin-top: 6px;
         color: #9aa0a6;
         font-size: 0.7rem;
         min-height: 1em;
+      }
+      /* 追加マーカーの配置（issue #30）。1 行 = 1 枚: 使う / 面 / ID / X / Y / Z */
+      #markers {
+        border: 1px solid #3c4043;
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin: 0 0 8px;
+      }
+      #markers legend {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+        padding: 0 4px;
+      }
+      #markers .head,
+      #markers .row {
+        display: grid;
+        grid-template-columns: 18px 1fr 40px 46px 46px 46px;
+        gap: 4px;
+        align-items: center;
+        margin-bottom: 4px;
+      }
+      #markers .head {
+        font-size: 0.65rem;
+        color: #9aa0a6;
+      }
+      #markers input[type="number"],
+      #markers select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px 2px;
+        border-radius: 6px;
+        border: 1px solid #5f6368;
+        background: #14161a;
+        color: #e8eaed;
+        font-size: 0.8rem;
+      }
+      #markers input:disabled,
+      #markers select:disabled {
+        color: #9aa0a6;
+      }
+      #markers .row.off input[type="number"],
+      #markers .row.off select {
+        opacity: 0.5;
+      }
+      #markers .foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      #markers .foot a {
+        font-size: 0.7rem;
+      }
+      #apply-markers {
+        padding: 7px 12px;
+        border-radius: 6px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #apply-markers:disabled {
+        background: #3c4043;
+        color: #9aa0a6;
+        cursor: default;
+      }
+      #players .marker {
+        font-size: 0.65rem;
+        color: #9aa0a6;
+        grid-column: 2 / -1;
       }
       #players {
         list-style: none;
@@ -213,7 +286,7 @@
       <p class="sub">
         コート全体・全員の位置と塗りをリアルタイムに表示します（PC 用。カメラ・マーカー不要）。
         スマホと同じ room（既定 demo。?room=）に入ります。
-        塗れる空間の大きさ（幅・高さ・奥行き）はここで決めて全員に配ります。
+        塗れる空間の大きさ（幅・高さ・奥行き）と追加マーカーの配置はここで決めて全員に配ります。
         対戦は 1 分（?matchSec=）。「対戦を終了」で途中でも結果に進めます。
         ドラッグで回転、ホイールで拡大。
       </p>
@@ -230,6 +303,16 @@
           <button id="apply-size" type="button" disabled>反映</button>
         </div>
         <div id="size-hint"></div>
+      </fieldset>
+      <fieldset id="markers">
+        <legend>追加マーカーの配置 [m]（原点 = 正面のマーカー。開始前に変更）</legend>
+        <div class="head"><span></span><span>面</span><span>ID</span><span>X 右+</span><span>Y 上+</span><span>Z 奥+</span></div>
+        <div id="marker-rows"></div>
+        <div class="foot">
+          <a href="./markers.html" target="_blank">マーカーを印刷</a>
+          <button id="apply-markers" type="button" disabled>反映</button>
+        </div>
+        <div id="markers-hint"></div>
       </fieldset>
       <button id="start-match" type="button" disabled>対戦開始</button>
       <button id="stop-match" type="button" disabled>対戦を終了</button>

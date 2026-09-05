@@ -25,6 +25,8 @@ export type MarkerObservation = {
    * 呼び出し側でこれを閾値に検出結果を足切りする想定
    */
   error: number;
+  /** 検出画像上のマーカーの平均辺長 [px]（大きいほど近く、姿勢の精度が良い。複数マーカーの重み付けに使う） */
+  sidePx: number;
 };
 
 export interface MarkerDetector {
@@ -34,6 +36,45 @@ export interface MarkerDetector {
    *   取得できないため、レンズの水平 FOV から (幅/2)/tan(FOV/2) で換算した推定値を渡す
    */
   detect(image: ImageData, focalLengthPx: number): MarkerObservation[];
+}
+
+/** 検出に使う辞書。印刷・合成カメラの生成もこれと同じ辞書から取る（不一致だと検出できない） */
+const DICTIONARY_NAME = "ARUCO_MIP_36h12";
+let dictionary: InstanceType<typeof AR.Dictionary> | null = null;
+function getDictionary() {
+  if (!dictionary) dictionary = new AR.Dictionary(DICTIONARY_NAME);
+  return dictionary;
+}
+
+/** 辞書にある ID の数（ARUCO_MIP_36h12 は 250。ID は 0〜249） */
+export function markerIdCount(): number {
+  return getDictionary().codeList.length;
+}
+
+/**
+ * マーカーの内側のビット（黒枠の内側 6x6）。[行][列]、上の行から。true = 白いセル。
+ * 印刷ページ（marker.html）の SVG と同じ並びなので、合成カメラ（fake-markers.ts）はこれを面に貼って描く
+ */
+export function markerBits(id: number): boolean[][] {
+  const d = getDictionary();
+  const code = d.codeList[id];
+  if (code === undefined) throw new Error(`marker id ${id} は辞書 ${DICTIONARY_NAME}（0〜${d.codeList.length - 1}）にありません`);
+  const size = d.markSize - 2;
+  const rows: boolean[][] = [];
+  for (let y = 0; y < size; y++) {
+    const row: boolean[] = [];
+    for (let x = 0; x < size; x++) row.push(code[y * size + x] === "1");
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * 印刷用の SVG（白い余白 1 セル + 黒枠 + ビット。src/shared/marker-0.svg と同じ描き方で、
+ * ID 0 は marker-0.svg と一致することを確認済み）。黒い正方形は全体の 8/10
+ */
+export function markerSvg(id: number): string {
+  return getDictionary().generateSVG(id);
 }
 
 // POSIT が返した姿勢（誤差 + 回転 + 並進）を検証し、信用できるものだけを返す。
@@ -137,6 +178,7 @@ export function createMarkerDetector(markerSizeM: number): MarkerDetector {
           corners: marker.corners,
           matrix,
           error: sidePx > 0 ? valid.error / sidePx : Infinity,
+          sidePx,
         });
       }
       return observations;

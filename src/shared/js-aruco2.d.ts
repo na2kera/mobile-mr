@@ -12,11 +12,20 @@ declare module "js-aruco2" {
   }
   // CJS パッケージ（top-level this への代入）。Vite(rolldown) の CJS 変換は
   // これを named export として公開する（default は生成されない）
+  export interface ArucoDictionary {
+    /** 各 ID のビット列（"0"/"1" の nBits 文字。行優先。'1' = 白） */
+    codeList: string[];
+    /** 黒枠込みのセル数（ARUCO_MIP_36h12 は 8 = 6 ビット + 枠） */
+    markSize: number;
+    /** 白い余白 1 セル + 黒枠 + ビットの SVG（viewBox は markSize+2 の正方形） */
+    generateSVG(id: number): string;
+  }
   export const AR: {
     Detector: new (config?: {
       dictionaryName?: string;
       maxHammingDistance?: number;
     }) => ArucoDetector;
+    Dictionary: new (dictionaryName: string) => ArucoDictionary;
   };
 }
 
