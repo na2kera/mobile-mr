@@ -63,7 +63,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const passedCup = r3.samples.some((p) => Math.hypot(p[0] - cup[0], p[1] - cup[1]) < CUP_R - BALL_R);
   check("速すぎると通過（リップアウト）して壁まで行く", !r3.holed && passedCup && r3.bounces >= 1, `holed=${r3.holed} passed=${passedCup} bounces=${r3.bounces} end=${r3.end}`);
   const r3b = simulateRoll([0, 2], [0, -3], cup, cfg);
-  check("反発があると壁から戻ってきて 2 度目に入ることもある（物理として自然。既定の反発 0.5 のとき）", r3b.bounces >= 1 && (!r3b.holed || r3b.holedAt > 0.3), `holed=${r3b.holed} holedAt=${r3b.holedAt}`);
+  check("反発があると壁から戻ってきて 2 度目にゆっくり入る（物理として自然。既定の反発 0.5 のとき）", r3b.holed && r3b.bounces === 1 && r3b.holedAt > 0.5, `holed=${r3b.holed} holedAt=${r3b.holedAt}`);
   // 縁をかすめるだけ（中心から CUP_R より外）は入らない
   const r4 = simulateRoll([CUP_R + 0.01, 2], [0, -v], cup, cfg);
   check("カップの縁の外側を通ると入らない", !r4.holed, `end=${r4.end}`);
@@ -222,6 +222,60 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]);
     for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]);
     check("バイアスを引いた上で振りを検出し、フェイスの開きにバイアスが混ざらない", impact !== null && near(impact.dps, 300, 2) && Math.abs(impact.faceDeg) < 1, JSON.stringify(impact));
+  }
+  // 小さな持ち直し（6° 超をゆっくり）→ 0.5s 静止 → 本当の振り: 持ち直しの戻りを偽インパクトにしない（検証サブエージェント指摘）
+  const det12 = new SwingDetector();
+  {
+    let now = 0;
+    const impacts = [];
+    const step = (g) => {
+      const r = det12.sample(now, g, [0, 0, 1], DT);
+      if (r) impacts.push(r);
+      now += DT * 1000;
+    };
+    for (let t = 0; t < 0.4; t += DT) step([0, 0, 0]); // 構え
+    for (let t = 0; t < 0.2; t += DT) step([-40, 0, 0]); // 持ち直し -8°
+    for (let t = 0; t < 0.5; t += DT) step([0, 0, 0]); // 0.5s 静止 → 構え直し（swingStillMs 450 超）
+    for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]); // 本当のバックスイング
+    for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]); // 戻り
+    check("持ち直し → 0.5s 静止 → 本当の振り: インパクトは 1 回で 300 deg/s（持ち直しの戻りではない）", impacts.length === 1 && near(impacts[0].dps, 300, 2), JSON.stringify(impacts));
+  }
+  // 頂点で長く止めた（maxSwingMs 超）あと、次の振りは検出できる
+  const det13 = new SwingDetector({ maxSwingMs: 1000 });
+  {
+    let now = 0;
+    const impacts = [];
+    const step = (g) => {
+      const r = det13.sample(now, g, [0, 0, 1], DT);
+      if (r) impacts.push(r);
+      now += DT * 1000;
+    };
+    for (let t = 0; t < 0.4; t += DT) step([0, 0, 0]);
+    for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]);
+    for (let t = 0; t < 2.0; t += DT) step([0, 0, 0]); // 頂点で 2s（swingStillMs で構え直し = その振りは捨てる）
+    for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]); // 戻し（構え直した位置からの動きなので新しいバックスイング）
+    for (let t = 0; t < 0.6; t += DT) step([0, 0, 0]);
+    for (let t = 0; t < 20 / 120; t += DT) step([120, 0, 0]);
+    for (let t = 0; t < 0.2; t += DT) step([-300, 0, 0]);
+    check("頂点で長く止めた振りは捨て、次の振りは検出する", impacts.length >= 1 && near(impacts[impacts.length - 1].dps, 300, 2), JSON.stringify(impacts));
+  }
+  // 静止 → 持ち替え（動く）→ 別の姿勢で静止 → 構え: 「上」は直近の静止だけから決まる（外部レビュー指摘）
+  const det11 = new SwingDetector();
+  {
+    let now = 0;
+    const step = (g, a) => {
+      det11.sample(now, g, a, DT);
+      now += DT * 1000;
+    };
+    for (let t = 0; t < 0.5; t += DT) step([0, 0, 0], [0, 0, 1]); // 上 = +Z で構え
+    for (let t = 0; t < 0.3; t += DT) step([200, 0, 0], [0, 0, 1]); // 持ち替え（動く）
+    for (let t = 0; t < 1.0; t += DT) step([0, 0, 0], [1, 0, 0]); // 上 = +X で静止（swingStillMs 超）→ 構え直し
+    check("持ち替え（振りの途中扱い）のあと長めに静止すると構え直す", det11.phase === "address" && det11.addresses === 2, `phase=${det11.phase} addresses=${det11.addresses}`);
+    // +X まわりに回す（新しい「上」まわり = フェイスの開き）。古い上（+Z）が混ざっていれば faceDeg が小さくなる
+    let impact = null;
+    for (let t = 0; t < 20 / 120; t += DT) { const r = det11.sample(now, [0, 120, 0], [1, 0, 0], DT); if (r) impact = r; now += DT * 1000; }
+    for (let t = 0; t < 0.2; t += DT) { const r = det11.sample(now, [50, -300, 0], [1, 0, 0], DT); if (r) impact = r; now += DT * 1000; }
+    check("持ち替えた後の構えは直近の静止の姿勢だけで「上」を決める（faceDeg に持ち替え前が混ざらない）", impact !== null && impact.faceDeg > 3, JSON.stringify(impact));
   }
   // 角速度 → 速さ: 300 deg/s × 0.9m × gain 1 = 4.71 m/s
   check("impactSpeed = ω[rad/s] × 腕の長さ × gain", near(impactSpeed(300, 0.9, 1), (300 * Math.PI / 180) * 0.9));

@@ -102,6 +102,8 @@ class HidJoyCon implements JoyCon {
   private readonly full = new Uint8Array(64);
   /** サブコマンドの ACK 待ち（対象サブコマンド → 解決） */
   private ackWaiters = new Map<number, () => void>();
+  /** 切断・除去された（初期化の途中でも以後は onConnect を呼ばない） */
+  disposed = false;
   private readonly listener: (e: HIDInputReportEvent) => void;
   readonly device: HIDDeviceLike;
   private readonly events: JoyConEvents;
@@ -143,7 +145,7 @@ class HidJoyCon implements JoyCon {
   }
 
   private async send(subcommand: number, args: number[]): Promise<boolean> {
-    for (let attempt = 0; attempt < ACK_RETRIES; attempt++) {
+    for (let attempt = 0; attempt < ACK_RETRIES && !this.disposed; attempt++) {
       const acked = new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => {
           this.ackWaiters.delete(subcommand);
@@ -261,9 +263,12 @@ export class JoyConHub {
       added.push(jc);
       try {
         await jc.init(this.joycons.length);
+        // 初期化の途中で切断された（disconnect が remove 済み）なら通知しない（外部レビュー指摘）
+        if (jc.disposed || this.byDevice.get(device) !== jc) continue;
         this.events.onConnect(jc);
       } catch {
         this.remove(jc);
+        continue;
       }
     }
     return added;
@@ -276,7 +281,10 @@ export class JoyConHub {
   private remove(jc: JoyCon) {
     const i = this.joycons.indexOf(jc);
     if (i >= 0) this.joycons.splice(i, 1);
-    if (jc instanceof HidJoyCon) this.byDevice.delete(jc.device);
+    if (jc instanceof HidJoyCon) {
+      jc.disposed = true;
+      this.byDevice.delete(jc.device);
+    }
   }
 }
 

@@ -23,6 +23,12 @@ export type SwingDetectorOptions = {
   minImpactDps: number;
   /** バックスイングを始めてからこの時間 [ms] 戻ってこなければ捨てる */
   maxSwingMs: number;
+  /**
+   * 振りの途中（バックスイング・戻り）でこの時間 [ms] 静止したら振りを捨てて構え直す。
+   * 頂点の一瞬の停止（0.3s 程度）は超えず、持ち直して構え直したとき（0.5s 以上）は超える長さ。
+   * 頂点で長く止めるとその振りは捨てられる（トレードオフ。A ボタンで明示的に構え直せる）
+   */
+  swingStillMs: number;
 };
 
 export const DEFAULT_SWING_OPTIONS: SwingDetectorOptions = {
@@ -32,6 +38,7 @@ export const DEFAULT_SWING_OPTIONS: SwingDetectorOptions = {
   // 短い寄せ（振幅 8°・周期 1.6s で最大 30 deg/s 程度）も拾えるよう低め。速さの下限は golf-sim の minStrokeSpeed が別に縛る
   minImpactDps: 20,
   maxSwingMs: 3000,
+  swingStillMs: 450,
 };
 
 export type Impact = {
@@ -126,13 +133,24 @@ export class SwingDetector {
       this.gyroSum[2] += rawGyro[2];
       this.accelCount++;
       if (this.stillSinceMs === null) this.stillSinceMs = now;
-      else if (now - this.stillSinceMs >= this.opts.stillMs && (this.phase === "idle" || (this.phase === "address" && Math.hypot(this.theta[0], this.theta[1], this.theta[2]) > 1))) {
-        // idle → 構え。address で漂っていたら（1° 以上）構え直して漂いを消す
-        this.address(now);
-        return null;
+      else {
+        const still = now - this.stillSinceMs;
+        const inSwing = this.phase === "backswing" || this.phase === "forward";
+        // idle → 構え。address で漂っていたら（1° 以上）構え直して漂いを消す。振りの途中は長めの静止（持ち替え）でだけ構え直す
+        if (
+          (!inSwing && still >= this.opts.stillMs && (this.phase === "idle" || Math.hypot(this.theta[0], this.theta[1], this.theta[2]) > 1)) ||
+          (inSwing && still >= this.opts.swingStillMs)
+        ) {
+          this.address(now);
+          return null;
+        }
       }
     } else {
+      // 動いたら静止の積算を捨てる（持ち替え前の姿勢が次の構えの「上」とバイアスに混ざらないように。外部レビュー指摘）
       this.stillSinceMs = null;
+      this.accelSum = [0, 0, 0];
+      this.gyroSum = [0, 0, 0];
+      this.accelCount = 0;
       if (this.phase === "idle") return null;
     }
     if (this.phase === "idle") return null;
@@ -152,8 +170,9 @@ export class SwingDetector {
       return null;
     }
     if (now - this.backswingStartMs > this.opts.maxSwingMs) {
-      // 戻ってこない: 捨てて構え待ちに（静止すれば構え直す）
+      // 戻ってこない: 捨てて構え待ちに（静止すれば構え直す。古い静止の時計は捨て、直後の静止を最初から数える）
       this.phase = "idle";
+      this.stillSinceMs = null;
       return null;
     }
     const along = dot(this.theta, this.axis);

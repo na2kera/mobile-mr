@@ -216,6 +216,7 @@ export class GolfGame {
   }
 
   private resetToLobby() {
+    this.pendingLastIndex = null;
     this.phase = "lobby";
     this.turn = null;
     this.turnEndsAt = -1;
@@ -430,6 +431,7 @@ export class GolfGame {
     }
     this.aims.clear();
     this.roll = null;
+    this.pendingLastIndex = null;
     this.winners = null;
     this.winnerNames = null;
     this.phaseEndsAt = -1;

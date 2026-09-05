@@ -325,6 +325,12 @@ let strokesAccepted = 0;
 let addressesSent = 0;
 let lastRejectReason = "";
 let flash: { text: string; untilMs: number } | null = null;
+/** 同じ tick で複数のイベント（hole + turn など）が来たとき、後のものを消さずに順に見せる */
+const flashQueue: { text: string; ms: number }[] = [];
+function pushFlash(text: string, ms: number, now: number) {
+  if (flash && now < flash.untilMs) flashQueue.push({ text, ms });
+  else flash = { text, untilMs: now + ms };
+}
 let lastEventKey = "";
 /** いま描いている転がり（サーバーの roll と同じ式で計算） */
 let liveRoll: { seq: number; by: string; result: RollResult; startLocalMs: number; holedShown: boolean } | null = null;
@@ -360,18 +366,20 @@ function onState(state: GameSnapshot) {
   if (key && key !== lastEventKey) {
     lastEventKey = key;
     if (ev?.kind === "turn") {
-      flash = ev.playerId === selfId ? { text: "あなたの番！\n狙いを見てタップ（構え）→ 振る", untilMs: now + 3000 } : { text: `${nameOf(ev.playerId)} の番`, untilMs: now + 2000 };
+      if (ev.playerId === selfId) pushFlash("あなたの番！\n狙いを見てタップ（構え）→ 振る", 3000, now);
+      else pushFlash(`${nameOf(ev.playerId)} の番`, 2000, now);
     } else if (ev?.kind === "hole") {
-      flash = { text: `ホール ${ev.hole + 1} へ`, untilMs: now + 2500 };
+      pushFlash(`ホール ${ev.hole + 1} へ`, 2000, now);
     } else if (ev?.kind === "timeout") {
-      flash = { text: `${nameOf(ev.by)} は時間切れ`, untilMs: now + 2500 };
+      pushFlash(`${nameOf(ev.by)} は時間切れ`, 2000, now);
     } else if (ev?.kind === "restart") {
-      flash = { text: "最初から（ホール 1）", untilMs: now + 2500 };
+      pushFlash("最初から（ホール 1）", 2000, now);
     } else if (ev?.kind === "field" || ev?.kind === "rules") {
-      flash = { text: ev.kind === "field" ? `コートが変わりました\n幅 ${cfg.wallW}m × 奥行き ${cfg.floorDepth}m` : `ルールが変わりました\n${cfg.holes} ホール・${cfg.maxStrokes} 打まで`, untilMs: now + 3000 };
+      pushFlash(ev.kind === "field" ? `コートが変わりました\n幅 ${cfg.wallW}m × 奥行き ${cfg.floorDepth}m` : `ルールが変わりました\n${cfg.holes} ホール・${cfg.maxStrokes} 打まで`, 3000, now);
     } else if (ev?.kind === "result") {
       const text = ev.winners.length === 0 ? "だれもいません…" : ev.winners.includes(selfId) ? "あなたの勝ち！" : `${ev.winnerNames.join("・")} の勝ち！`;
       flash = { text, untilMs: now + 5000 };
+      flashQueue.length = 0;
     }
     console.log(`[game] event ${ev?.kind} phase=${state.phase} hole=${state.hole} turn=${state.turn} balls=${JSON.stringify(state.balls)}`);
   }
@@ -713,8 +721,12 @@ function updateMessages(now: number) {
   } else if (!joined || !auth) {
     text = netStatus === "open" ? "入室中…" : `サーバーに接続中… (${netStatus})`;
     color = "#fdd663";
-  } else if (flash && now < flash.untilMs) {
-    text = flash.text;
+  } else if ((flash && now < flash.untilMs) || flashQueue.length > 0) {
+    if (!(flash && now < flash.untilMs)) {
+      const next = flashQueue.shift()!;
+      flash = { text: next.text, untilMs: now + next.ms };
+    }
+    text = flash!.text;
     color = flash.text.includes("カップイン") || flash.text.includes("勝ち") ? "#81c995" : flash.text.includes("ありません") || flash.text.includes("見て") ? "#fdd663" : "#e8eaed";
   } else {
     const s = auth.state;
@@ -739,7 +751,7 @@ function updateMessages(now: number) {
     }
   }
   message.set(text, color);
-  chargePanel.set(charging ? `溜め ${"■".repeat(Math.round(charge * 10))}${"□".repeat(10 - Math.round(charge * 10))} ${(STROKE_MAX * charge).toFixed(1)} m/s` : "", "#fdd663");
+  chargePanel.set(charging ? `溜め ${"■".repeat(Math.round(charge * 10))}${"□".repeat(10 - Math.round(charge * 10))} ${(cfg.minStrokeSpeed + (STROKE_MAX - cfg.minStrokeSpeed) * charge).toFixed(1)} m/s` : "", "#fdd663");
 }
 function totalOf(s: GameSnapshot, id: string): number {
   return (s.cards[id] ?? []).reduce((a, b) => a + b, 0);

@@ -46,6 +46,7 @@ const SWING_OPTS = {
   minBackswingDeg: numParam("minBackswing", 6, { min: 1, max: 90 }),
   minImpactDps: numParam("minImpactDps", 20, { min: 1, max: 2000 }),
   maxSwingMs: numParam("maxSwingMs", 3000, { min: 200, max: 20000 }),
+  swingStillMs: numParam("swingStillMs", 450, { min: 100, max: 10000 }),
 };
 /** 振り角を送る間隔 [ms] */
 const PUTTER_SEND_MS = 50;
@@ -373,17 +374,19 @@ function onReport(jc: JoyCon, report: StandardReport, nowMs: number) {
   const slot = slots.get(jc.key);
   if (!slot) return;
   const playerId = playerOf(slot);
-  // ボタン: A の立ち上がりで構え、B で狙いを消す
-  if (report.buttons.a && !slot.prevA) {
+  // ボタン: A の立ち上がりで構え、B で狙いを消す。Joy-Con (L) には A / B が無いので同じ位置の → / ↓ を当てる（外部レビュー指摘）
+  const pressA = report.buttons.a || report.buttons.right;
+  const pressB = report.buttons.b || report.buttons.down;
+  if (pressA && !slot.prevA) {
     slot.det.address(nowMs);
     if (client && playerId && client.sendAddress(playerId)) {
       addressesSent++;
       console.log(`[overview] address(${playerId}) via ${jc.name}`);
     }
   }
-  if (report.buttons.b && !slot.prevB && client && playerId) client.sendClearAim(playerId);
-  slot.prevA = report.buttons.a;
-  slot.prevB = report.buttons.b;
+  if (pressB && !slot.prevB && client && playerId) client.sendClearAim(playerId);
+  slot.prevA = pressA;
+  slot.prevB = pressB;
   // IMU: 3 サンプル（古い順、5ms 間隔）
   let dps = 0;
   for (let i = 0; i < report.imu.length; i++) {
@@ -417,7 +420,10 @@ function onImpact(slot: JoyConSlot, impact: Impact, playerId: string | null) {
 }
 
 const hub = new JoyConHub({
-  onConnect: (jc) => addSlot(jc),
+  onConnect: (jc) => {
+    lastRejectReason = ""; // 開けた（失敗の理由はここでだけ消す）
+    addSlot(jc);
+  },
   onReport,
   onStatus: (jc, status) => {
     console.log(`[overview] ${jc.name}: ${status}`);
@@ -708,7 +714,7 @@ function renderPanel() {
   joyconHint.textContent = !hidSupported()
     ? "この環境では WebHID が使えません（PC の Chrome で開いてください）。?fakeJoycon=1 で合成の振りを流せます"
     : slots.size === 0
-      ? "Joy-Con を Mac の Bluetooth 設定で接続してから「Joy-Con を接続」→ 選択。以後はページを開くだけで再接続します。\n使い方: パターのように握って静止（構え）→ バックスイング → 振り戻す。A で狙いを固定（スマホで見ている床の点）、B で狙いを消す"
+      ? "Joy-Con を Mac の Bluetooth 設定で接続してから「Joy-Con を接続」→ 選択。以後はページを開くだけで再接続します。\n使い方: パターのように握って静止（構え）→ バックスイング → 振り戻す。A（L は →）で狙いを固定（スマホで見ている床の点）、B（L は ↓）で狙いを消す"
       : `静止すると構え直します（角 0°）。バックスイング ${SWING_OPTS.minBackswingDeg}° 以上・戻り ${SWING_OPTS.minImpactDps} deg/s 以上で 1 打。速さ = 角速度 × 腕 ${ARM_M}m × 補正 ${STROKE_GAIN}（?armM= ?strokeGain= ?minBackswing= ?minImpactDps=）`;
   playersEl.replaceChildren(
     ...playerRows.map(({ p, marker, strokes, holed, done, cards, total, turn, win, jc }) => {
@@ -754,8 +760,7 @@ function renderHud() {
 connectButton.addEventListener("click", async () => {
   connectButton.disabled = true;
   try {
-    await hub.request(); // 開けた台は onConnect で addSlot される
-    lastRejectReason = "";
+    await hub.request(); // 開けた台は onConnect で addSlot される（失敗の理由は onStatus が残す）
   } catch (e: unknown) {
     lastRejectReason = `Joy-Con: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
