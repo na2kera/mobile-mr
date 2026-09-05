@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>10. MR Golf — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜08 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label {
+        color: #e8eaed;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #player-name[aria-invalid="true"] {
+        border-color: #f28b82;
+      }
+      #name-hint {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #name-error {
+        color: #f28b82;
+      }
+      #name-error[hidden] {
+        display: none;
+      }
+      #start-button {
+        width: 100%;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) and (pointer: coarse) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>10. MR Golf</h1>
+      <p>
+        08 と同じ箱型のコート（<a href="../08-splatoon/markers.html">マーカーを印刷</a>して壁に天地を合わせて貼る。
+        既定 3.0m × 2.5m。<strong>下を向いてパットするので床のマーカーも貼る</strong>ことを推奨: 配置は
+        <a href="./overview.html">PC の俯瞰画面</a>から配ります）の床がグリーンになり、
+        奥のティーから壁側のカップへパットします（3 ホール・1 ホール 6 打まで・合計打数の少ない人が勝ち。参加順に 1 打ずつ交代）。
+      </p>
+      <p>
+        <strong>パターは Switch の Joy-Con</strong>。スマホからは振りが取れないので、
+        <a href="./overview.html">PC の俯瞰画面</a>（Chrome）に Joy-Con を Bluetooth で繋ぎ「Joy-Con を接続」で読み取ります
+        （既定では手番の人に自動で割り当て）。Joy-Con をパターのように握って静止 → バックスイング → 振り戻すと、
+        戻りの速さがボールの速さ、振り戻しの間のひねりが左右のずれになります。
+        <strong>狙い</strong>はグリーンの狙いたい場所を見て画面をタップ（か Joy-Con の A）で固定（黄色い輪が視線の位置）。
+        構えなければカップの方向へ。Joy-Con が無いときは<strong>画面を長押しして溜め、離すと打てます</strong>（PC は Space、C で狙いを消す）。
+      </p>
+      <p>
+        何台でも同じ URL を開くだけで同じ room に入ります（既定 room: demo。分けたいときは ?room=名前）。
+        表示名は下の入力欄で設定します（?name= での事前指定も可能）。
+      </p>
+      <p id="room-error" hidden></p>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
+      <p>
+        確認の見方: 開始後、壁（か床）のマーカーを見るとグリーン（緑の床）・クッション・カップと旗・自分の色のボールが出ます。
+        自分の番になると視界に「あなたの番」と出て、ボールから狙い線（構えていなければカップへ）と振り子のパターが見えます。
+        Joy-Con を振ると（俯瞰画面が振り角を配るので）パターが追従し、インパクトでボールが転がります。
+        カップに入ると「カップイン！」。壁の上のスコアボードに全員の打数が出ます。
+        HUD の marker= に使っているマーカー、gaze= に視線と床の交点、putter= に Joy-Con の振り角が出ます。
+      </p>
+      <p>
+        調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
+        マーカーは ?markerMm=100&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=66（床を見るので検出は速めが既定）。
+        溜め打ちは ?strokeMax=3（満タンの速さ [m/s]）&amp;chargeSec=1.5。振り子の長さ ?armM=0.9（俯瞰画面の armM と揃える）。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC&amp;fakeStroke=1.5 で自分の番になると自動で（届く速さで）打ちます。
+        フェイクカメラのマーカーは 08 と同じ ?fakeMarkers=1:floor:0,-1.2,1.25（ID:面:x,y,z）&amp;fakeCamPos=&amp;fakeYaw=&amp;fakePitch=。
+        俯瞰画面（overview.html）を同じ room で開くと全体が見え、Joy-Con を繋げます
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
