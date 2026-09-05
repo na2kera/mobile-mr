@@ -11,9 +11,8 @@ description: iPhone 実機（iOS Safari）でデモを確認するための手�
 
 1. **HTTPS 設定の確認**: `vite.config.ts` に HTTPS 化の設定（`@vitejs/plugin-basic-ssl` や `vite-plugin-mkcert` 等）があるか確認する
    - 無ければ勝手に追加せず、選択肢（basic-ssl: 手軽だが毎回警告 / mkcert: 初回に CA インストールが必要だが警告なし）を提示して相談する
-2. **dev サーバー起動**: `npm run dev -- --host` で LAN に公開する（バックグラウンド起動にして出力を確認する）
-3. **URL の案内**: `scutil --get LocalHostName` で Mac のホスト名を取得し、`https://<ホスト名>.local:<port>/`（またはデモの個別ページ URL）を提示する。`.local`（Bonjour）は Mac の IP が変わっても有効なため、IP 直打ち（`ipconfig getifaddr en0`）より優先する。提示前に Mac 自身から curl で疎通確認すること
-   - 開けないと言われたら、まず Mac の IP・ネットワークが変わっていないか、iPhone が Mac と同じ SSID にいるかを疑う（このプロジェクトで実際に2回発生）
+2. **dev サーバー起動**: `npm run dev` で LAN に公開する（`vite.config.ts` に `server.host: true` があるので `--host` は不要。バックグラウンド起動にして出力を確認する）
+3. **URL の案内**: **dev-address スキル**に従う（`https://<ホスト名>.local:<port>/` の形で渡す・IP 直打ちで答えない・別 worktree の dev サーバーが同じポートを掴んでいないか確認する・提示前に curl で疎通確認する・開けないときの切り分け）
 4. ユーザーの実機確認結果を聞き、問題があれば修正する。**実機で動くまで「完了」と言わない**（自分で確認できない部分は「実機確認待ち」と明記する）
 
 ## iOS Safari チェックリスト
