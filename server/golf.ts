@@ -28,12 +28,15 @@ const MAX_OVERVIEWS = 2;
 const MAX_ROOMS = 64;
 /** クライアントの ?sendHz= の max 60 に余裕を持たせる */
 const POSE_RATE_PER_SEC = 90;
-/** パターの振り角の中継の上限 [回/秒]（ハブは 20Hz で送る） */
-const PUTTER_RATE_PER_SEC = 40;
+/** パターの振り角の中継の上限 [回/秒]（ハブは 1 台あたり 20Hz で送る。2〜4 台ぶん） */
+const PUTTER_RATE_PER_SEC = 100;
 /** 全員切断してから Room を捨てるまでの猶予（1 人プレイ中の瞬断・bfcache でゲームが消えないように） */
 const EMPTY_ROOM_TTL_MS = 60 * 1000;
 
-type State = { game: GolfGame; lastBroadcastMs: number; poseRate: RateLimiter; putterRate: RateLimiter; overviews: Set<string> };
+/** 構え（address / clearAim）の上限 [回/秒]（1 通ごとに全員へ state を配るので、壊れたクライアントの増幅を防ぐ。外部レビュー指摘） */
+const AIM_RATE_PER_SEC = 10;
+
+type State = { game: GolfGame; lastBroadcastMs: number; poseRate: RateLimiter; putterRate: RateLimiter; aimRate: RateLimiter; overviews: Set<string> };
 type Ctx = RoomContext<GolfRoomConfig, State>;
 
 function roleOf(url: URL): ClientRole {
@@ -178,6 +181,7 @@ export function golfServer() {
       lastBroadcastMs: -Infinity,
       poseRate: new RateLimiter(POSE_RATE_PER_SEC),
       putterRate: new RateLimiter(PUTTER_RATE_PER_SEC),
+      aimRate: new RateLimiter(AIM_RATE_PER_SEC),
       overviews: new Set(),
     }),
     tickMs: TICK_MS,
@@ -185,9 +189,8 @@ export function golfServer() {
       const events = room.state.game.tick(now);
       if (events.length > 0) {
         console.log(`[golf] tick → ${describeEvents(events)} (hole ${room.state.game.hole + 1}, turn ${room.state.game.turn ?? "-"})`);
-        // 複数のイベント（timeout + turn / hole + turn）は最後のもの（手番）を配る。先頭のイベントは kind だけログに
-        broadcastState(room, now, events[events.length - 1]);
-        if (events.length > 1) broadcastState(room, now, events[0]);
+        // 複数のイベント（timeout + turn / hole + turn / restart + turn）は起きた順に配る（クライアントは seq:kind で区別する）
+        for (const ev of events) broadcastState(room, now, ev);
       } else if (now - room.state.lastBroadcastMs >= IDLE_BROADCAST_MS) {
         broadcastState(room, now);
       }
@@ -246,6 +249,7 @@ export function golfServer() {
           return;
         }
         case "address": {
+          if (!room.state.aimRate.allow(id, now)) return;
           const actor = actorOf(msg.playerId);
           if (actor === null) return;
           if (!game.address(actor, msg.target)) {
@@ -258,6 +262,7 @@ export function golfServer() {
           return;
         }
         case "clearAim": {
+          if (!room.state.aimRate.allow(id, now)) return;
           const actor = actorOf(msg.playerId);
           if (actor === null) return;
           if (!game.clearAim(actor)) {
@@ -290,6 +295,7 @@ export function golfServer() {
           return;
         }
         case "restart": {
+          // 転がっている最中でも通す（運営の操作。クライアントは roll: null で描画を止める）
           const events = game.restart(now);
           console.log(`[golf] ${id} restart → ${describeEvents(events)}`);
           broadcastState(room, now, events[0]);
@@ -338,6 +344,8 @@ export function golfServer() {
       }
     },
     onLeave(room: Ctx, id, now) {
+      room.state.putterRate.forget(id);
+      room.state.aimRate.forget(id);
       if (room.state.overviews.delete(id)) return;
       const events = room.state.game.leave(id, now);
       room.state.poseRate.forget(id);

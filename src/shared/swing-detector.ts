@@ -29,7 +29,8 @@ export const DEFAULT_SWING_OPTIONS: SwingDetectorOptions = {
   stillDps: 25,
   stillMs: 250,
   minBackswingDeg: 6,
-  minImpactDps: 40,
+  // 短い寄せ（振幅 8°・周期 1.6s で最大 30 deg/s 程度）も拾えるよう低め。速さの下限は golf-sim の minStrokeSpeed が別に縛る
+  minImpactDps: 20,
   maxSwingMs: 3000,
 };
 
@@ -60,6 +61,10 @@ export class SwingDetector {
   private up: V3 = [0, 0, 1];
   private accelSum: V3 = [0, 0, 0];
   private accelCount = 0;
+  /** 静止中の角速度の積算（構えでバイアスにする。積分の漂いと偽のバックスイングを防ぐ） */
+  private gyroSum: V3 = [0, 0, 0];
+  /** ジャイロのバイアス [deg/s]（構えのときの静止時の平均。sample で引く） */
+  readonly bias: V3 = [0, 0, 0];
   private stillSinceMs: number | null = null;
   private axis: V3 = [0, 0, 0];
   private peakDeg = 0;
@@ -81,14 +86,18 @@ export class SwingDetector {
     return dot(this.theta, a) / n;
   }
 
-  /** 構え直す（A ボタン）。積分をゼロにし、直近の加速度から「上」を取る */
+  /** 構え直す（A ボタン）。積分をゼロにし、直近の静止中の加速度から「上」、角速度からバイアスを取る */
   address(now: number) {
     this.theta[0] = this.theta[1] = this.theta[2] = 0;
     if (this.accelCount > 0) {
       const n = Math.hypot(this.accelSum[0], this.accelSum[1], this.accelSum[2]);
       if (n > 0) this.up = [this.accelSum[0] / n, this.accelSum[1] / n, this.accelSum[2] / n];
+      this.bias[0] = this.gyroSum[0] / this.accelCount;
+      this.bias[1] = this.gyroSum[1] / this.accelCount;
+      this.bias[2] = this.gyroSum[2] / this.accelCount;
     }
     this.accelSum = [0, 0, 0];
+    this.gyroSum = [0, 0, 0];
     this.accelCount = 0;
     this.axis = [0, 0, 0];
     this.peakDeg = 0;
@@ -102,16 +111,23 @@ export class SwingDetector {
    * 1 サンプル（角速度 [deg/s]・加速度 [g]、dt [s]）。インパクトを検出したらその情報を返す。
    * now は呼ぶ側の時計 [ms]（静止時間と振りの長さの判定にだけ使う）
    */
-  sample(now: number, gyro: V3, accel: V3, dt: number): Impact | null {
-    const speed = Math.hypot(gyro[0], gyro[1], gyro[2]);
-    // 静止の監視（どのフェーズでも）: 静止が続いたら構え直す（積分の漂いも消える）
-    if (speed < this.opts.stillDps) {
+  sample(now: number, rawGyro: V3, accel: V3, dt: number): Impact | null {
+    // 静止の判定は生の角速度で（バイアスを引く前。バイアスは数 deg/s なので stillDps より小さい）
+    const rawSpeed = Math.hypot(rawGyro[0], rawGyro[1], rawGyro[2]);
+    const gyro: V3 = [rawGyro[0] - this.bias[0], rawGyro[1] - this.bias[1], rawGyro[2] - this.bias[2]];
+    // 静止の監視: 静止が続いたら構え直す（積分の漂いも消える）。ただし振りの途中（バックスイングの頂点で止まる・ゆっくりの
+    // 切り返し）では構え直さない（外部レビュー指摘: 頂点で 0.3s 止まると振りを丸ごと捨てていた）。戻ってこない振りは maxSwingMs が捨てる
+    if (rawSpeed < this.opts.stillDps) {
       this.accelSum[0] += accel[0];
       this.accelSum[1] += accel[1];
       this.accelSum[2] += accel[2];
+      this.gyroSum[0] += rawGyro[0];
+      this.gyroSum[1] += rawGyro[1];
+      this.gyroSum[2] += rawGyro[2];
       this.accelCount++;
       if (this.stillSinceMs === null) this.stillSinceMs = now;
-      else if (now - this.stillSinceMs >= this.opts.stillMs && this.phase !== "address") {
+      else if (now - this.stillSinceMs >= this.opts.stillMs && (this.phase === "idle" || (this.phase === "address" && Math.hypot(this.theta[0], this.theta[1], this.theta[2]) > 1))) {
+        // idle → 構え。address で漂っていたら（1° 以上）構え直して漂いを消す
         this.address(now);
         return null;
       }

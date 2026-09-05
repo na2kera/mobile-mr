@@ -20,6 +20,9 @@ import type { MarkerPlacement } from "./marker-layout.ts";
 export type { V3, FieldSize };
 export { FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, validateFieldSize };
 
+/** validateFieldSize に渡すセルの大きさ [m]。ゴルフは格子を持たないので、08 のセル数上限が効かない大きな値にする */
+export const GOLF_SIZE_CELL_M = 1;
+
 /** 床の 2 次元座標 [x, z]（field 座標系の X と Z。Y は床の高さで固定） */
 export type V2 = [number, number];
 
@@ -28,7 +31,7 @@ export const BALL_R = 0.02135;
 /** カップの半径 [m]（直径 108mm） */
 export const CUP_R = 0.054;
 
-/** 転がりの積分刻み [s]（200Hz。1 打の最長 maxRollSec でも 2000 サンプル） */
+/** 転がりの積分刻み [s]（200Hz。1 打の最長 maxRollSec=20 で 4000 サンプル） */
 export const STEP_SEC = 0.005;
 
 /**
@@ -70,14 +73,15 @@ export const DEFAULT_GOLF: GolfConfig = {
   restitution: 0.5,
   maxStrokeSpeed: 6,
   minStrokeSpeed: 0.15,
-  maxRollSec: 15,
+  maxRollSec: 20,
   markers: [],
 };
 
 export const GOLF_RULE_KEYS = ["decel", "cupMaxSpeed", "maxStrokes", "holes"] as const;
 /** ルールの許容範囲（サーバーの検証と俯瞰画面の入力欄で共有） */
 export const GOLF_RULE_LIMITS: Record<keyof GolfRules, { min: number; max: number; integer?: boolean }> = {
-  decel: { min: 0.1, max: 5 },
+  // 下限は maxRollSec（20s）で 6 m/s が止まりきる値（6 / 0.3 = 20s）
+  decel: { min: 0.3, max: 5 },
   cupMaxSpeed: { min: 0.2, max: 5 },
   maxStrokes: { min: 1, max: 20, integer: true },
   holes: { min: 1, max: 9, integer: true },
@@ -175,8 +179,9 @@ export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig): RollR
   // カップの縁の内側（中心からこの距離以内）を通ると落ちる。半径いっぱいだと縁をかすめただけで入るので少し内側
   const capture = CUP_R - BALL_R * 0.5;
   let steps = 0;
+  // Math.hypot はエンジン間で同じ値が保証されない（正しく丸められない）ので、両端で同じ結果にするため sqrt(x²+z²) で書く（外部レビュー指摘）
   while (steps < maxSteps) {
-    const speed = Math.hypot(vx, vz);
+    const speed = Math.sqrt(vx * vx + vz * vz);
     if (speed <= 1e-6) break;
     // 減速（摩擦は速度と逆向きに一定）。この刻みで止まるならそこまで
     const drop = cfg.decel * STEP_SEC;
@@ -210,8 +215,9 @@ export function simulateRoll(from: V2, vel: V2, cup: V2, cfg: GolfConfig): RollR
     steps++;
     samples.push([x, z]);
     // カップ: 縁の内側にいて遅ければ落ちる
-    const dc = Math.hypot(x - cup[0], z - cup[1]);
-    if (dc <= capture && Math.hypot(vx, vz) <= cfg.cupMaxSpeed) {
+    const dx = x - cup[0];
+    const dz = z - cup[1];
+    if (dx * dx + dz * dz <= capture * capture && vx * vx + vz * vz <= cfg.cupMaxSpeed * cfg.cupMaxSpeed) {
       samples[samples.length - 1] = [cup[0], cup[1]];
       return { samples, duration: steps * STEP_SEC, end: [cup[0], cup[1]], holed: true, holedAt: steps * STEP_SEC, bounces, truncated: false };
     }

@@ -16,6 +16,10 @@ export type CourseViewOptions = {
 
 /** クッションの高さ [m]（見た目。08 の壁の高さより低く、床の縁が分かる程度） */
 const CUSHION_H = 0.08;
+/** 狙い線の長さ [m] */
+const AIM_LEN = 0.8;
+const UP = new THREE.Vector3(0, 1, 0);
+const tmpDir = new THREE.Vector3();
 
 export class CourseView {
   readonly group = new THREE.Group();
@@ -76,9 +80,9 @@ export class CourseView {
     this.tee = new THREE.Mesh(new THREE.RingGeometry(0.04, 0.05, 24), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.7 }));
     this.tee.rotation.x = -Math.PI / 2;
     this.group.add(this.tee);
-    // 狙い線（破線）と先端の三角
-    const aimGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]);
-    this.aim = new THREE.Line(aimGeometry, new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.05, gapSize: 0.03 }));
+    // 狙い線（破線）と先端の三角。線は「原点 → +X に AIM_LEN」の固定 geometry を置いて回す（毎フレーム geometry を作らない）
+    const aimGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(AIM_LEN, 0, 0)]);
+    this.aim = new THREE.Line(aimGeometry, new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.05, gapSize: 0.03, transparent: true }));
     this.aim.computeLineDistances();
     this.group.add(this.aim);
     this.aimHead = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.06, 12), new THREE.MeshBasicMaterial({ color: 0xffffff }));
@@ -184,17 +188,15 @@ export class CourseView {
       return;
     }
     const y = -this.cfg.floorDrop + 0.01;
-    const len = 0.8;
+    const len = AIM_LEN;
     this.aim.visible = this.aimHead.visible = true;
-    const pts = [new THREE.Vector3(from[0], y, from[1]), new THREE.Vector3(from[0] + dir[0] * len, y, from[1] + dir[1] * len)];
-    this.aim.geometry.setFromPoints(pts);
-    this.aim.computeLineDistances();
+    this.aim.position.set(from[0], y, from[1]);
+    this.aim.rotation.y = Math.atan2(-dir[1], dir[0]); // ローカル +X を dir に
     this.aim.material.color.setHex(fixed ? color : 0xffffff);
     this.aim.material.opacity = fixed ? 1 : 0.5;
-    this.aim.material.transparent = true;
     this.aimHead.position.set(from[0] + dir[0] * len, y, from[1] + dir[1] * len);
     // 円錐の +Y を dir に向ける
-    this.aimHead.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dir[0], 0, dir[1]).normalize());
+    this.aimHead.quaternion.setFromUnitVectors(UP, tmpDir.set(dir[0], 0, dir[1]).normalize());
     this.aimHead.material.color.setHex(fixed ? color : 0xffffff);
   }
 

@@ -257,9 +257,11 @@ try {
   // ---- p1 の番: フェイク Joy-Con（手番の人に自動）が振る → stroke → カップイン ----
   const tSwing = Date.now();
   let s1 = await readHud(p1);
+  let putterSeen = s1.putter !== "-" && s1.putter !== "";
   while (Date.now() - tSwing < 25000 && !(s1.balls[s1.me]?.holed || (s1.cards[s1.me] ?? "-") !== "-")) {
-    await sleep(500);
+    await sleep(200);
     s1 = await readHud(p1);
+    if (s1.putter !== "-" && s1.putter !== "") putterSeen = true;
   }
   const sOv = await readOverview();
   console.log(`after swing window1: ${show(s1)} putter=${s1.putter}`);
@@ -269,7 +271,7 @@ try {
   check("サーバーが俯瞰画面からの代理 stroke（1 台目のスマホの分）を受理して転がりを計算した", serverLines.some((l) => new RegExp(`\\] ${sOv.me} stroke\\(${s1.me}\\) #\\d+:`).test(l)), `${sOv.me} for ${s1.me}`);
   check("1 台目のスマホのボールがカップイン（1 打）", (s1.balls[s1.me]?.holed && s1.balls[s1.me].strokes === 1) || s1.cards[s1.me] === "1", JSON.stringify(s1.balls));
   check("スマホ側でも同じ転がりを描き、HOLED の roll を受け取った", p1.logs.some((l) => /\[game\] event stroke/.test(l)) && !p1.logs.some((l) => /roll end mismatch/.test(l)));
-  check("振り角（putter）がスマホに届いた", p1.logs.length > 0 && (s1.putter !== "" || (await p1.eval("true"))));
+  check("振り角（putter）が俯瞰画面からスマホに届き、HUD の putter= に出た", putterSeen, `putter=${s1.putter}`);
 
   // ---- p2 の番: 自動打ち（fakeStroke）でカップイン → 全員終了 → ホール 2 ----
   const tHole = Date.now();

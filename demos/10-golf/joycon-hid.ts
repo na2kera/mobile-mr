@@ -55,6 +55,8 @@ export function kindOf(productId: number): JoyConKind {
 }
 
 export type JoyConEvents = {
+  /** 開いて初期化できた（「接続」ボタン・ページ再読込後の再開・Bluetooth の再接続のどれでも呼ぶ） */
+  onConnect: (jc: JoyCon) => void;
   onReport: (jc: JoyCon, report: StandardReport, nowMs: number) => void;
   onStatus: (jc: JoyCon, status: string) => void;
   onDisconnect: (jc: JoyCon) => void;
@@ -127,7 +129,7 @@ class HidJoyCon implements JoyCon {
       }
       return;
     }
-    if (e.reportId !== INPUT_REPORT_STANDARD_FULL) return;
+    if (e.reportId !== INPUT_REPORT_STANDARD_FULL || data.length < 48) return; // 短いものは前回のバイトが残るので捨てる
     // 解析は「reportId 込み」のレイアウトで（docs の表と同じ位置）
     this.full[0] = INPUT_REPORT_STANDARD_FULL;
     this.full.set(data.subarray(0, Math.min(data.length, 63)), 1);
@@ -259,6 +261,7 @@ export class JoyConHub {
       added.push(jc);
       try {
         await jc.init(this.joycons.length);
+        this.events.onConnect(jc);
       } catch {
         this.remove(jc);
       }

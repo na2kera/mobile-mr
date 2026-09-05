@@ -56,7 +56,7 @@ WebHID の `event.data` は reportId を除いた 48 バイト。下は **ID 込
 
 - 加速度: `raw × 0.000244` [g]（±8G）
 - ジャイロ: `raw × 0.070` [deg/s]（±2000dps。LSM6DS3 の公称 70 mdps/LSB。joy-con-webhid の 0.06103 は 16 ビット全域に ±2000 を割り当てた近似で、約 15% 小さい）
-- 工場較正（SPI 0x6020、24 バイト: 加速度 origin / sensitivity、ジャイロ origin / sensitivity）を読めば個体差を消せるが、振りの検出には省略で足りる。残るジャイロのバイアス（数 dps）は静止時の平均で消す（`swing-detector.ts` は静止で構え直す = 積分をゼロにする）
+- 工場較正（SPI 0x6020、24 バイト: 加速度 origin / sensitivity、ジャイロ origin / sensitivity）を読めば個体差を消せるが、振りの検出には省略で足りる。残るジャイロのバイアス（数 dps）は `swing-detector.ts` が構え（静止）のときの平均として取り、以後のサンプルから引く（積分もゼロにする）
 
 ## 本体座標系（縦持ち、ボタン面を正面、ショルダー側を上）
 

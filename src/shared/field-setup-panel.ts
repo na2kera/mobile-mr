@@ -23,6 +23,8 @@ export type FieldSetupOptions = {
   onInput: () => void;
   /** 寸法を変えると何が起きるかの文言（08: 塗りが消える / 10: 最初からになる） */
   sizeChangeNote: string;
+  /** validateFieldSize のセル数上限に使う 1 セルの大きさ [m]（格子を持たないデモは大きな値を渡して上限を効かせない） */
+  cellM?: number;
   markersChangeNote: string;
 };
 
@@ -135,7 +137,7 @@ export function createFieldSetupPanel(opts: FieldSetupOptions): FieldSetupPanel 
 
   opts.applySizeButton.addEventListener("click", () => {
     const size = readSize();
-    const invalid = validateFieldSize(size);
+    const invalid = validateFieldSize(size, opts.cellM);
     if (invalid) return;
     opts.onApplySize(size);
   });
@@ -183,7 +185,7 @@ export function createFieldSetupPanel(opts: FieldSetupOptions): FieldSetupPanel 
     render(state) {
       current = { ...state.current, markers: state.current.markers };
       const sizeEditable = state.joined && state.editable && !state.sizePending;
-      const sizeInvalid = validateFieldSize(readSize());
+      const sizeInvalid = validateFieldSize(readSize(), opts.cellM);
       const canApplySize = sizeEditable && sizeChanged() && sizeInvalid === null;
       const sizeHintText = !state.joined
         ? ""

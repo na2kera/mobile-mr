@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { numParam, params } from "../../src/shared/url-params";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import { DEFAULT_GOLF, GOLF_RULE_KEYS, GOLF_RULE_LIMITS, playerColorCss, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance, validateGolfRules } from "../../src/shared/golf-sim";
+import { DEFAULT_GOLF, GOLF_SIZE_CELL_M, GOLF_RULE_KEYS, GOLF_RULE_LIMITS, playerColorCss, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance, validateGolfRules } from "../../src/shared/golf-sim";
 import type { GolfConfig, GolfRules, RollResult, V2 } from "../../src/shared/golf-sim";
 import type { GameSnapshot } from "../../src/shared/golf-game";
 import type { PlayerPose } from "../../src/shared/golf-protocol";
@@ -44,7 +44,7 @@ const SWING_OPTS = {
   stillDps: numParam("stillDps", 25, { min: 1, max: 500 }),
   stillMs: numParam("stillMs", 250, { min: 50, max: 5000 }),
   minBackswingDeg: numParam("minBackswing", 6, { min: 1, max: 90 }),
-  minImpactDps: numParam("minImpactDps", 40, { min: 1, max: 2000 }),
+  minImpactDps: numParam("minImpactDps", 20, { min: 1, max: 2000 }),
   maxSwingMs: numParam("maxSwingMs", 3000, { min: 200, max: 20000 }),
 };
 /** 振り角を送る間隔 [ms] */
@@ -251,7 +251,6 @@ function onState(state: GameSnapshot) {
     lastTurn = state.turn;
     turnSinceMs = now;
   }
-  if (state.phase === "aim" || state.phase === "rolling") rulesPending = sizePending = false;
   const ev = state.event;
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
@@ -418,9 +417,12 @@ function onImpact(slot: JoyConSlot, impact: Impact, playerId: string | null) {
 }
 
 const hub = new JoyConHub({
+  onConnect: (jc) => addSlot(jc),
   onReport,
   onStatus: (jc, status) => {
     console.log(`[overview] ${jc.name}: ${status}`);
+    // 開けなかった台は行が出ない（onConnect が来ない）ので、理由をパネルに出す（外部レビュー指摘）
+    if (/失敗/.test(status)) lastRejectReason = `${jc.name}: ${status}`;
     renderPanel();
   },
   onDisconnect: (jc) => {
@@ -433,6 +435,7 @@ const hub = new JoyConHub({
 });
 
 function addSlot(jc: JoyCon) {
+  if (slots.has(jc.key)) return;
   const det = new SwingDetector(SWING_OPTS);
   const root = document.createElement("div");
   root.className = "jc";
@@ -453,7 +456,7 @@ function addSlot(jc: JoyCon) {
 }
 
 /** フェイク Joy-Con: 割り当てた人の手番になって FAKE_SWING_SEC 経ったら、カップに届く速さで 1 回振る（受理待ちの間は振らない） */
-let fakeTriggeredForTurn = -1;
+let fakeTriggeredForTurn = -1; // 手番の開始時刻（turnSinceMs）で 1 手番 1 回。seq は構え・入室でも進むので使わない
 function updateFakeJoycon(now: number) {
   if (!fakeJoycon || !auth) return;
   const slot = slots.get(fakeJoycon.key);
@@ -461,14 +464,15 @@ function updateFakeJoycon(now: number) {
   const s = auth.state;
   const playerId = playerOf(slot);
   if (!playerId || s.phase !== "aim" || s.turn !== playerId) return;
-  if (now - turnSinceMs < FAKE_SWING_SEC * 1000 || fakeTriggeredForTurn === s.seq) return;
+  if (now - turnSinceMs < FAKE_SWING_SEC * 1000 || fakeTriggeredForTurn === turnSinceMs) return;
   const ball = s.balls[playerId];
   const cup = s.holes[s.hole]?.cup;
   if (!ball || !cup) return;
-  fakeTriggeredForTurn = s.seq;
+  fakeTriggeredForTurn = turnSinceMs;
   const dist = Math.hypot(cup[0] - ball.pos[0], cup[1] - ball.pos[1]);
   const speed = Math.min(cfg.maxStrokeSpeed, speedForDistance(dist, cfg.decel) + 0.15);
-  const impactDps = (speed / (ARM_M * STROKE_GAIN)) * (180 / Math.PI);
+  // 検出のしきい値（minImpactDps）を割ると振っても 1 打にならず手番が止まるので下限を持つ（短い寄せは少し強めになる）
+  const impactDps = Math.max(SWING_OPTS.minImpactDps * 1.2, (speed / (ARM_M * STROKE_GAIN)) * (180 / Math.PI));
   fakeJoycon.trigger({ backDeg: 20, backDps: 120, impactDps, yawDps: FAKE_YAW_DPS });
   console.log(`[overview] fake swing for ${playerId}: dist=${dist.toFixed(2)} speed=${speed.toFixed(2)} dps=${impactDps.toFixed(0)}`);
 }
@@ -605,6 +609,7 @@ const setup = createFieldSetupPanel({
   },
   onInput: () => renderPanel(),
   sizeChangeNote: "「反映」で全員のコートが変わります（最初からになります）",
+  cellM: GOLF_SIZE_CELL_M,
   markersChangeNote: "「反映」で全員の位置合わせに使うマーカーが変わります（ゲームはそのまま）",
 });
 
@@ -656,7 +661,9 @@ function renderPanel() {
           const b = s.balls[p.id];
           const cards = s.cards[p.id] ?? [];
           const jc = [...slots.values()].find((x) => playerOf(x) === p.id);
-          return { p, marker, strokes: b?.strokes ?? 0, holed: b?.holed ?? false, done: b?.done ?? false, cards, total: totalOf(s, p.id) + (b?.strokes ?? 0), turn: s.turn === p.id, win: s.winners?.includes(p.id) ?? false, jc: jc ? jc.jc.name : "" };
+          // 結果表示では最終ホールの打数はカードに入っているので足さない（外部レビュー指摘: 二重加算）
+          const inPlay = s.phase !== "result";
+          return { p, marker, strokes: inPlay ? (b?.strokes ?? 0) : null, holed: b?.holed ?? false, done: b?.done ?? false, cards, total: totalOf(s, p.id) + (inPlay ? (b?.strokes ?? 0) : 0), turn: s.turn === p.id, win: s.winners?.includes(p.id) ?? false, jc: jc ? jc.jc.name : "" };
         })
         .sort((a, b) => a.total - b.total)
     : [];
@@ -671,7 +678,8 @@ function renderPanel() {
       meta: `${slot.jc.status} / ${slot.jc.fake ? "" : `電池 ${slot.jc.battery}/8${slot.jc.charging ? "(充電中)" : ""} / `}${Number.isFinite(age) ? `${age < 500 ? "受信中" : `${(age / 1000).toFixed(1)}s 途絶`} ${slot.jc.reports} 件` : "未受信"}\n担当: ${pid ? nameOf(pid) : "-"}${slot.assign === "auto" ? "（手番の人）" : ""} / 状態 ${slot.det.phase} / 角 ${slot.det.angleDeg.toFixed(0)}° / ${slot.dps.toFixed(0)} deg/s / 構え ${slot.det.addresses} 回\n${li ? `直近の振り: ${li.speed.toFixed(2)} m/s（${li.dps.toFixed(0)} deg/s, バック ${li.backswingDeg.toFixed(0)}°, 面 ${li.faceDeg.toFixed(1)}°）${li.sent ? " → 送信" : li.playerId ? "（手番でないので無視）" : "（担当なし）"}` : "振り: まだ"}`,
     };
   });
-  const key = JSON.stringify([phaseText, turnText, canRestart, editable, canApplyRules, rulesPending, rulesHintText, playerRows, jcRows, netStatus, lastRejectReason, sizePending, markersPending, connectButton.disabled]);
+  // 寸法・追加マーカーの入力欄の値もキーに入れる（外部レビュー指摘: lobby で編集しても再描画されず「反映」が押せなかった）
+  const key = JSON.stringify([phaseText, turnText, canRestart, editable, canApplyRules, rulesPending, rulesHintText, playerRows, jcRows, netStatus, lastRejectReason, sizePending, markersPending, connectButton.disabled, setup.readSize(), setup.readMarkers()]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
@@ -691,7 +699,9 @@ function renderPanel() {
     if (row.select.options.length !== options.length || [...row.select.options].some((o, i) => o.value !== options[i].value || o.textContent !== options[i].label)) {
       row.select.replaceChildren(...options.map((o) => Object.assign(document.createElement("option"), { value: o.value, textContent: o.label })));
     }
-    row.select.value = options.some((o) => o.value === slot.assign) ? slot.assign : "auto";
+    // 割り当てた人が居なくなった（切断・再接続で id が変わった）ら自動に戻す（外部レビュー指摘: 選択欄だけ戻して assign が古いままだった）
+    if (!options.some((o) => o.value === slot.assign)) slot.assign = "auto";
+    row.select.value = slot.assign;
     const r = jcRows.find((x) => x.key === slot.jc.key);
     row.meta.textContent = r?.meta ?? "";
   }
@@ -699,7 +709,7 @@ function renderPanel() {
     ? "この環境では WebHID が使えません（PC の Chrome で開いてください）。?fakeJoycon=1 で合成の振りを流せます"
     : slots.size === 0
       ? "Joy-Con を Mac の Bluetooth 設定で接続してから「Joy-Con を接続」→ 選択。以後はページを開くだけで再接続します。\n使い方: パターのように握って静止（構え）→ バックスイング → 振り戻す。A で狙いを固定（スマホで見ている床の点）、B で狙いを消す"
-      : "静止すると構え直します（角 0°）。バックスイング 6° 以上・戻り 40 deg/s 以上で 1 打。速さ = 角速度 × 腕 " + ARM_M + "m × 補正 " + STROKE_GAIN + "（?armM= ?strokeGain=）";
+      : `静止すると構え直します（角 0°）。バックスイング ${SWING_OPTS.minBackswingDeg}° 以上・戻り ${SWING_OPTS.minImpactDps} deg/s 以上で 1 打。速さ = 角速度 × 腕 ${ARM_M}m × 補正 ${STROKE_GAIN}（?armM= ?strokeGain= ?minBackswing= ?minImpactDps=）`;
   playersEl.replaceChildren(
     ...playerRows.map(({ p, marker, strokes, holed, done, cards, total, turn, win, jc }) => {
       const li = document.createElement("li");
@@ -710,7 +720,7 @@ function renderPanel() {
       name.textContent = `${turn ? "▶ " : ""}${p.name}（${playerColorName(p.color)}）${win ? " 🏆" : ""}${jc ? ` 🎮` : ""}`;
       const score = document.createElement("span");
       score.className = "score";
-      score.textContent = `${cards.join("+")}${cards.length ? "+" : ""}${strokes}${holed ? "✓" : done ? "×" : ""} = ${total}`;
+      score.textContent = strokes === null ? `${cards.join("+")} = ${total}` : `${cards.join("+")}${cards.length ? "+" : ""}${strokes}${holed ? "✓" : done ? "×" : ""} = ${total}`;
       const markerEl = document.createElement("span");
       markerEl.className = "marker";
       markerEl.textContent = `位置合わせ: マーカー ${marker}${jc ? ` / Joy-Con: ${jc}` : ""}`;
@@ -744,8 +754,7 @@ function renderHud() {
 connectButton.addEventListener("click", async () => {
   connectButton.disabled = true;
   try {
-    const added = await hub.request();
-    for (const jc of added) addSlot(jc);
+    await hub.request(); // 開けた台は onConnect で addSlot される
     lastRejectReason = "";
   } catch (e: unknown) {
     lastRejectReason = `Joy-Con: ${e instanceof Error ? e.message : String(e)}`;
@@ -757,14 +766,12 @@ connectButton.addEventListener("click", async () => {
 if (!hidSupported()) {
   connectButton.disabled = true;
 } else {
-  // 以前に許可した台を開き直す（ページ再読込後）
-  void hub.reconnect().then((added) => {
-    for (const jc of added) addSlot(jc);
-  });
+  // 以前に許可した台を開き直す（ページ再読込後。開けた台は onConnect で addSlot される）
+  void hub.reconnect();
 }
 let fakeJoycon: FakeJoyCon | null = null;
 if (FAKE_JOYCON) {
-  fakeJoycon = new FakeJoyCon({ onReport, onStatus: () => {}, onDisconnect: () => {} });
+  fakeJoycon = new FakeJoyCon({ onConnect: () => {}, onReport, onStatus: () => {}, onDisconnect: () => {} });
   hub.addFake(fakeJoycon);
   addSlot(fakeJoycon);
   // ヘッドレス確認から A ボタン（構え）と振りを起こせるようにする

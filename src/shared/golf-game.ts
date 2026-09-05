@@ -8,6 +8,7 @@
 // 06-2 / 08 の *-game.ts と同じく three.js に依存しない（Node テスト対象）
 import {
   DEFAULT_GOLF,
+  GOLF_SIZE_CELL_M,
   PLAYER_COLORS,
   makeHoles,
   norm2,
@@ -139,6 +140,8 @@ export class GolfGame {
   private rollSeq = 0;
   /** rolling → 次の手番へ進める時刻 */
   private nextAtMs = -1;
+  /** 転がしている本人が抜けたときの「その人が居た位置 - 1」（止まったあとの手番探索の起点。外部レビュー指摘） */
+  private pendingLastIndex: number | null = null;
   lastRejectReason = "";
 
   constructor(config: Partial<GolfConfig> = {}, opts: Partial<GameOptions> = {}) {
@@ -194,11 +197,17 @@ export class GolfGame {
       return [];
     }
     if (this.phase === "aim" && this.turn === id) {
-      return this.advanceTurn(now, idx);
+      // 抜けた人の位置から次を探す。配列から消えたぶん 1 つ手前を起点にする（外部レビュー指摘: 直後の人を飛ばしていた）
+      return this.advanceTurn(now, idx - 1);
     }
     if (this.phase === "rolling" && this.roll?.by === id) {
-      // 転がしている途中で抜けた: 転がりは見せ、止まったら次へ（advanceTurn が居ない人を飛ばす）
+      // 転がしている途中で抜けた: 転がりは見せ、止まったら「抜けた人の次」へ（tick が pendingLastIndex を使う）
+      this.pendingLastIndex = idx - 1;
       return [];
+    }
+    if (this.phase === "rolling" && this.pendingLastIndex !== null && idx <= this.pendingLastIndex) {
+      // 転がし中に抜けた人より前の人がさらに抜けた: 起点を詰める
+      this.pendingLastIndex--;
     }
     if (this.phase === "result") {
       this.computeWinners();
@@ -357,6 +366,8 @@ export class GolfGame {
       const card = this.cards.get(id);
       if (ball && card) card.push(ball.strokes);
     }
+    // 直近の 1 打はホールをまたいで残さない（再接続の welcome で新しいホールのカップで再計算され「カップイン」が再表示される。外部レビュー指摘）
+    this.roll = null;
     if (this.hole + 1 >= this.holes.length) {
       return [this.finish(now)];
     }
@@ -391,8 +402,15 @@ export class GolfGame {
       this.winnerNames = [];
       return;
     }
-    const full = ids.filter((id) => (this.cards.get(id)?.length ?? 0) >= this.holes.length);
-    const pool = full.length > 0 ? full : ids;
+    // 全ホール打った人を優先。居なければ 1 ホール以上打った人。一度も打っていない人（結果表示中の参加）は勝者にしない（外部レビュー指摘）
+    const played = ids.filter((id) => (this.cards.get(id)?.length ?? 0) > 0);
+    const full = played.filter((id) => (this.cards.get(id)?.length ?? 0) >= this.holes.length);
+    const pool = full.length > 0 ? full : played;
+    if (pool.length === 0) {
+      this.winners = [];
+      this.winnerNames = [];
+      return;
+    }
     const best = Math.min(...pool.map((id) => this.totalOf(id)));
     this.winners = pool.filter((id) => this.totalOf(id) === best);
     this.winnerNames = this.winners.map((id) => this.players.get(id)?.name ?? id);
@@ -422,8 +440,10 @@ export class GolfGame {
   tick(now: number): GameEvent[] {
     if (this.phase === "rolling" && now >= this.nextAtMs) {
       const by = this.roll?.by ?? "";
-      const idx = this.order.indexOf(by);
-      // 打った人が抜けていたら idx=-1 → 先頭から探す
+      const found = this.order.indexOf(by);
+      // 打った人が抜けていたら、抜けた時点の位置（pendingLastIndex）から探す
+      const idx = found >= 0 ? found : (this.pendingLastIndex ?? -1);
+      this.pendingLastIndex = null;
       return this.advanceTurn(now, idx);
     }
     if (this.phase === "aim" && this.turn !== null && now >= this.turnEndsAt) {
@@ -451,7 +471,7 @@ export class GolfGame {
       this.reject("cannot resize during rolling");
       return null;
     }
-    const invalid = validateFieldSize(size);
+    const invalid = validateFieldSize(size, GOLF_SIZE_CELL_M);
     if (invalid) {
       this.reject(invalid);
       return null;

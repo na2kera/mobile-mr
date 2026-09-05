@@ -380,9 +380,12 @@ function onState(state: GameSnapshot) {
   if (roll && roll.seq !== liveRoll?.seq) {
     const cup = state.holes[state.hole]?.cup ?? [0, 0];
     const result = simulateRoll(roll.from, roll.vel, cup, cfg);
-    liveRoll = { seq: roll.seq, by: roll.by, result, startLocalMs: localTimeOf(roll.startedAt, state.t, now), holedShown: false };
-    if (roll.by === selfId) strokesAccepted++;
-    if (Math.abs(result.end[0] - roll.end[0]) > 0.01 || Math.abs(result.end[1] - roll.end[1]) > 0.01) {
+    const startLocalMs = localTimeOf(roll.startedAt, state.t, now);
+    // 入室・再接続で受け取った過去の転がり（もう止まっている）は「カップイン！」を出さない（外部レビュー指摘）
+    const elapsed0 = (now - startLocalMs) / 1000;
+    liveRoll = { seq: roll.seq, by: roll.by, result, startLocalMs, holedShown: elapsed0 >= result.duration };
+    if (roll.by === selfId && elapsed0 < result.duration) strokesAccepted++;
+    if (elapsed0 < result.duration && (Math.abs(result.end[0] - roll.end[0]) > 0.01 || Math.abs(result.end[1] - roll.end[1]) > 0.01)) {
       console.warn(`[game] roll end mismatch: local=(${result.end.join(",")}) server=(${roll.end.join(",")})`);
     }
   }
@@ -435,6 +438,9 @@ function connect(name: string) {
         lastRejectReason = reason;
         if (/gaze/.test(reason)) flash = { text: "グリーンを見て構えてください", untilMs: performance.now() + 2000 };
         else if (/not your turn/.test(reason)) flash = { text: "まだあなたの番ではありません", untilMs: performance.now() + 2000 };
+        else if (/whiff/.test(reason)) flash = { text: "空振り（弱すぎ）\nもう少し溜めて", untilMs: performance.now() + 2000 };
+        else if (/too close/.test(reason)) flash = { text: "狙いがボールに近すぎます\nもう少し先を見て", untilMs: performance.now() + 2000 };
+        else if (/above/.test(reason)) flash = { text: "速すぎます（振りが強すぎ）", untilMs: performance.now() + 2000 };
         console.log(`[game] rejected by server: ${reason}`);
       },
       onConfig: (config, state) => {
@@ -548,7 +554,8 @@ function pressEnd() {
   if (!charging) {
     sendAddress();
   } else {
-    sendStroke(STROKE_MAX * charge, 0, `hold ${held.toFixed(0)}ms`);
+    // 溜め 0 でも空振り（minStrokeSpeed 未満で拒否）にならない速さから
+    sendStroke(cfg.minStrokeSpeed + (STROKE_MAX - cfg.minStrokeSpeed) * charge, 0, `hold ${held.toFixed(0)}ms`);
   }
   charging = false;
   charge = 0;
@@ -572,7 +579,7 @@ if (touch) {
   });
 } else {
   addEventListener("keydown", (e) => {
-    if (e.repeat) return;
+    if (e.repeat || !document.body.classList.contains("started")) return; // 開始前は表示名に空白を打てるように
     if (e.key === " ") {
       e.preventDefault();
       pressStart();
@@ -584,23 +591,26 @@ if (touch) {
     if (e.key === " ") pressEnd();
   });
 }
-addEventListener("blur", () => {
+function releaseHold() {
   holdStartMs = -1;
   charging = false;
+}
+addEventListener("blur", releaseHold);
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") releaseHold();
 });
 
 /** 自動で打つ（?fakeStroke=）: 自分の手番になって待ち時間が過ぎたら、カップに届く速さで狙い（無ければカップの方向）へ */
 function updateFakeStroke(now: number) {
   if (FAKE_STROKE_SEC === null || !isMyTurn() || !canAct() || !auth) return;
   if (now - myTurnSinceMs < FAKE_STROKE_SEC * 1000) return;
-  if (strokesSent > strokesAccepted) return; // 前の 1 打の返事待ち
   const s = auth.state;
   const ball = s.balls[selfId];
   const cup = s.holes[s.hole]?.cup;
   if (!ball || !cup) return;
   const dist = Math.hypot(cup[0] - ball.pos[0], cup[1] - ball.pos[1]);
   const speed = Math.min(cfg.maxStrokeSpeed, speedForDistance(dist, cfg.decel) + 0.15);
-  myTurnSinceMs = now; // 拒否されても連打しない
+  myTurnSinceMs = now; // 拒否されても FAKE_STROKE_SEC は待つ（連打しない）
   sendStroke(speed, FAKE_STROKE_FACE, "fake");
 }
 
@@ -649,8 +659,9 @@ function updateCourse(now: number) {
     course.setAim(null, null, false, 0);
     course.setPutter(null, null, 0, 0);
   }
-  // 視線のカーソル: 自分の番で、まだ構えていない or 構え直したいとき（常に出す。小さいので邪魔にならない）
-  course.setGaze(isMyTurn() ? gaze : null);
+  // 視線のカーソル: 自分がこのホールを終えていなければ出す（構えは手番外でもできる。小さいので邪魔にならない）
+  const myBall = s.balls[selfId];
+  course.setGaze(myBall && !myBall.done && s.phase !== "result" ? gaze : null);
 }
 function normDir(v: V2): V2 {
   const l = Math.hypot(v[0], v[1]);
@@ -669,13 +680,17 @@ function updateMessages(now: number) {
   const s = auth?.state;
   if (s) {
     const lines = [`ホール ${s.hole + 1} / ${s.holes.length}${s.phase === "result" ? "　結果" : ""}`];
-    const sorted = [...s.players].sort((a, b) => totalOf(s, a.id) - totalOf(s, b.id));
+    // 結果表示では最終ホールの打数はカードに入っているので足さない（外部レビュー指摘: 二重加算）
+    const inPlay = s.phase !== "result";
+    const total = (id: string) => totalOf(s, id) + (inPlay ? (s.balls[id]?.strokes ?? 0) : 0);
+    const sorted = [...s.players].sort((a, b) => total(a.id) - total(b.id));
     for (const p of sorted) {
       const b = s.balls[p.id];
       const cards = s.cards[p.id] ?? [];
       const win = s.winners?.includes(p.id) ? " 🏆" : "";
       const turn = s.turn === p.id ? "▶ " : "　";
-      lines.push(`${turn}${p.name}${p.id === selfId ? "（あなた）" : ""} ${cards.join("+")}${cards.length ? "+" : ""}${b?.strokes ?? 0}${b?.holed ? "✓" : ""} = ${totalOf(s, p.id) + (b?.strokes ?? 0)}${win}`);
+      const current = inPlay ? `${cards.length ? "+" : ""}${b?.strokes ?? 0}${b?.holed ? "✓" : ""}` : "";
+      lines.push(`${turn}${p.name}${p.id === selfId ? "（あなた）" : ""} ${cards.join("+")}${current} = ${total(p.id)}${win}`);
     }
     scorePanel.set(lines.join("\n"), "#e8eaed", "left");
   }
