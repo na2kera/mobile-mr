@@ -1,11 +1,11 @@
 // demos/10-golf のブラウザ経路（マーカー → field 座標変換・視線の交点・Joy-Con の振り → 1 打 → 転がり → カップイン →
-// 手番交代 → ホール進行）をヘッドレス Chrome で確認する。`npm run check:golf` で実行する。
+// 手番交代 → ラウンド結果 → 次の斜め配置）をヘッドレス Chrome で確認する。`npm run check:golf` で実行する。
 // 仕組みは headless-splatoon.mjs と同じ（CDP を ws で直接叩く。Chrome が無ければスキップ）。
 //
 // 確認内容: フェイクカメラ（正面 + 床のマーカー）のスマホ 2 台と、フェイク Joy-Con（?fakeJoycon=1）を繋いだ俯瞰画面を同じ room に入れて、
 //   - 両方でマーカーが検出され、視線と床の交点（gaze）が取れている
 //   - 手番は参加順（p1 → p2）。俯瞰画面のフェイク Joy-Con は「手番の人（自動）」なので p1 の番に振り、stroke が送られてカップイン
-//   - スマホ 2 台目は ?fakeStroke=（自動で届く速さで打つ）でカップイン → 全員終了で次のホール（hole=2）
+//   - スマホ 2 台目は ?fakeStroke=（カップへ狙いを固定して自動で打つ）→ 全員終了 → マスター操作まで結果を保持 → 次ラウンド
 //   - 俯瞰画面で「A ボタン」相当の構え（address）が受理される（狙いが固定される）
 //   - 俯瞰画面の「最初から」でホール 1 に戻る
 //   - 例外が出ていない
@@ -253,6 +253,8 @@ try {
   check("俯瞰画面はプレイヤーではなく、フェイク Joy-Con が 1 台繋がっている", aOv.me.startsWith("p") && aOv.players.length === 2 && aOv.joycons === 1, `${aOv.me} joycons=${aOv.joycons}`);
   check("下を向いているので視線と床の交点（gaze）が取れている", a1.gaze !== null && a2.gaze !== null, `${a1.gaze} / ${a2.gaze}`);
   check("最初の手番は参加順の 1 人目（1 台目のスマホ）", (a1.phase === "aim" && a1.turn === a1.me) || (a1.phase === "rolling" && a1.roll.includes(`:${a1.me}:`)), `${a1.phase} turn=${a1.turn} roll=${a1.roll}`);
+  const phaseGuide = await ov.eval("document.querySelector('#phase')?.textContent");
+  check("俯瞰画面にラウンドの左右・角度・距離が出る", /一打勝負 1 \/ 3.*左.*°.*m/.test(phaseGuide ?? ""), phaseGuide ?? "-");
 
   // ---- p1 の番: フェイク Joy-Con（手番の人に自動）が振る → stroke → カップイン ----
   const tSwing = Date.now();
@@ -273,21 +275,37 @@ try {
   check("スマホ側でも同じ転がりを描き、HOLED の roll を受け取った", p1.logs.some((l) => /\[game\] event stroke/.test(l)) && !p1.logs.some((l) => /roll end mismatch/.test(l)));
   check("振り角（putter）が俯瞰画面からスマホに届き、HUD の putter= に出た", putterSeen, `putter=${s1.putter}`);
 
-  // ---- p2 の番: 自動打ち（fakeStroke）でカップイン → 全員終了 → ホール 2 ----
+  // ---- p2 の番: 自動打ち（fakeStroke）でカップイン → 全員終了 → マスターが次へ ----
   const tHole = Date.now();
   let h1 = await readHud(p1);
-  while (Date.now() - tHole < 30000 && h1.hole < 2) {
+  let sawRoundResult = h1.phase === "roundResult";
+  while (Date.now() - tHole < 30000 && h1.phase !== "roundResult") {
     await sleep(500);
     h1 = await readHud(p1);
+    if (h1.phase === "roundResult") sawRoundResult = true;
   }
-  const h2 = await readHud(p2);
-  const hOv = await readOverview();
+  let h2 = await readHud(p2);
+  let hOv = await readOverview();
   console.log(`hole2 window1: ${show(h1)}`);
   console.log(`hole2 window2: ${show(h2)}`);
   console.log(`hole2 overview: ${showOv(hOv)}`);
   check("2 台目のスマホが自分の番に自動で打ち（fakeStroke）、サーバーに受理された", h2.sent >= 1 && h2.accepted >= 1 && serverLines.some((l) => new RegExp(`\\] ${h2.me} stroke\\(${h2.me}\\) #\\d+:`).test(l)), `${h2.sent}/${h2.accepted}`);
-  check("全員が終えて次のホール（hole=2）に進み、カードに 1 ホール目の打数が入った", h1.hole === 2 && h2.hole === 2 && hOv.hole === 2 && h1.cards[h1.me] !== "-" && h1.cards[h2.me] !== "-", `cards=${JSON.stringify(h1.cards)}`);
-  check("新しいホールで打数が 0 に戻り、手番は 1 台目のスマホ", h1.balls[h1.me]?.strokes === 0 && h1.turn === h1.me, JSON.stringify(h1.balls));
+  await sleep(1500);
+  h1 = await readHud(p1);
+  check("全員の一打後、時間が経ってもラウンド結果を保持する", sawRoundResult && h1.phase === "roundResult" && h1.hole === 1, `phase=${h1.phase} cards=${JSON.stringify(h1.cards)}`);
+  const advanceText = await ov.eval("document.querySelector('#advance-round')?.textContent");
+  const advanceVisible = await ov.eval("!document.querySelector('#advance-round')?.hidden");
+  check("俯瞰画面に次のラウンドへボタンが出る", advanceVisible === true && advanceText === "次のラウンドへ", `${advanceVisible}/${advanceText}`);
+  await ov.eval("document.querySelector('#advance-round').click()");
+  const tAdvance = Date.now();
+  while (Date.now() - tAdvance < 5000 && h1.hole < 2) {
+    await sleep(200);
+    h1 = await readHud(p1);
+  }
+  h2 = await readHud(p2);
+  hOv = await readOverview();
+  check("マスター操作で次ラウンドへ進む", h1.hole === 2 && h2.hole === 2 && hOv.hole === 2, `${h1.hole}/${h2.hole}/${hOv.hole}`);
+  check("第1ラウンドの順位点を保持し、新ラウンドでは打数が0に戻る", h1.cards[h1.me] !== "-" && h1.cards[h2.me] !== "-" && h1.balls[h1.me]?.strokes === 0 && h1.turn === h1.me, JSON.stringify(h1.balls));
 
   // ---- 俯瞰画面の「構え」（Joy-Con の A 相当）: window.__fakeJoycon で A を押す → address が受理され狙いが固定される ----
   // フェイク Joy-Con は手番の人（p1）を担当。p1 の視線の交点（gaze）が届いているので address が通る
@@ -310,7 +328,7 @@ try {
   await sleep(1500);
   const r1 = await readHud(p1);
   const rOv = await readOverview();
-  check("俯瞰画面の「最初から」でホール 1 に戻り、カードが空になる", rOv.restarts === 1 && r1.hole === 1 && r1.cards[r1.me] === "-" && serverLines.some((l) => /restart → restart\+turn/.test(l)), `hole=${r1.hole} cards=${JSON.stringify(r1.cards)}`);
+  check("俯瞰画面の「最初から」でラウンド 1 に戻り、順位点が空になる", rOv.restarts === 1 && r1.hole === 1 && r1.cards[r1.me] === "-" && serverLines.some((l) => /restart → restart\+turn/.test(l)), `hole=${r1.hole} cards=${JSON.stringify(r1.cards)}`);
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0 && ov.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions, ...ov.exceptions].slice(0, 2).join(" | "));
   for (const l of ov.logs.filter((l) => /\[overview\] (impact|fake swing|address)/.test(l)).slice(0, 4)) console.log(`overview log: ${l}`);
   for (const l of p1.logs.filter((l) => /\[game\] (event stroke|stroke sent)/.test(l)).slice(0, 2)) console.log(`window1 log: ${l}`);

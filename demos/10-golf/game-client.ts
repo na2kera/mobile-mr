@@ -44,6 +44,7 @@ export type GameClient = {
   sendStroke: (speed: number, faceDeg: number, playerId?: string) => boolean;
   /** パターの振り角（俯瞰画面だけ） */
   sendPutter: (playerId: string, angleDeg: number, dps: number) => boolean;
+  sendAdvanceRound: () => boolean;
   sendRestart: () => boolean;
   sendField: (size: FieldSize) => boolean;
   sendRules: (rules: GolfRules) => boolean;
@@ -145,9 +146,10 @@ export function connectGame(room: string, name: string, config: GolfRoomConfig, 
       return send(m);
     },
     sendPutter: (playerId, angleDeg, dps) => send({ type: "putter", playerId, angleDeg, dps }),
+    sendAdvanceRound: () => send({ type: "advanceRound" }),
     sendRestart: () => send({ type: "restart" }),
     sendField: (size) => send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop }),
-    sendRules: (rules) => send({ type: "rules", decel: rules.decel, cupMaxSpeed: rules.cupMaxSpeed, maxStrokes: rules.maxStrokes, holes: rules.holes }),
+    sendRules: (rules) => send({ type: "rules", decel: rules.decel, cupMaxSpeed: rules.cupMaxSpeed, holes: rules.holes }),
     sendMarkers: (markers) => send({ type: "markers", markers }),
     dispose() {
       disposed = true;

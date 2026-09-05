@@ -16,7 +16,8 @@ import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, project
 import type { FakeMarker } from "../../src/shared/fake-markers";
 import { TextPanel } from "../../src/shared/text-panel";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import { BALL_R, CUP_R, DEFAULT_GOLF, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance } from "../../src/shared/golf-sim";
+import { BALL_R, CUP_R, DEFAULT_GOLF, holeHint, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance } from "../../src/shared/golf-sim";
+import { scoreTotal, shotLabel } from "../../src/shared/golf-score";
 import type { GolfConfig, RollResult, V2, V3 } from "../../src/shared/golf-sim";
 import type { GameSnapshot } from "../../src/shared/golf-game";
 import { NAME_MAX_LENGTH } from "../../src/shared/golf-protocol";
@@ -30,11 +31,11 @@ import { startRemoteLog } from "../../src/shared/remote-log";
 //   - コート: 08 と同じ field 座標系（正面の壁のマーカーが原点、床 = Y=-floorDrop）。床がグリーン、四方の壁はクッション。
 //     マルチマーカー（床のマーカー）は下を向いてパットするこのゲームでは実質必須（正面のマーカーが視界から外れる）
 //   - 打ち方: ホール（か狙いたい場所）を見て「構え」（画面タップ / Joy-Con の A）→ 狙い線が固定される。
-//     構えなければ狙いはカップの方向。振りは PC の俯瞰画面に繋いだ Joy-Con（振りの速さと面の開きを検出して 1 打として届く）。
+//     構えなければ狙いは正面。振りは PC の俯瞰画面に繋いだ Joy-Con（振りの速さと面の開きを検出して 1 打として届く）。
 //     Joy-Con が無いときの保険: 画面長押しで溜めて離す（PC は Space）。溜めた量で速さ
 //   - 見た目: Joy-Con の位置は取れないので、パターはボールの真上を支点にした振り子として描き、角度だけ Joy-Con に追従する
 //   - 共有: サーバー権威（server/golf.ts）。1 打の向きと速さから転がり（golf-sim.ts の simulateRoll）を計算して終点を決め、
-//     全員の端末が同じ式で転がりを描く。参加順に 1 打ずつ交代、3 ホールの合計打数で勝負
+//     全員の端末が同じ式で転がりを描く。参加順に 1 打ずつ交代、各自一打・3 ラウンドの合計順位点で勝負
 //   - 手トラッキングは使わない（08 より軽い）
 
 // ---- パラメータ（06〜08 と同じもの。根拠は 06 の main.ts 参照） ----
@@ -374,13 +375,17 @@ function onState(state: GameSnapshot) {
       if (ev.playerId === selfId) pushFlash("あなたの番！\n狙いを見てタップ（構え）→ 振る", 3000, now);
       else pushFlash(`${nameOf(ev.playerId)} の番`, 2000, now);
     } else if (ev?.kind === "hole") {
-      pushFlash(`ホール ${ev.hole + 1} へ`, 2000, now);
+      flash = { text: `ラウンド ${ev.hole + 1}\n${holeHint(state.holes[state.hole])}`, untilMs: now + 2500 };
+      flashQueue.length = 0;
+    } else if (ev?.kind === "roundResult") {
+      flash = null;
+      flashQueue.length = 0;
     } else if (ev?.kind === "timeout") {
       pushFlash(`${nameOf(ev.by)} は時間切れ`, 2000, now);
     } else if (ev?.kind === "restart") {
-      pushFlash("最初から（ホール 1）", 2000, now);
+      pushFlash("最初から（ラウンド 1）", 2000, now);
     } else if (ev?.kind === "field" || ev?.kind === "rules") {
-      pushFlash(ev.kind === "field" ? `コートが変わりました\n幅 ${cfg.wallW}m × 奥行き ${cfg.floorDepth}m` : `ルールが変わりました\n${cfg.holes} ホール・${cfg.maxStrokes} 打まで`, 3000, now);
+      pushFlash(ev.kind === "field" ? `コートが変わりました\n幅 ${cfg.wallW}m × 奥行き ${cfg.floorDepth}m` : `ルールが変わりました\n${cfg.holes} ラウンド・各自一打`, 3000, now);
     } else if (ev?.kind === "result") {
       const text = ev.winners.length === 0 ? "だれもいません…" : ev.winners.includes(selfId) ? "あなたの勝ち！" : `${ev.winnerNames.join("・")} の勝ち！`;
       flash = { text, untilMs: now + 5000 };
@@ -613,7 +618,7 @@ addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") releaseHold();
 });
 
-/** 自動で打つ（?fakeStroke=）: 自分の手番になって待ち時間が過ぎたら、カップに届く速さで狙い（無ければカップの方向）へ */
+/** 自動で打つ（?fakeStroke=）: 自分の手番になって待ち時間が過ぎたら、カップに届く速さで狙い（未設定は正面）へ */
 function updateFakeStroke(now: number) {
   if (FAKE_STROKE_SEC === null || !isMyTurn() || !canAct() || !auth) return;
   if (now - myTurnSinceMs < FAKE_STROKE_SEC * 1000) return;
@@ -624,6 +629,8 @@ function updateFakeStroke(now: number) {
   const dist = Math.hypot(cup[0] - ball.pos[0], cup[1] - ball.pos[1]);
   const speed = Math.min(cfg.maxStrokeSpeed, speedForDistance(dist, cfg.decel) + 0.15);
   myTurnSinceMs = now; // 拒否されても FAKE_STROKE_SEC は待つ（連打しない）
+  // フェイクだけはカップへ明示的に構える。実操作は視線で向きを決める
+  client?.sendAddress(undefined, cup);
   sendStroke(speed, FAKE_STROKE_FACE, "fake");
 }
 
@@ -655,12 +662,11 @@ function updateCourse(now: number) {
   }
   course.setBalls(balls, now);
   course.setHole(s.holes[s.hole] ?? null, s.hole);
-  // 狙い線: 手番の人のボールから。自分の分は構えていれば固定の狙い、無ければカップの方向（サーバーと同じ既定）
+  // 狙い線: 構えていなければ正面（サーバーと同じ既定）
   const turnId = s.phase === "aim" ? s.turn : null;
   if (turnId && s.balls[turnId]) {
     const ball = s.balls[turnId];
-    const cup = s.holes[s.hole]?.cup ?? [0, 0];
-    const aim = s.aims[turnId] ?? normDir([cup[0] - ball.pos[0], cup[1] - ball.pos[1]]);
+    const aim: V2 = s.aims[turnId] ?? [0, -1];
     course.setAim(ball.pos, aim, s.aims[turnId] !== null, playerColorHex(colorOf(turnId) ?? 1));
     // 振り子パター: Joy-Con の振り角（届いていれば）、自分なら溜め中はバックスイックの角度で
     const pt = putters.get(turnId);
@@ -676,15 +682,11 @@ function updateCourse(now: number) {
   const myBall = s.balls[selfId];
   course.setGaze(myBall && !myBall.done && s.phase !== "result" ? gaze : null);
 }
-function normDir(v: V2): V2 {
-  const l = Math.hypot(v[0], v[1]);
-  return l > 0 ? [v[0] / l, v[1] / l] : [0, -1];
-}
 
 function remainingSec(now: number): number {
   const s = auth?.state;
   if (!s || !auth) return 0;
-  const end = s.phase === "aim" ? s.turnEndsAt : s.phaseEndsAt;
+  const end = s.phase === "aim" ? s.turnEndsAt : null;
   if (end === null) return 0;
   return Math.max(0, (end - s.t) / 1000 - (now - auth.recvMs) / 1000);
 }
@@ -692,18 +694,12 @@ function remainingSec(now: number): number {
 function updateMessages(now: number) {
   const s = auth?.state;
   if (s) {
-    const lines = [`ホール ${s.hole + 1} / ${s.holes.length}${s.phase === "result" ? "　結果" : ""}`];
-    // 結果表示では最終ホールの打数はカードに入っているので足さない（外部レビュー指摘: 二重加算）
-    const inPlay = s.phase !== "result";
-    const total = (id: string) => totalOf(s, id) + (inPlay ? (s.balls[id]?.strokes ?? 0) : 0);
-    const sorted = [...s.players].sort((a, b) => total(a.id) - total(b.id));
+    const lines = [`一打勝負 ${s.hole + 1} / ${s.holes.length}${s.phase === "result" ? "　総合結果" : s.phase === "roundResult" ? "　ラウンド結果" : ""}`];
+    const sorted = [...s.players].sort((a, b) => scoreTotal(s, b.id) - scoreTotal(s, a.id));
     for (const p of sorted) {
-      const b = s.balls[p.id];
-      const cards = s.cards[p.id] ?? [];
       const win = s.winners?.includes(p.id) ? " 🏆" : "";
       const turn = s.turn === p.id ? "▶ " : "　";
-      const current = inPlay ? `${cards.length ? "+" : ""}${b?.strokes ?? 0}${b?.holed ? "✓" : ""}` : "";
-      lines.push(`${turn}${p.name}${p.id === selfId ? "（あなた）" : ""} ${cards.join("+")}${current} = ${total(p.id)}${win}`);
+      lines.push(`${turn}${p.name} ${scoreTotal(s, p.id)}点${win} · ${shotLabel(s, p.id)}`);
     }
     scorePanel.set(lines.join("\n"), "#e8eaed", "left");
   }
@@ -742,24 +738,22 @@ function updateMessages(now: number) {
       const names = s.winnerNames ?? [];
       text = w.length === 0 ? "結果" : w.includes(selfId) ? "あなたの勝ち！" : `${names.join("・")} の勝ち`;
       color = w.includes(selfId) ? "#81c995" : "#e8eaed";
+    } else if (s.phase === "roundResult") {
+      text = `ラウンド ${s.hole + 1} 結果\n${shotLabel(s, selfId)}\nマスターが進めるまでお待ちください`;
     } else if (s.phase === "rolling") {
       text = liveRoll ? `${liveRoll.by === selfId ? "あなた" : nameOf(liveRoll.by)} のボールが転がっています` : "転がっています";
     } else if (s.phase === "aim" && s.turn === selfId) {
-      const b = s.balls[selfId];
       const aimed = s.aims[selfId] !== null;
-      text = `あなたの番（${me}・${(b?.strokes ?? 0) + 1} 打目）\n${aimed ? "狙い OK。Joy-Con を振る ／ 長押しで溜めて離す" : "狙いを見てタップ（無ければカップへ）\nJoy-Con を振る ／ 長押しで溜めて離す"}`;
+      text = `あなたの一打（${me}）· ${holeHint(s.holes[s.hole])}\n${aimed ? "狙い固定。Joy-Con を振る ／ 長押しで打つ" : "狙いを見てタップ／Aで固定（未設定は正面）"}`;
       color = myColor ? `#${playerColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
     } else if (s.phase === "aim" && s.turn) {
-      text = `${nameOf(s.turn)} の番です\n（あなたは ${me}）`;
+      text = `${nameOf(s.turn)} の番です\nあなた: ${shotLabel(s, selfId)}`;
     } else {
       text = "プレイヤーを待っています";
     }
   }
   message.set(text, color);
   chargePanel.set(charging ? `溜め ${"■".repeat(Math.round(charge * 10))}${"□".repeat(10 - Math.round(charge * 10))} ${(cfg.minStrokeSpeed + (STROKE_MAX - cfg.minStrokeSpeed) * charge).toFixed(1)} m/s` : "", "#fdd663");
-}
-function totalOf(s: GameSnapshot, id: string): number {
-  return (s.cards[id] ?? []).reduce((a, b) => a + b, 0);
 }
 
 // ---- 頭追従 ----

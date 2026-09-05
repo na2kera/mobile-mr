@@ -2,7 +2,7 @@
 //   1. src/shared/golf-sim.ts — 転がり（減速・クッション・カップイン / リップアウト）・ホールの配置・向きの回転
 //   2. src/shared/joycon-report.ts — Joy-Con の入力レポート 0x30 の解析（ボタン・IMU の 3 サンプル）・サブコマンドのパケット
 //   3. src/shared/swing-detector.ts — ジャイロの時系列から「構え → バックスイング → インパクト」を検出する状態機械
-//   4. src/shared/golf-game.ts — ルール（参加順の手番・構え・1 打・カップイン・打ち切り・ホール進行・結果・離脱・タイムアウト）
+//   4. src/shared/golf-game.ts — ルール（参加順・一打制・残り距離・順位点・ラウンド進行・離脱・タイムアウト）
 //   5. server/golf.ts — WebSocket の受け付け・俯瞰画面の代理 stroke・putter の中継・config の配信（Vite dev サーバーを起動して叩く）
 // テストフレームワークは使わない（04〜09 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
@@ -32,6 +32,7 @@ import {
 } from "../src/shared/joycon-report.ts";
 import { DEFAULT_SWING_OPTIONS, SwingDetector, impactSpeed } from "../src/shared/swing-detector.ts";
 import { GolfGame } from "../src/shared/golf-game.ts";
+import { scoreTotal, shotLabel } from "../src/shared/golf-score.ts";
 import { GOLF_PATH, GOLF_PROTOCOL_VERSION } from "../src/shared/golf-protocol.ts";
 
 const results = [];
@@ -88,7 +89,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ホールの配置
   const holes = makeHoles({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }, 3);
   check("3 ホール: ティーは奥（z 大）、カップは壁側（z 小）、コートの中", holes.length === 3 && holes.every((h) => h.tee[1] > h.cup[1] && h.cup[1] > 0 && h.tee[1] < 2.5 && Math.abs(h.tee[0]) < 1.5 && Math.abs(h.cup[0]) < 1.5), JSON.stringify(holes));
-  check("2・3 ホール目は斜め（ティーとカップの x が逆）", holes[1].tee[0] * holes[1].cup[0] < 0 && holes[2].tee[0] * holes[2].cup[0] < 0 && holes[1].tee[0] === -holes[2].tee[0]);
+  check("同じティーから左・右・左へ角度と距離を変える", holes.every(h => JSON.stringify(h.tee) === JSON.stringify(holes[0].tee)) && holes[0].cup[0] < 0 && holes[1].cup[0] > 0 && holes[2].cup[0] < 0 && holes[0].cup[1] < holes[1].cup[1] && holes[1].cup[1] < holes[2].cup[1]);
+  for (const size of [{ ...DEFAULT_GOLF }, { ...DEFAULT_GOLF, wallW: 0.4, floorDepth: 0.5 }, { ...DEFAULT_GOLF, wallW: 1, floorDepth: 8 }]) {
+    const all = makeHoles(size, 9);
+    check("9 配置すべて斜め・異なる配置・カップがコート内", new Set(all.map(h => JSON.stringify(h))).size === 9 && all.every(h => Math.abs(h.cup[0]) > 0 && Math.abs(h.cup[0]) + CUP_R < size.wallW / 2 && h.cup[1] > CUP_R && h.cup[1] < h.tee[1]), `${size.wallW}x${size.floorDepth}`);
+  }
   check("5 ホールは繰り返し", makeHoles({ wallW: 3, wallH: 2.4, floorDepth: 2.5, floorDrop: 1.2 }, 5).length === 5);
   check("小さいコートでも配置がコートの中", (() => { const h = makeHoles({ wallW: 0.4, wallH: 1, floorDepth: 0.5, floorDrop: 1 }, 3); return h.every((x) => Math.abs(x.tee[0]) < 0.2 && x.tee[1] < 0.5 && x.cup[1] > 0); })());
 
@@ -97,7 +102,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("rotate2: +deg で上から見て左（-X）へ振れる", d[0] < 0 && d[1] < 0 && near(Math.hypot(d[0], d[1]), 1));
   check("rotate2: 0° は恒等", near(rotate2([0.6, -0.8], 0)[0], 0.6));
 
-  check("validateGolfRules: 範囲外と非整数を弾く", validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, maxStrokes: 6, holes: 3 }) === null && validateGolfRules({ decel: 0, cupMaxSpeed: 1.4, maxStrokes: 6, holes: 3 }) !== null && validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, maxStrokes: 2.5, holes: 3 }) !== null);
+  check("validateGolfRules: 範囲外と非整数を弾く", validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, holes: 3 }) === null && validateGolfRules({ decel: 0, cupMaxSpeed: 1.4, holes: 3 }) !== null && validateGolfRules({ decel: 0.8, cupMaxSpeed: 1.4, holes: 2.5 }) !== null);
 }
 
 // ================= 2. joycon-report =================
@@ -301,7 +306,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 4. game =================
 {
-  const g = new GolfGame({ holes: 2, maxStrokes: 3 }, { settleMs: 100, resultMs: 500, turnTimeoutMs: 1000 });
+  const g = new GolfGame({ holes: 2 }, { settleMs: 100, turnTimeoutMs: 1000 });
   let now = 1000;
   check("最初は lobby", g.phase === "lobby" && g.holes.length === 2);
   const ej = g.join("p1", "Alice", now);
@@ -317,40 +322,41 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("視線が無い構えは拒否", g.address("p1", undefined) === false && /gaze/.test(g.lastRejectReason));
   g.updateGaze("p1", [0.5, 0.2]);
   check("視線の交点から構えられる（狙い = ボール → 交点）", g.address("p1", undefined) === true && g.aims.get("p1")[0] > 0 && g.aims.get("p1")[1] < 0);
-  check("構えが無ければ狙いはカップの方向", (() => { g.clearAim("p1"); const a = g.aimOf("p1"); const cup = g.holes[0].cup; const ball = g.balls.get("p1"); return near(a[0], (cup[0] - ball.pos[0]) / Math.hypot(cup[0] - ball.pos[0], cup[1] - ball.pos[1]), 1e-9); })());
+  check("構えが無ければ正面（斜めのカップへ自動照準しない）", (() => { g.clearAim("p1"); return JSON.stringify(g.aimOf("p1")) === "[0,-1]" && g.holes[0].cup[0] !== 0; })());
   check("手番でなくても自分の構えはできる", g.address("p2", [0, 0]) === true);
   // 1 打（弱い）: 転がり → rolling → settle 後に p2 の手番
   const e1 = g.stroke("p1", 0.5, 0, now);
   check("1 打を受理: rolling・roll に from/vel/end・打数 1", e1?.[0]?.kind === "stroke" && g.phase === "rolling" && g.roll?.by === "p1" && g.balls.get("p1").strokes === 1 && !g.balls.get("p1").holed);
+  check("外しても一打で終了し、確定距離を記録", g.balls.get("p1").done && g.balls.get("p1").distanceMm > 0);
+  check("表示は転がり中に確定済みの距離を先出ししない", shotLabel(g.snapshot(now), "p1") === "転がり中" && scoreTotal(g.snapshot(now), "p1") === 0);
   check("転がっている間の stroke は拒否", g.stroke("p2", 1, 0, now) === null && /phase=rolling/.test(g.lastRejectReason));
   check("転がりの途中の tick では何も起きない", g.tick(now + 10).length === 0);
   now += g.roll.duration * 1000 + 200;
   const e2 = g.tick(now);
   check("止まって settle 後に次の手番（p2）", e2[0]?.kind === "turn" && e2[0].playerId === "p2" && g.phase === "aim" && g.turn === "p2");
-  // p2 がカップイン（狙いはカップの方向のまま、届く速さ）
+  // p2 がカップイン（カップへ明示的に構え、届く速さ）
   const ball2 = g.balls.get("p2");
   const cup = g.holes[0].cup;
   const dist = Math.hypot(cup[0] - ball2.pos[0], cup[1] - ball2.pos[1]);
-  g.clearAim("p2");
+  g.address("p2", cup);
   const e3 = g.stroke("p2", speedForDistance(dist, g.config.decel) + 0.2, 0, now);
   check("p2 が適度な速さでカップの方向に打つとカップイン（done）", e3?.[0]?.holed === true && g.balls.get("p2").holed && g.balls.get("p2").done, JSON.stringify(g.roll));
   now += g.roll.duration * 1000 + 200;
   const e4 = g.tick(now);
-  check("次は p1（p2 は終えたので飛ばす）", e4[0]?.kind === "turn" && e4[0].playerId === "p1");
-  // p1 は 3 打まで（maxStrokes=3）: 2 打目・3 打目を外し続けると打ち切り → ホール 2 へ
-  g.stroke("p1", 0.4, 60, now);
-  now += g.roll.duration * 1000 + 200;
-  const e5 = g.tick(now);
-  check("p1 の 2 打目の後もまだ p1 の手番（p2 は終えている）", e5[0]?.playerId === "p1" && g.balls.get("p1").strokes === 2);
-  g.stroke("p1", 0.4, -60, now);
-  check("3 打目で打ち切り（done, holed でない）", g.balls.get("p1").done && !g.balls.get("p1").holed && g.balls.get("p1").strokes === 3);
-  now += g.roll.duration * 1000 + 200;
-  const e6 = g.tick(now);
-  check("全員が終えたので次のホール（hole イベント + 手番は参加順の先頭 p1）。カードに打数", e6[0]?.kind === "hole" && e6[0].hole === 1 && e6[1]?.kind === "turn" && e6[1].playerId === "p1" && g.cards.get("p1")[0] === 3 && g.cards.get("p2")[0] === 1);
-  check("新しいホールではボールがティーに戻り、打数 0", g.balls.get("p1").strokes === 0 && !g.balls.get("p1").done && g.balls.get("p1").pos[0] === g.holes[1].tee[0]);
-  // タイムアウト: p1 が打たない → 打ち切り（maxStrokes）で p2 へ
+  check("全員の一打後はラウンド結果（同じボール位置を維持）", e4[0]?.kind === "roundResult" && g.phase === "roundResult" && g.hole === 0 && g.turn === null && g.balls.get("p1").strokes === 1);
+  check("カップインが1位2点、外した人が2位1点", g.balls.get("p2").rank === 1 && g.cards.get("p2")[0] === 2 && g.balls.get("p1").rank === 2 && g.cards.get("p1")[0] === 1);
+  check("二打目は拒否され、得点が増えない", g.stroke("p1", 0.4, 0, now) === null && g.cards.get("p1")[0] === 1 && g.balls.get("p1").strokes === 1);
+  const snapRound = g.snapshot(now);
+  check("確定結果の表示は距離・順位・加点、合計は二重加算しない", /2位.*残り.*1点/.test(shotLabel(snapRound, "p1")) && scoreTotal(snapRound, "p2") === 2);
+  check("時間が経っても結果を保持し、再採点しない", g.tick(now + 60000).length === 0 && g.phase === "roundResult" && g.cards.get("p1").length === 1);
+  now += 60000;
+  const e6 = g.advanceRound(now);
+  check("マスター進行で次の配置、手番は参加順の先頭", e6?.[0]?.kind === "hole" && e6[0].hole === 1 && e6[1]?.playerId === "p1");
+  check("結果表示中以外の進行要求は拒否", g.advanceRound(now) === null && /phase=aim/.test(g.lastRejectReason));
+  check("新ラウンドは全員ティー・未打・狙い解除・距離と順位とrollをクリア", [...g.balls.values()].every(b => b.strokes === 0 && !b.done && b.distanceMm === null && b.rank === null && JSON.stringify(b.pos) === JSON.stringify(g.holes[1].tee)) && g.aims.size === 0 && g.roll === null);
+  // タイムアウト: 打っていないまま0点、次の人へ
   const e7 = g.tick(now + 1001);
-  check("手番のタイムアウトで打ち切り（maxStrokes）にして次の人へ", e7[0]?.kind === "timeout" && e7[0].by === "p1" && g.balls.get("p1").strokes === 3 && g.balls.get("p1").done && e7[1]?.kind === "turn" && e7[1].playerId === "p2");
+  check("手番のタイムアウトは未打・距離なしで次の人へ", e7[0]?.kind === "timeout" && e7[0].by === "p1" && g.balls.get("p1").strokes === 0 && g.balls.get("p1").distanceMm === null && g.balls.get("p1").done && e7[1]?.playerId === "p2");
   now += 1001;
   // 途中参加: いまのホールのティーから、手番はそのまま
   g.join("p3", "Carol", now);
@@ -358,19 +364,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // p2 がカップイン → p3 の手番 → p3 が抜ける → ホール終了 → 結果
   const b2 = g.balls.get("p2");
   const d2 = Math.hypot(g.holes[1].cup[0] - b2.pos[0], g.holes[1].cup[1] - b2.pos[1]);
+  g.address("p2", g.holes[1].cup);
   g.stroke("p2", speedForDistance(d2, g.config.decel) + 0.2, 0, now);
   check("p2 の 2 ホール目カップイン", g.balls.get("p2").holed);
   now += g.roll.duration * 1000 + 200;
   const e8 = g.tick(now);
   check("次は途中参加の p3", e8[0]?.playerId === "p3");
-  const e9 = g.leave("p3", now);
-  check("手番の人が抜けると全員終了 → 結果。勝者は全ホール打った中で最少の p2", e9[0]?.kind === "result" && g.phase === "result" && g.winners.length === 1 && g.winners[0] === "p2" && g.winnerNames[0] === "Bob", JSON.stringify(e9));
-  check("合計: p1 = 3 + 3、p2 = 1 + 1", g.totalOf("p1") === 6 && g.totalOf("p2") === 2);
+  const leaveRound = g.leave("p3", now);
+  check("未打の人が退出しても残り全員終了ならラウンド結果へ", leaveRound[0]?.kind === "roundResult" && g.phase === "roundResult");
+  const e9 = g.advanceRound(now);
+  check("最終ラウンドをマスターが進めると総合結果、最多点のp2が勝ち", e9?.[0]?.kind === "result" && g.phase === "result" && g.winners.length === 1 && g.winners[0] === "p2" && g.winnerNames[0] === "Bob", JSON.stringify(e9));
+  check("合計: p1 = 1 + 0、p2 = 2 + 2", g.totalOf("p1") === 1 && g.totalOf("p2") === 4);
   const snap = g.snapshot(now, e9[0]);
-  check("snapshot: players・balls・cards・holes・winners・event", snap.players.length === 2 && snap.balls.p1.strokes === 3 && snap.cards.p2.length === 2 && snap.holes.length === 2 && snap.winners[0] === "p2" && snap.event.kind === "result" && snap.phaseEndsAt !== null && snap.turn === null);
-  // 結果表示の終わりで最初から
-  const e10 = g.tick(now + 600);
-  check("結果表示の終わりで最初から（restart + 手番 p1、ホール 1、カード空）", e10[0]?.kind === "restart" && e10[1]?.kind === "turn" && g.hole === 0 && g.cards.get("p1").length === 0 && g.phase === "aim");
+  check("snapshot: players・balls・cards・holes・winners・event", snap.players.length === 2 && snap.balls.p1.strokes === 0 && snap.cards.p2.length === 2 && snap.holes.length === 2 && snap.winners[0] === "p2" && snap.event.kind === "result" && snap.turn === null);
+  check("総合結果も時間では消えない", g.tick(now + 60000).length === 0 && g.phase === "result");
+  const e10 = g.restart(now + 60000);
+  check("マスターの最初からで再開（restart + 手番 p1、ラウンド 1、カード空）", e10[0]?.kind === "restart" && e10[1]?.kind === "turn" && g.hole === 0 && g.cards.get("p1").length === 0 && g.phase === "aim");
   // 全員抜けると lobby
   g.leave("p1", now);
   check("手番の p1 が抜けると p2 の手番", g.turn === "p2");
@@ -388,19 +397,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const e4l = g4.tick(rollDur * 1000 + 200);
   check("p2 が転がし中に抜けると、止まった後は p3 の番（p1 に戻らない）", e4l[0]?.kind === "turn" && e4l[0].playerId === "p3", JSON.stringify(e4l));
   // 結果表示中に参加した（一度も打っていない）人は勝者にならない
-  const g5 = new GolfGame({ holes: 1 }, { settleMs: 100, resultMs: 100000 });
+  const g5 = new GolfGame({ holes: 1 }, { settleMs: 100 });
   g5.join("p1", "A", 0);
   {
     const cup = g5.holes[0].cup;
     const b = g5.balls.get("p1");
+    g5.address("p1", cup);
     g5.stroke("p1", speedForDistance(Math.hypot(cup[0] - b.pos[0], cup[1] - b.pos[1]), g5.config.decel) + 0.2, 0, 0);
     g5.tick(g5.roll.duration * 1000 + 200);
+    g5.advanceRound(g5.roll.startedAt + g5.roll.duration * 1000 + 200);
     check("1 人でも 1 ホール終えれば結果（勝者は本人）", g5.phase === "result" && g5.winners[0] === "p1");
     check("結果表示中はカードに最終ホールが入り、roll は消えている", g5.cards.get("p1").length === 1 && g5.roll === null);
     g5.join("p9", "Z", 0);
     g5.leave("p1", 0);
     check("結果表示中に参加した人だけが残っても勝者にはならない（空）", g5.phase === "result" && g5.winners.length === 0, JSON.stringify(g5.winners));
-    check("終えた人の構えは拒否（already done）", (() => { const g6 = new GolfGame({ maxStrokes: 1 }); g6.join("p1", "A", 0); g6.stroke("p1", 0.4, 0, 0); return g6.address("p1", [0, 0]) === false && /done/.test(g6.lastRejectReason); })());
+    check("終えた人の構えは拒否（already done）", (() => { const g6 = new GolfGame(); g6.join("p1", "A", 0); g6.stroke("p1", 0.4, 0, 0); return g6.address("p1", [0, 0]) === false && /done/.test(g6.lastRejectReason); })());
   }
   // 3 人で手番の人が抜けると、直後の人（参加順の次）の手番になる（外部レビュー指摘: 配列が詰まるぶん 1 人飛ばしていた）
   const g3 = new GolfGame();
@@ -417,15 +428,69 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const es = g2.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 0);
   check("寸法の変更: field + restart + turn。ホールは新しい寸法で作り直し", es?.[0]?.kind === "field" && es[1]?.kind === "restart" && g2.config.wallW === 2 && g2.holes[0].tee[1] > 3);
   check("不正な寸法は拒否", g2.setFieldSize({ wallW: 0, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 0) === null);
-  const er = g2.setRules({ decel: 1.2, cupMaxSpeed: 1, maxStrokes: 4, holes: 2 }, 0);
+  const er = g2.setRules({ decel: 1.2, cupMaxSpeed: 1, holes: 2 }, 0);
   check("ルールの変更: ホール数が変わり最初から", er?.[0]?.kind === "rules" && g2.holes.length === 2 && g2.config.decel === 1.2);
   g2.stroke("p1", 0.5, 0, 0);
-  check("転がっている間の寸法・ルールの変更は拒否", g2.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 0) === null && g2.setRules({ decel: 1.2, cupMaxSpeed: 1, maxStrokes: 4, holes: 2 }, 0) === null);
+  check("転がっている間の寸法・ルールの変更は拒否", g2.setFieldSize({ wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 }, 0) === null && g2.setRules({ decel: 1.2, cupMaxSpeed: 1, holes: 2 }, 0) === null);
   check("マーカーの配置はいつでも変えられる（ゲームは進めない）", g2.setMarkers([{ id: 1, face: "floor", pos: [0, -1, 2] }]) && g2.config.markers.length === 1 && g2.phase === "rolling");
 }
 
+// 一打勝負の境界条件: 残り距離・同順位・時間切れ・参加/退出・結果保持
+{
+  const g = new GolfGame({ holes: 2 }, { settleMs: 0, turnTimeoutMs: 1000 });
+  for (const id of ["p1", "p2", "p3", "p4"]) g.join(id, id, 0);
+  let now = 0;
+  for (const [id, speed] of [["p1", 0.4], ["p2", 0.8], ["p3", 0.8]]) {
+    g.address(id, g.holes[0].cup);
+    g.stroke(id, speed, 0, now);
+    now += g.roll.duration * 1000 + 1;
+    g.tick(now);
+  }
+  check("未終了者がいる間は既に打った人の二打目を拒否", g.turn === "p4" && g.stroke("p1", 1, 0, now) === null);
+  now = g.turnEndsAt;
+  g.tick(now);
+  check("残り距離で同順位: 1位・1位・3位、タイムアウト0点", g.balls.get("p2").rank === 1 && g.balls.get("p3").rank === 1 && g.balls.get("p1").rank === 3 && g.cards.get("p2")[0] === 4 && g.cards.get("p3")[0] === 4 && g.cards.get("p1")[0] === 2 && g.cards.get("p4")[0] === 0);
+  const oldEnd = [...g.balls.get("p1").pos];
+  g.join("p5", "Late", now);
+  check("結果中の入室者は次から参加、既存点数は変わらない", g.balls.get("p5").done && g.cards.get("p5").length === 0 && g.cards.get("p2")[0] === 4 && shotLabel(g.snapshot(now), "p5") === "次から参加");
+  g.leave("p3", now);
+  check("結果中の退出で再採点しない・停止位置を維持", g.cards.get("p2")[0] === 4 && JSON.stringify(g.balls.get("p1").pos) === JSON.stringify(oldEnd));
+  g.tick(now + 60000);
+  check("長時間経過してもラウンド結果と停止位置を保持", g.phase === "roundResult" && JSON.stringify(g.balls.get("p1").pos) === JSON.stringify(oldEnd));
+  g.advanceRound(now + 60000);
+  check("結果中の参加者も次ラウンドで打てる", !g.balls.get("p5").done && g.balls.get("p5").distanceMm === null);
+  g.stroke("p1", 0.5, 0, now + 60000);
+  g.restart(now + 60001);
+  check("転がり中のリスタートで得点・距離・順位・待機時間をリセット", g.phase === "aim" && g.roll === null && [...g.balls.values()].every(b => !b.done && b.distanceMm === null && b.rank === null) && [...g.cards.values()].every(c => c.length === 0) && g.hole === 0);
+
+  const tied = new GolfGame({ holes: 1 }, { settleMs: 0 });
+  tied.join("p1", "A", 0); tied.join("p2", "B", 0);
+  now = 0;
+  for (const id of ["p1", "p2"]) {
+    tied.stroke(id, 0.4, 0, now);
+    now += tied.roll.duration * 1000 + 1;
+    tied.tick(now);
+  }
+  tied.advanceRound(now);
+  check("合計同点は同時優勝", tied.phase === "result" && tied.winners.join(",") === "p1,p2");
+
+  const solo = new GolfGame({ holes: 1 }, { settleMs: 0 });
+  solo.join("p1", "A", 0);
+  solo.stroke("p1", 0.4, 0, 0);
+  now = solo.roll.duration * 1000;
+  solo.tick(now);
+  check("一人プレイでも外した一打でラウンド終了", solo.phase === "roundResult" && !solo.balls.get("p1").holed && solo.cards.get("p1")[0] === 1);
+  solo.advanceRound(now);
+  check("一人プレイの総合結果", solo.phase === "result" && solo.winners[0] === "p1");
+
+  const timeout = new GolfGame({ holes: 1 }, { turnTimeoutMs: 100 });
+  timeout.join("p1", "A", 0);
+  timeout.tick(100); timeout.advanceRound(100);
+  check("全員時間切れは0点・勝者なし", timeout.phase === "result" && timeout.winners.length === 0 && timeout.cards.get("p1")[0] === 0);
+}
+
 // ================= 5. server =================
-const PORT = 5191;
+const PORT = 5194;
 const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
 let portInUse = false;
 server.stderr.on("data", (d) => {
@@ -489,6 +554,9 @@ try {
   const bad = connect({ ...cfg, markerMm: "150" });
   const badMsg = await bad.waitFor((m) => m.type === "error");
   check("markerMm が違うと入室拒否", badMsg !== null && /不一致/.test(badMsg.reason));
+  const old = connect({ ...cfg, v: "1" });
+  check("旧ゴルフv1は入室拒否（一打ルール・得点の誤表示を防止）", (await old.waitFor(m => m.type === "error")) !== null);
+  old.ws.close();
 
   // スマホから: 視線付き pose → 構え → 1 打
   b.send({ type: "stroke", speed: 1, faceDeg: 0 });
@@ -535,15 +603,26 @@ try {
   const dist = Math.hypot(cup[0] - ball[0], cup[1] - ball[1]);
   ov.send({ type: "clearAim", playerId: "p2" });
   await b.waitFor((m) => m.type === "state" && m.state.aims.p2 === null);
+  ov.send({ type: "address", playerId: "p2", target: cup });
   ov.send({ type: "stroke", playerId: "p2", speed: speedForDistance(dist, wa.config.decel) + 0.2, faceDeg: 0 });
   const stHoled = await a.waitFor((m) => m.type === "state" && m.state.event?.kind === "stroke" && m.state.event.by === "p2");
   check("俯瞰画面が p2 の代わりに打ち、カップイン", stHoled !== null && stHoled.state.event.holed === true && stHoled.state.balls.p2.holed, JSON.stringify(stHoled?.state.roll));
   // ルール変更（転がっている間は拒否 → 止まってから OK）
-  ov.send({ type: "rules", decel: 1, cupMaxSpeed: 1.2, maxStrokes: 4, holes: 2 });
+  ov.send({ type: "rules", decel: 1, cupMaxSpeed: 1.2, holes: 2 });
   const rejRules = await ov.waitFor((m) => m.type === "rejected" && /rolling/.test(m.reason));
   check("転がっている間のルール変更は rejected", rejRules !== null);
-  await a.waitFor((m) => m.type === "state" && m.state.phase === "aim" && m.state.t > stHoled.state.t, 6000);
-  ov.send({ type: "rules", decel: 1, cupMaxSpeed: 1.2, maxStrokes: 4, holes: 2 });
+  const roundResult = await a.waitFor(m => m.type === "state" && m.state.phase === "roundResult", 6000);
+  check("全員の一打後に距離・順位点付きのラウンド結果が配信される", roundResult && roundResult.state.balls.p1.distanceMm > 0 && roundResult.state.balls.p2.rank === 1 && roundResult.state.cards.p1[0] === 1 && roundResult.state.cards.p2[0] === 2);
+  a.send({ type: "stroke", speed: 1, faceDeg: 0 });
+  check("結果表示中の二打目はサーバーでも拒否", (await a.waitFor(m => m.type === "rejected" && /roundResult/.test(m.reason))) !== null);
+  await sleep(500);
+  check("時間が経ってもサーバーはラウンド結果を保持", !a.msgs.some(m => m.type === "state" && m.state.hole === 1));
+  a.send({ type: "advanceRound" });
+  check("プレイヤーからの進行は拒否", (await a.waitFor(m => m.type === "rejected" && /not overview/.test(m.reason))) !== null);
+  ov.send({ type: "advanceRound" });
+  const nextRound = await a.waitFor(m => m.type === "state" && m.state.event?.kind === "hole" && m.state.hole === 1);
+  check("俯瞰画面の進行で次の斜め配置、全員未打・点数を保持", nextRound && nextRound.state.holes[1].cup[0] > 0 && nextRound.state.balls.p1.strokes === 0 && nextRound.state.balls.p1.distanceMm === null && nextRound.state.cards.p2[0] === 2);
+  ov.send({ type: "rules", decel: 1, cupMaxSpeed: 1.2, holes: 2 });
   const cfgMsg = await a.waitFor((m) => m.type === "config");
   check("ルール変更で config + state（最初から。ホール 2 つ）が全員に届く", cfgMsg && cfgMsg.config.decel === 1 && cfgMsg.config.holes === 2 && cfgMsg.state.holes.length === 2 && cfgMsg.state.event?.kind === "rules" && cfgMsg.state.balls.p1.strokes === 0);
   ov.send({ type: "field", wallW: 2, wallH: 1.5, floorDepth: 4, floorDrop: 1 });

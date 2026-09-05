@@ -88,6 +88,14 @@
         color: #9aa0a6;
         cursor: default;
       }
+      .round-action {
+        margin: 2px 0 10px;
+        background: #81c995;
+        box-shadow: 0 0 0 1px rgba(129, 201, 149, 0.3), 0 8px 24px rgba(46, 139, 87, 0.22);
+      }
+      .round-action[hidden] {
+        display: none;
+      }
       .secondary {
         width: 100%;
         font-size: 0.85rem;
@@ -283,10 +291,11 @@
       <p class="sub">
         コート全体・全員のボールと位置をリアルタイムに表示し、<strong>Joy-Con をパターとして読み取る</strong>PC 用の画面（Chrome。カメラ・マーカー不要）。
         スマホと同じ room（既定 demo。?room=）に入ります。ドラッグで回転、ホイールで拡大。
-        役割は URL の ?role=overview の自己申告（LAN デモ前提）で、この画面から他人の代わりの 1 打・最初から・ルール変更を送れます。
+        役割は URL の ?role=overview の自己申告（LAN デモ前提）で、この画面から結果表示の終了・他人の代わりの 1 打・最初から・ルール変更を送れます。
       </p>
       <div id="phase">接続中…</div>
       <div id="turn"></div>
+      <button id="advance-round" type="button" class="primary round-action" hidden>次のラウンドへ</button>
       <fieldset id="joycons">
         <legend>Joy-Con（Bluetooth で Mac に繋いでから）</legend>
         <button id="connect-joycon" type="button" class="primary">Joy-Con を接続</button>
@@ -303,8 +312,7 @@
           <label class="field">入る速さの上限 [m/s]<input id="rule-cupMaxSpeed" type="number" step="0.1" inputmode="decimal" disabled /></label>
         </div>
         <div class="grid three">
-          <label class="field">打数の上限<input id="rule-maxStrokes" type="number" step="1" inputmode="numeric" disabled /></label>
-          <label class="field">ホール数<input id="rule-holes" type="number" step="1" inputmode="numeric" disabled /></label>
+          <label class="field">ラウンド数（一人一打）<input id="rule-holes" type="number" step="1" inputmode="numeric" disabled /></label>
           <button id="apply-rules" type="button" class="apply-button" disabled>反映</button>
         </div>
         <div id="rules-hint" class="hint"></div>

@@ -42,9 +42,7 @@ export type GolfRules = {
   decel: number;
   /** カップに入れる速さの上限 [m/s]（これより速いと通過する） */
   cupMaxSpeed: number;
-  /** 1 ホールの打数の上限（超えたらそのホールはこの打数で打ち切り） */
-  maxStrokes: number;
-  /** ホール数 */
+  /** ラウンド数（各自 1 打固定） */
   holes: number;
 };
 
@@ -68,7 +66,6 @@ export const DEFAULT_GOLF: GolfConfig = {
   floorDrop: DEFAULT_FIELD.floorDrop,
   decel: 0.8,
   cupMaxSpeed: 1.4,
-  maxStrokes: 6,
   holes: 3,
   restitution: 0.5,
   maxStrokeSpeed: 6,
@@ -77,13 +74,12 @@ export const DEFAULT_GOLF: GolfConfig = {
   markers: [],
 };
 
-export const GOLF_RULE_KEYS = ["decel", "cupMaxSpeed", "maxStrokes", "holes"] as const;
+export const GOLF_RULE_KEYS = ["decel", "cupMaxSpeed", "holes"] as const;
 /** ルールの許容範囲（サーバーの検証と俯瞰画面の入力欄で共有） */
 export const GOLF_RULE_LIMITS: Record<keyof GolfRules, { min: number; max: number; integer?: boolean }> = {
   // 下限は maxRollSec（20s）で 6 m/s が止まりきる値（6 / 0.3 = 20s）
   decel: { min: 0.3, max: 5 },
   cupMaxSpeed: { min: 0.2, max: 5 },
-  maxStrokes: { min: 1, max: 20, integer: true },
   holes: { min: 1, max: 9, integer: true },
 };
 
@@ -103,7 +99,7 @@ export type HoleDef = { cup: V2; tee: V2 };
 
 /**
  * コートの寸法からホールを作る。ティーは部屋側（奥）、カップは壁側で、ホールごとに左右へ振る。
- * 3 ホール: 真っ直ぐ → 右奥から左手前 → 左奥から右手前。4 ホール目以降は繰り返し
+ * 同じティーから左右へ向きを変える一打勝負。9 ラウンドまで角度と距離の組み合わせを変える。
  */
 export function makeHoles(size: FieldSize, count: number): HoleDef[] {
   const halfW = size.wallW / 2;
@@ -113,12 +109,19 @@ export function makeHoles(size: FieldSize, count: number): HoleDef[] {
   const teeZ = round3(d - margin);
   const cupZ = round3(Math.max(margin, Math.min(d * 0.25, d - margin)));
   const side = round3(Math.max(0, halfW - margin) * 0.7);
-  const patterns: HoleDef[] = [
-    { cup: [0, cupZ], tee: [0, teeZ] },
-    { cup: [-side, cupZ], tee: [side, teeZ] },
-    { cup: [side, cupZ], tee: [-side, teeZ] },
-  ];
-  return Array.from({ length: Math.max(1, count) }, (_, i) => patterns[i % patterns.length]);
+  const patterns = [[-0.8, 0], [1, 0.25], [-1, 0.55], [0.65, 0.1], [-0.7, 0.4], [1, 0.6], [-1, 0.15], [0.8, 0.45], [-0.65, 0.6]];
+  return Array.from({ length: Math.max(1, count) }, (_, i) => {
+    const [x, depth] = patterns[i % patterns.length];
+    return { tee: [0, teeZ], cup: [round3(side * x), round3(cupZ + (teeZ - cupZ) * depth)] };
+  });
+}
+
+/** カップの方向と距離。角度は正面（-Z）から。左右はプレイヤー画面と俯瞰で共通。 */
+export function holeHint(hole: HoleDef): string {
+  const dx = hole.cup[0] - hole.tee[0];
+  const dz = hole.tee[1] - hole.cup[1];
+  const angle = Math.atan2(Math.abs(dx), dz) * 180 / Math.PI;
+  return `${dx < 0 ? "左" : "右"} ${angle.toFixed(0)}°・${Math.hypot(dx, dz).toFixed(2)}m`;
 }
 
 /** 床の点を field 座標系（3 次元）に上げる（ボールの中心 = 床 + 半径） */

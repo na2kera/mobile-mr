@@ -1,10 +1,10 @@
 // Phase 10 (10-golf): パターゴルフのルール（純粋クラス。サーバーが権威として持つ）。
-//   - 参加順に色を割り当て、全員が自分のボールを持つ。手番は参加順に 1 打ずつ交代（カップインした人・打ち切りの人は飛ばす）
-//   - 1 打は「向き + 速さ」。向きは構え（address）で決めた狙い（無ければカップの方向）にフェイスの開き（faceDeg）を足したもの。
+//   - 各ラウンドは参加順に各自 1 打。カップイン優先、次に残り距離（mm 単位）で順位を決める。
+//   - 1 位 N 点、2 位 N-1 点…（N はラウンド終了時の人数）。同順位は同点、時間切れは 0 点。
+//   - 1 打は「向き + 速さ」。構えが無ければ正面（-Z）へ、構えた向きに faceDeg を足して打つ。
 //     転がり（simulateRoll）はサーバーが計算して終点を権威にし、クライアントは同じ式で描く
-//   - 全員が終わったら次のホール。最終ホールが終わったら結果（合計打数の少ない人が勝ち）→ resultMs 後に最初から
-//   - 手番が turnTimeoutMs 続いたら（打てない・居ない）そのホールは打ち切り（maxStrokes）にして次へ
-//   - 途中参加はいまのホールのティーから（それまでのホールは無し。合計は打ったホールだけ）
+//   - 全員の一打後にラウンド結果を表示して次の配置へ。最終ラウンド後は合計点の最多が勝ち。
+//   - 途中参加は進行中なら現在のティーから、結果表示中なら次ラウンドから。過去ラウンドの得点は無し。
 // 06-2 / 08 の *-game.ts と同じく three.js に依存しない（Node テスト対象）
 import {
   DEFAULT_GOLF,
@@ -33,18 +33,24 @@ export type Phase =
   | "aim"
   /** ボールが転がっている（止まって少し見せるまで） */
   | "rolling"
-  /** 全ホール終了。少し見せてから最初に戻る */
+  /** 各自の一打が終了。マスターが進めるまで順位・距離を保持 */
+  | "roundResult"
+  /** 全ラウンド終了。マスターが最初から始めるまで保持 */
   | "result";
 
 export type Player = { id: string; name: string; color: number };
 
 export type Ball = {
   pos: V2;
-  /** このホールの打数 */
+  /** このラウンドの打数（0 または 1） */
   strokes: number;
   holed: boolean;
-  /** このホールを終えた（カップイン or 打ち切り） */
+  /** このラウンドを終えた（一打済み、時間切れ、結果表示中の途中参加） */
   done: boolean;
+  /** 一打の残り距離 [mm]。未打・時間切れは null。カップインは 0 */
+  distanceMm: number | null;
+  /** ラウンド確定時の順位。時間切れ・未確定は null */
+  rank: number | null;
 };
 
 export type Roll = {
@@ -65,8 +71,9 @@ export type Roll = {
 export type GameEvent =
   | { kind: "stroke"; by: string; holed: boolean; strokes: number }
   | { kind: "turn"; playerId: string }
-  /** 次のホールに進んだ */
+  /** 次のラウンドに進んだ */
   | { kind: "hole"; hole: number }
+  | { kind: "roundResult"; hole: number }
   | { kind: "timeout"; by: string }
   | { kind: "result"; winners: string[]; winnerNames: string[] }
   | { kind: "restart" }
@@ -77,22 +84,20 @@ export type GameSnapshot = {
   t: number;
   seq: number;
   phase: Phase;
-  /** いまのホール（0 始まり） */
+  /** いまのラウンド（0 始まり。通信上の互換性のため hole の名称を維持） */
   hole: number;
   holes: HoleDef[];
   players: Player[];
   balls: Record<string, Ball>;
-  /** 構えで決めた狙い（床の単位ベクトル）。無ければカップの方向 */
+  /** 構えで決めた狙い（床の単位ベクトル）。無ければ正面 */
   aims: Record<string, V2 | null>;
-  /** 終えたホールの打数（プレイヤーごと。途中参加は打ったホールだけ） */
+  /** 終えたラウンドの順位点（途中参加前のラウンドは含まない） */
   cards: Record<string, number[]>;
   turn: string | null;
   /** 手番の期限 [ms]（aim のとき。権威時刻） */
   turnEndsAt: number | null;
   /** 転がっている（or 直近の）1 打 */
   roll: Roll | null;
-  /** 結果表示の終わり [ms]（result のとき） */
-  phaseEndsAt: number | null;
   winners: string[] | null;
   winnerNames: string[] | null;
   event?: GameEvent;
@@ -101,15 +106,12 @@ export type GameSnapshot = {
 export type GameOptions = {
   /** 止まってから次の手番に移るまで [ms] */
   settleMs: number;
-  /** 結果表示の長さ [ms] */
-  resultMs: number;
-  /** 手番がこの時間 [ms] 打たなければ打ち切り */
+  /** 手番がこの時間 [ms] 打たなければ時間切れ */
   turnTimeoutMs: number;
 };
 
 export const DEFAULT_GAME_OPTIONS: GameOptions = {
   settleMs: 1200,
-  resultMs: 12000,
   turnTimeoutMs: 90000,
 };
 
@@ -131,7 +133,6 @@ export class GolfGame {
   turn: string | null = null;
   turnEndsAt = -1;
   roll: Roll | null = null;
-  phaseEndsAt = -1;
   winners: string[] | null = null;
   winnerNames: string[] | null = null;
   /** 直近の pose から出した視線と床の交点（構えの狙いに使う） */
@@ -176,8 +177,9 @@ export class GolfGame {
       this.hole = 0;
       return [this.startTurn(id, now)];
     }
-    if (this.phase === "result") {
-      // 結果表示中の参加は、次の周回に入る
+    if (this.phase === "result" || this.phase === "roundResult") {
+      // 確定済みのラウンドには入れない。次の配置で freshBall に戻す
+      this.balls.get(id)!.done = true;
       return [];
     }
     return [];
@@ -224,12 +226,11 @@ export class GolfGame {
     this.hole = 0;
     this.winners = null;
     this.winnerNames = null;
-    this.phaseEndsAt = -1;
   }
 
   private freshBall(): Ball {
     const tee = this.holes[this.hole]?.tee ?? [0, 1];
-    return { pos: [tee[0], tee[1]], strokes: 0, holed: false, done: false };
+    return { pos: [tee[0], tee[1]], strokes: 0, holed: false, done: false, distanceMm: null, rank: null };
   }
 
   // ---- 視線と構え ----
@@ -256,7 +257,7 @@ export class GolfGame {
     return true;
   }
 
-  /** 狙いを消す（カップの方向に戻す） */
+  /** 狙いを消す（正面に戻す） */
   clearAim(id: string): boolean {
     if (!this.players.has(id)) return this.reject("not a player");
     this.aims.delete(id);
@@ -264,14 +265,11 @@ export class GolfGame {
     return true;
   }
 
-  /** いまの狙い（構えが無ければカップの方向） */
+  /** いまの狙い（構えが無ければ正面。斜めのカップへは自分で狙いを合わせる） */
   aimOf(id: string): V2 {
     const custom = this.aims.get(id);
     if (custom) return custom;
-    const ball = this.balls.get(id);
-    const cup = this.holes[this.hole]?.cup ?? [0, 0];
-    if (!ball) return [0, -1];
-    return norm2([cup[0] - ball.pos[0], cup[1] - ball.pos[1]]);
+    return [0, -1];
   }
 
   // ---- 1 打 ----
@@ -312,7 +310,8 @@ export class GolfGame {
     ball.pos = result.end;
     ball.strokes++;
     ball.holed = result.holed;
-    if (result.holed || ball.strokes >= c.maxStrokes) ball.done = true;
+    ball.done = true;
+    ball.distanceMm = result.holed ? 0 : Math.round(Math.hypot(result.end[0] - cup[0], result.end[1] - cup[1]) * 1000);
     this.aims.delete(id);
     this.roll = {
       seq: ++this.rollSeq,
@@ -343,7 +342,7 @@ export class GolfGame {
     return { kind: "turn", playerId: id };
   }
 
-  /** 次に打つ人（参加順で fromIndex の次から、このホールを終えていない人）。居なければ null */
+  /** 次に打つ人（参加順で fromIndex の次から、このラウンドを終えていない人）。居なければ null */
   private nextPlayer(fromIndex: number): string | null {
     const n = this.order.length;
     for (let k = 1; k <= n; k++) {
@@ -356,21 +355,47 @@ export class GolfGame {
 
   /**
    * 次の手番へ。lastIndex は直前に打った人の参加順の位置（抜けた人の位置でも良い）。
-   * 全員が終えていれば次のホール（最終ホールなら結果）
+   * 全員が終えていればラウンド結果へ
    */
   private advanceTurn(now: number, lastIndex: number): GameEvent[] {
     const next = this.nextPlayer(lastIndex);
     if (next !== null) return [this.startTurn(next, now)];
-    // ホール終了: カードに記録
+    // ラウンド終了: カップイン > 残り距離。同距離は同順位（mm 単位）、未打は 0 点
+    const ranked = this.order.map((id) => ({ id, ball: this.balls.get(id)! }))
+      .filter(({ ball }) => ball.distanceMm !== null)
+      .sort((a, b) => Number(b.ball.holed) - Number(a.ball.holed) || a.ball.distanceMm! - b.ball.distanceMm!);
+    let rank = 0;
+    ranked.forEach(({ ball }, i) => {
+      const prev = ranked[i - 1]?.ball;
+      if (!prev || prev.holed !== ball.holed || prev.distanceMm !== ball.distanceMm) rank = i + 1;
+      ball.rank = rank;
+    });
     for (const id of this.order) {
       const ball = this.balls.get(id);
       const card = this.cards.get(id);
-      if (ball && card) card.push(ball.strokes);
+      if (ball && card) card.push(ball.rank === null ? 0 : this.order.length - ball.rank + 1);
     }
-    // 直近の 1 打はホールをまたいで残さない（再接続の welcome で新しいホールのカップで再計算され「カップイン」が再表示される。外部レビュー指摘）
+    this.phase = "roundResult";
+    this.turn = null;
+    this.turnEndsAt = -1;
+    this.bump();
+    return [{ kind: "roundResult", hole: this.hole }];
+  }
+
+  /** 俯瞰画面が結果確認後に呼ぶ。結果はこの操作まで無期限に保持する */
+  advanceRound(now: number): GameEvent[] | null {
+    if (this.phase !== "roundResult") {
+      this.reject(`phase=${this.phase}`);
+      return null;
+    }
+    return this.nextRound(now);
+  }
+
+  private nextRound(now: number): GameEvent[] {
+    // 直近の 1 打はラウンドをまたいで残さない（再接続で新しいカップに対して再計算されるのを防ぐ）
     this.roll = null;
     if (this.hole + 1 >= this.holes.length) {
-      return [this.finish(now)];
+      return [this.finish()];
     }
     this.hole++;
     for (const id of this.order) this.balls.set(id, this.freshBall());
@@ -381,17 +406,16 @@ export class GolfGame {
     return events;
   }
 
-  private finish(now: number): GameEvent {
+  private finish(): GameEvent {
     this.phase = "result";
     this.turn = null;
     this.turnEndsAt = -1;
-    this.phaseEndsAt = now + this.opts.resultMs;
     this.computeWinners();
     this.bump();
     return { kind: "result", winners: this.winners ?? [], winnerNames: this.winnerNames ?? [] };
   }
 
-  /** 合計打数（打ったホールだけ）。全ホール打った人を優先し、その中で最少 */
+  /** 合計順位点 */
   totalOf(id: string): number {
     return (this.cards.get(id) ?? []).reduce((a, b) => a + b, 0);
   }
@@ -403,21 +427,19 @@ export class GolfGame {
       this.winnerNames = [];
       return;
     }
-    // 全ホール打った人を優先。居なければ 1 ホール以上打った人。一度も打っていない人（結果表示中の参加）は勝者にしない（外部レビュー指摘）
-    const played = ids.filter((id) => (this.cards.get(id)?.length ?? 0) > 0);
-    const full = played.filter((id) => (this.cards.get(id)?.length ?? 0) >= this.holes.length);
-    const pool = full.length > 0 ? full : played;
+    // 時間切れだけの人・結果表示中に参加した人は勝者にしない
+    const pool = ids.filter((id) => this.totalOf(id) > 0);
     if (pool.length === 0) {
       this.winners = [];
       this.winnerNames = [];
       return;
     }
-    const best = Math.min(...pool.map((id) => this.totalOf(id)));
+    const best = Math.max(...pool.map((id) => this.totalOf(id)));
     this.winners = pool.filter((id) => this.totalOf(id) === best);
     this.winnerNames = this.winners.map((id) => this.players.get(id)?.name ?? id);
   }
 
-  /** 最初から（俯瞰画面の「最初から」/ 結果表示の終わり）。同じメンバーでホール 1 へ */
+  /** 俯瞰画面の「最初から」。同じメンバーでラウンド 1 へ */
   restart(now: number): GameEvent[] {
     if (this.order.length === 0) {
       this.resetToLobby();
@@ -434,7 +456,6 @@ export class GolfGame {
     this.pendingLastIndex = null;
     this.winners = null;
     this.winnerNames = null;
-    this.phaseEndsAt = -1;
     const first = this.nextPlayer(-1)!;
     return [{ kind: "restart" }, this.startTurn(first, now)];
   }
@@ -452,15 +473,11 @@ export class GolfGame {
       const id = this.turn;
       const ball = this.balls.get(id);
       if (ball) {
-        ball.strokes = this.config.maxStrokes;
         ball.done = true;
       }
       const idx = this.order.indexOf(id);
       this.bump();
       return [{ kind: "timeout", by: id }, ...this.advanceTurn(now, idx)];
-    }
-    if (this.phase === "result" && now >= this.phaseEndsAt) {
-      return this.restart(now);
     }
     return [];
   }
@@ -515,7 +532,7 @@ export class GolfGame {
     const cards: Record<string, number[]> = {};
     for (const id of this.order) {
       const b = this.balls.get(id)!;
-      balls[id] = { pos: [b.pos[0], b.pos[1]], strokes: b.strokes, holed: b.holed, done: b.done };
+      balls[id] = { ...b, pos: [b.pos[0], b.pos[1]] };
       aims[id] = this.aims.get(id) ?? null;
       cards[id] = [...(this.cards.get(id) ?? [])];
     }
@@ -532,7 +549,6 @@ export class GolfGame {
       turn: this.turn,
       turnEndsAt: this.phase === "aim" ? this.turnEndsAt : null,
       roll: this.roll ? { ...this.roll, from: [...this.roll.from] as V2, vel: [...this.roll.vel] as V2, end: [...this.roll.end] as V2 } : null,
-      phaseEndsAt: this.phase === "result" ? this.phaseEndsAt : null,
       winners: this.winners,
       winnerNames: this.winnerNames,
     };

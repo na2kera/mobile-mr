@@ -6,6 +6,8 @@ import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
 import { DEFAULT_GOLF, GOLF_SIZE_CELL_M, GOLF_RULE_KEYS, GOLF_RULE_LIMITS, playerColorCss, playerColorHex, playerColorName, rollAt, simulateRoll, speedForDistance, validateGolfRules } from "../../src/shared/golf-sim";
 import type { GolfConfig, GolfRules, RollResult, V2 } from "../../src/shared/golf-sim";
 import type { GameSnapshot } from "../../src/shared/golf-game";
+import { scoreTotal, shotLabel } from "../../src/shared/golf-score";
+import { holeHint } from "../../src/shared/golf-sim";
 import type { PlayerPose } from "../../src/shared/golf-protocol";
 import { FACE_LABELS, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
 import type { MarkerPlacement } from "../../src/shared/marker-layout";
@@ -25,7 +27,7 @@ import type { JoyCon } from "./joycon-hid";
 // WebHID で読んだ Joy-Con の振りを「誰の 1 打か」を付けてサーバーへ送る役割を足した。
 //   - Joy-Con は 1 台ずつ「手番の人（自動）」「特定のプレイヤー」「使わない」に割り当てる。1 台を回して使うなら自動のまま
 //   - 振りの検出は swing-detector.ts（静止で構え → バックスイング → 戻りの 0 通過 = インパクト）。
-//     A ボタンで構え（サーバーがその人の視線の交点を狙いにする）、B で狙いを消す（カップの方向に戻す）
+//     A ボタンで構え（サーバーがその人の視線の交点を狙いにする）、B で狙いを消す（正面に戻す）
 //   - 振り角は 20Hz でサーバーへ送り、全員のスマホの振り子パターが追従する
 //   - フェイク Joy-Con（?fakeJoycon=1）: 実機が無い PC・ヘッドレス確認用。割り当てた人の手番になると自動で（届く速さで）振る
 
@@ -227,9 +229,11 @@ let fieldsSent = 0;
 let markersSent = 0;
 let strokesSent = 0;
 let addressesSent = 0;
+let advancesSent = 0;
 let rulesPending = false;
 let sizePending = false;
 let markersPending = false;
+let advancePending = false;
 let liveRoll: { seq: number; by: string; result: RollResult; startLocalMs: number } | null = null;
 /** 手番が始まった時刻（フェイク Joy-Con の待ちに使う） */
 let turnSinceMs = -1;
@@ -252,6 +256,7 @@ function localTimeOf(serverT: number, refServerT: number, refLocalMs: number): n
 function onState(state: GameSnapshot) {
   const now = performance.now();
   auth = { state, recvMs: now };
+  if (state.phase !== "roundResult") advancePending = false;
   if (state.turn !== lastTurn) {
     lastTurn = state.turn;
     turnSinceMs = now;
@@ -282,7 +287,7 @@ function connect() {
         netStatus = status;
         if (status !== "open") {
           joined = false;
-          rulesPending = sizePending = markersPending = false;
+          rulesPending = sizePending = markersPending = advancePending = false;
         }
         renderPanel();
       },
@@ -319,7 +324,7 @@ function connect() {
       onPutter: () => {},
       onRejected: (reason) => {
         lastRejectReason = reason;
-        rulesPending = sizePending = markersPending = false;
+        rulesPending = sizePending = markersPending = advancePending = false;
         console.log(`[overview] rejected by server: ${reason}`);
         renderPanel();
       },
@@ -331,7 +336,7 @@ function connect() {
         syncRuleInputs();
         liveRoll = null;
         onState(state);
-        console.log(`[overview] config ${config.wallW}x${config.wallH}x${config.floorDepth}/${config.floorDrop} decel=${config.decel} holes=${config.holes} maxStrokes=${config.maxStrokes}`);
+        console.log(`[overview] config ${config.wallW}x${config.wallH}x${config.floorDepth}/${config.floorDrop} decel=${config.decel} holes=${config.holes}`);
       },
       onMarkers: (config) => {
         markersPending = false;
@@ -479,6 +484,7 @@ function updateFakeJoycon(now: number) {
   const cup = s.holes[s.hole]?.cup;
   if (!ball || !cup) return;
   fakeTriggeredForTurn = turnSinceMs;
+  client?.sendAddress(playerId, cup);
   const dist = Math.hypot(cup[0] - ball.pos[0], cup[1] - ball.pos[1]);
   const speed = Math.min(cfg.maxStrokeSpeed, speedForDistance(dist, cfg.decel) + 0.15);
   // 検出のしきい値（minImpactDps）を割ると振っても 1 打にならず手番が止まるので下限を持つ（短い寄せは少し強めになる）
@@ -514,10 +520,7 @@ function updateCourse(now: number) {
   const turnId = s.phase === "aim" ? s.turn : null;
   if (turnId && s.balls[turnId]) {
     const ball = s.balls[turnId];
-    const cup = s.holes[s.hole]?.cup ?? [0, 0];
-    const d: V2 = [cup[0] - ball.pos[0], cup[1] - ball.pos[1]];
-    const l = Math.hypot(d[0], d[1]) || 1;
-    const aim = s.aims[turnId] ?? [d[0] / l, d[1] / l];
+    const aim: V2 = s.aims[turnId] ?? [0, -1];
     const color = playerColorHex(colorOf(turnId) ?? 1);
     course.setAim(ball.pos, aim, s.aims[turnId] !== null, color);
     // 振り子: この人に割り当てた Joy-Con の角度（auto は手番の人）
@@ -536,10 +539,10 @@ const playersEl = document.querySelector<HTMLUListElement>("#players")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
 const restartButton = document.querySelector<HTMLButtonElement>("#restart")!;
+const advanceRoundButton = document.querySelector<HTMLButtonElement>("#advance-round")!;
 const ruleInputs: Record<keyof GolfRules, HTMLInputElement> = {
   decel: document.querySelector<HTMLInputElement>("#rule-decel")!,
   cupMaxSpeed: document.querySelector<HTMLInputElement>("#rule-cupMaxSpeed")!,
-  maxStrokes: document.querySelector<HTMLInputElement>("#rule-maxStrokes")!,
   holes: document.querySelector<HTMLInputElement>("#rule-holes")!,
 };
 const applyRulesButton = document.querySelector<HTMLButtonElement>("#apply-rules")!;
@@ -553,7 +556,7 @@ function syncRuleInputs() {
   for (const key of GOLF_RULE_KEYS) ruleInputs[key].value = String(cfg[key]);
 }
 function readRules(): GolfRules {
-  return { decel: Number(ruleInputs.decel.value), cupMaxSpeed: Number(ruleInputs.cupMaxSpeed.value), maxStrokes: Number(ruleInputs.maxStrokes.value), holes: Number(ruleInputs.holes.value) };
+  return { decel: Number(ruleInputs.decel.value), cupMaxSpeed: Number(ruleInputs.cupMaxSpeed.value), holes: Number(ruleInputs.holes.value) };
 }
 function rulesChanged(): boolean {
   const r = readRules();
@@ -582,6 +585,16 @@ restartButton.addEventListener("click", () => {
     restartsSent++;
     lastRejectReason = "";
     console.log("[overview] restart sent");
+  }
+});
+advanceRoundButton.addEventListener("click", () => {
+  if (!client || advancePending || auth?.state.phase !== "roundResult") return;
+  if (client.sendAdvanceRound()) {
+    advancesSent++;
+    advancePending = true;
+    lastRejectReason = "";
+    console.log("[overview] advanceRound sent");
+    renderPanel();
   }
 });
 const setup = createFieldSetupPanel({
@@ -626,12 +639,9 @@ const setup = createFieldSetupPanel({
 function remainingSec(now: number): number {
   const s = auth?.state;
   if (!s || !auth) return 0;
-  const end = s.phase === "aim" ? s.turnEndsAt : s.phaseEndsAt;
+  const end = s.phase === "aim" ? s.turnEndsAt : null;
   if (end === null) return 0;
   return Math.max(0, (end - s.t) / 1000 - (now - auth.recvMs) / 1000);
-}
-function totalOf(s: GameSnapshot, id: string): number {
-  return (s.cards[id] ?? []).reduce((a, b) => a + b, 0);
 }
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
@@ -652,30 +662,30 @@ function renderPanel() {
   else if (s.phase === "result") {
     const w = s.winnerNames ?? [];
     phaseText = w.length === 0 ? "結果" : `結果: ${w.join("・")} の勝ち！`;
-    turnText = `${Math.ceil(remainingSec(now))} 秒後に最初から`;
+    turnText = "「最初から」を押すまで総合結果を表示します";
   } else {
-    phaseText = `ホール ${s.hole + 1} / ${s.holes.length}`;
+    phaseText = `一打勝負 ${s.hole + 1} / ${s.holes.length} · ${holeHint(s.holes[s.hole])}`;
     if (s.phase === "rolling") turnText = `${liveRoll ? nameOf(liveRoll.by) : "-"} のボールが転がっています`;
-    else if (s.turn) turnText = `▶ ${nameOf(s.turn)} の番（${(s.balls[s.turn]?.strokes ?? 0) + 1} 打目。残り ${Math.ceil(remainingSec(now))} 秒）`;
+    else if (s.phase === "roundResult") turnText = "結果を確認したら、下のボタンで進めてください";
+    else if (s.turn) turnText = `▶ ${nameOf(s.turn)} の一打（残り ${Math.ceil(remainingSec(now))} 秒）`;
   }
   const editable = joined && s !== undefined && s.phase !== "rolling";
   const canRestart = joined && s !== undefined && s.players.length > 0;
+  const canAdvance = joined && s?.phase === "roundResult" && !advancePending;
+  const advanceLabel = s?.hole !== undefined && s.hole + 1 >= s.holes.length ? "総合結果へ" : "次のラウンドへ";
   const rulesInvalid = validateGolfRules(readRules());
   const canApplyRules = editable && !rulesPending && rulesChanged() && rulesInvalid === null;
-  const rulesHintText = !joined ? "" : rulesInvalid ? rulesInvalid : rulesChanged() ? "「反映」で全員のルールが変わります（最初からになります）" : `いま: 減速 ${cfg.decel}・入る速さ ${cfg.cupMaxSpeed} m/s・${cfg.maxStrokes} 打まで・${cfg.holes} ホール`;
+  const rulesHintText = !joined ? "" : rulesInvalid ? rulesInvalid : rulesChanged() ? "「反映」で全員のルールが変わります（最初からになります）" : `各自一打 × ${cfg.holes}ラウンド。カップイン優先、次に残り距離。1位は人数分の点、以降1点ずつ減少。同順位は同点、時間切れ0点。合計点で勝負。`;
   const playerRows = s
     ? [...s.players]
         .map((p) => {
           const peer = peers.get(p.id);
           const marker = !peer || peer.lastPoseMs === -Infinity || now - peer.lastPoseMs > PEER_STALE_MS ? "-" : !peer.tracking ? "ロスト（最後の姿勢を維持）" : peer.markerIds.length > 0 ? peer.markerIds.join("+") : "?";
-          const b = s.balls[p.id];
           const cards = s.cards[p.id] ?? [];
           const jc = [...slots.values()].find((x) => playerOf(x) === p.id);
-          // 結果表示では最終ホールの打数はカードに入っているので足さない（外部レビュー指摘: 二重加算）
-          const inPlay = s.phase !== "result";
-          return { p, marker, strokes: inPlay ? (b?.strokes ?? 0) : null, holed: b?.holed ?? false, done: b?.done ?? false, cards, total: totalOf(s, p.id) + (inPlay ? (b?.strokes ?? 0) : 0), turn: s.turn === p.id, win: s.winners?.includes(p.id) ?? false, jc: jc ? jc.jc.name : "" };
+          return { p, marker, shot: shotLabel(s, p.id), cards, total: scoreTotal(s, p.id), turn: s.turn === p.id, win: s.winners?.includes(p.id) ?? false, jc: jc ? jc.jc.name : "" };
         })
-        .sort((a, b) => a.total - b.total)
+        .sort((a, b) => b.total - a.total)
     : [];
   const jcRows = [...slots.values()].map((slot) => {
     const pid = playerOf(slot);
@@ -689,12 +699,15 @@ function renderPanel() {
     };
   });
   // 寸法・追加マーカーの入力欄の値もキーに入れる（外部レビュー指摘: lobby で編集しても再描画されず「反映」が押せなかった）
-  const key = JSON.stringify([phaseText, turnText, canRestart, editable, canApplyRules, rulesPending, rulesHintText, playerRows, jcRows, netStatus, lastRejectReason, sizePending, markersPending, connectButton.disabled, setup.readSize(), setup.readMarkers()]);
+  const key = JSON.stringify([phaseText, turnText, canRestart, canAdvance, advanceLabel, advancePending, editable, canApplyRules, rulesPending, rulesHintText, playerRows, jcRows, netStatus, lastRejectReason, sizePending, markersPending, connectButton.disabled, setup.readSize(), setup.readMarkers()]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   turnEl.textContent = turnText;
   restartButton.disabled = !canRestart;
+  advanceRoundButton.hidden = s?.phase !== "roundResult";
+  advanceRoundButton.disabled = !canAdvance;
+  advanceRoundButton.textContent = advancePending ? "進行中…" : advanceLabel;
   for (const k of GOLF_RULE_KEYS) ruleInputs[k].disabled = !editable || rulesPending;
   applyRulesButton.disabled = !canApplyRules;
   applyRulesButton.textContent = rulesPending ? "送信中…" : "反映";
@@ -721,7 +734,7 @@ function renderPanel() {
       ? "Joy-Con を Mac の Bluetooth 設定で接続してから「Joy-Con を接続」→ 選択。以後はページを開くだけで再接続します。\n使い方: パターのように握って静止（構え）→ バックスイング → 振り戻す。A（L は →）で狙いを固定（スマホで見ている床の点）、B（L は ↓）で狙いを消す"
       : `静止すると構え直します（角 0°。持ち直したら ${(SWING_OPTS.swingStillMs / 1000).toFixed(1)} 秒止めるか A で構え直す）。バックスイング ${SWING_OPTS.minBackswingDeg}° 以上・戻り ${SWING_OPTS.minImpactDps} deg/s 以上で 1 打。速さ = 角速度 × 腕 ${ARM_M}m × 補正 ${STROKE_GAIN}（?armM= ?strokeGain= ?minBackswing= ?minImpactDps=）`;
   playersEl.replaceChildren(
-    ...playerRows.map(({ p, marker, strokes, holed, done, cards, total, turn, win, jc }) => {
+    ...playerRows.map(({ p, marker, shot, cards, total, turn, win, jc }) => {
       const li = document.createElement("li");
       const sw = document.createElement("span");
       sw.className = "swatch";
@@ -730,7 +743,7 @@ function renderPanel() {
       name.textContent = `${turn ? "▶ " : ""}${p.name}（${playerColorName(p.color)}）${win ? " 🏆" : ""}${jc ? ` 🎮` : ""}`;
       const score = document.createElement("span");
       score.className = "score";
-      score.textContent = strokes === null ? `${cards.join("+")} = ${total}` : `${cards.join("+")}${cards.length ? "+" : ""}${strokes}${holed ? "✓" : done ? "×" : ""} = ${total}`;
+      score.textContent = `${shot} / ${cards.length ? `${cards.join("+")} = ` : ""}${total}点`;
       const markerEl = document.createElement("span");
       markerEl.className = "marker";
       markerEl.textContent = `位置合わせ: マーカー ${marker}${jc ? ` / Joy-Con: ${jc}` : ""}`;
@@ -752,7 +765,7 @@ function renderHud() {
   const now = performance.now();
   const jcs = [...slots.values()];
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} hole=${s.hole + 1}/${s.holes.length} turn=${s.turn ?? "-"} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} balls=${s.players.map((p) => `${p.id}:${s.balls[p.id]?.strokes ?? 0}${s.balls[p.id]?.holed ? "h" : s.balls[p.id]?.done ? "d" : ""}`).join(",")} cards=${s.players.map((p) => `${p.id}:${(s.cards[p.id] ?? []).join("+") || "-"}`).join(",")} roll=${s.roll ? `#${s.roll.seq}:${s.roll.by}:${s.roll.holed ? "holed" : "stop"}` : "-"} field=${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop} rules=${cfg.decel}/${cfg.cupMaxSpeed}/${cfg.maxStrokes}/${cfg.holes} markers=${describeMarkers(cfg.markers ?? [])} joycons=${jcs.length} assigned=${jcs.map((j) => `${j.jc.fake ? "fake" : j.jc.kind}:${playerOf(j) ?? "-"}:${j.det.phase}`).join(",") || "-"} swings=${jcs.reduce((a, j) => a + j.swings, 0)} strokesSent=${strokesSent} addresses=${addressesSent} restarts=${restartsSent} rulesSent=${rulesSent} fields=${fieldsSent} markersSent=${markersSent} seq=${s.seq} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} hole=${s.hole + 1}/${s.holes.length} turn=${s.turn ?? "-"} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} balls=${s.players.map((p) => `${p.id}:${s.balls[p.id]?.strokes ?? 0}${s.balls[p.id]?.holed ? "h" : s.balls[p.id]?.done ? "d" : ""}`).join(",")} cards=${s.players.map((p) => `${p.id}:${(s.cards[p.id] ?? []).join("+") || "-"}`).join(",")} roll=${s.roll ? `#${s.roll.seq}:${s.roll.by}:${s.roll.holed ? "holed" : "stop"}` : "-"} field=${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop} rules=${cfg.decel}/${cfg.cupMaxSpeed}/${cfg.holes} markers=${describeMarkers(cfg.markers ?? [])} joycons=${jcs.length} assigned=${jcs.map((j) => `${j.jc.fake ? "fake" : j.jc.kind}:${playerOf(j) ?? "-"}:${j.det.phase}`).join(",") || "-"} swings=${jcs.reduce((a, j) => a + j.swings, 0)} strokesSent=${strokesSent} addresses=${addressesSent} advances=${advancesSent} restarts=${restartsSent} rulesSent=${rulesSent} fields=${fieldsSent} markersSent=${markersSent} seq=${s.seq} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;

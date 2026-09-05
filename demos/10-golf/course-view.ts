@@ -181,7 +181,7 @@ export class CourseView {
     }
   }
 
-  /** 狙い線: from（ボール）から dir へ 1m。fixed = 構えで固定した狙い（実線寄りの白）、そうでなければカップの方向（薄く） */
+  /** 狙い線: from（ボール）から dir へ 1m。fixed = 構えで固定した狙い（実線寄りの白）、そうでなければ正面（薄く） */
   setAim(from: V2 | null, dir: V2 | null, fixed: boolean, color: number) {
     if (!this.cfg || !from || !dir) {
       this.aim.visible = this.aimHead.visible = false;

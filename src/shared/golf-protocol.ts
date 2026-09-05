@@ -1,6 +1,6 @@
 // Phase 10 (10-golf) の WebSocket プロトコル定義。
 // クライアント（demos/10-golf/game-client.ts）とサーバー（server/golf.ts）の両方から import する。
-// サーバーがゲーム（手番・ボールの位置・転がり・打数）の権威を持つ。座標系は golf-sim.ts 参照。
+// サーバーがゲーム（手番・ボールの位置・転がり・順位点）の権威を持つ。座標系は golf-sim.ts 参照。
 // 接続の役割: player（スマホ）と overview（PC の俯瞰画面 + Joy-Con のハブ）。
 // Joy-Con はスマホ（iOS Safari）からは IMU が読めない（Gamepad API はボタンとスティックだけ、WebHID 無し）ので、
 // PC の Chrome が WebHID で読み、振りを検出して「誰の 1 打か」を付けてサーバーへ送る（CONCEPT.md の
@@ -14,7 +14,7 @@ import type { MarkerPlacement } from "./marker-layout.ts";
 export const GOLF_PATH = "/api/golf";
 
 /** メッセージや座標系の意味を変えたら上げる（不一致は入室拒否） */
-export const GOLF_PROTOCOL_VERSION = 1;
+export const GOLF_PROTOCOL_VERSION = 2;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -43,17 +43,19 @@ export type ClientMessage =
    * target は床の点（省略時はサーバーが持つその人の直近の視線の交点）
    */
   | { type: "address"; playerId?: string; target?: V2 }
-  /** 狙いを消す（カップの方向に戻す） */
+  /** 狙いを消す（正面に戻す） */
   | { type: "clearAim"; playerId?: string }
   /** 1 打: 速さ [m/s] とフェイスの開き [deg]。向きはサーバーが狙いから決める */
   | { type: "stroke"; playerId?: string; speed: number; faceDeg: number }
   /** パターの振り角（俯瞰画面だけ。表示用に全員へ中継。角速度は HUD 用） */
   | { type: "putter"; playerId: string; angleDeg: number; dps: number }
+  /** ラウンド結果を閉じて次のラウンドまたは総合結果へ進む（俯瞰画面だけ） */
+  | { type: "advanceRound" }
   /** 最初から（俯瞰画面だけ） */
   | { type: "restart" }
   /** コートの寸法の変更（俯瞰画面だけ。転がっていないとき。最初からになる） */
   | ({ type: "field" } & FieldSize)
-  /** ルール（減速・カップの速さ・打数の上限・ホール数）の変更（俯瞰画面だけ。最初からになる） */
+  /** ルール（減速・カップの速さ・ラウンド数）の変更（俯瞰画面だけ。最初からになる） */
   | ({ type: "rules" } & GolfRules)
   /** 追加マーカーの配置の変更（俯瞰画面だけ） */
   | { type: "markers"; markers: MarkerPlacement[] };

@@ -110,6 +110,7 @@ function parseClientMessage(data: RawData): ClientMessage | null {
     if (Math.abs(m.angleDeg) > 360 || Math.abs(m.dps) > 10000) return null;
     return { type: "putter", playerId: m.playerId, angleDeg: m.angleDeg, dps: m.dps };
   }
+  if (m.type === "advanceRound") return { type: "advanceRound" };
   if (m.type === "restart") return { type: "restart" };
   if (m.type === "field") {
     if (!FIELD_SIZE_KEYS.every((k) => isNum(m[k]))) return null;
@@ -117,7 +118,7 @@ function parseClientMessage(data: RawData): ClientMessage | null {
   }
   if (m.type === "rules") {
     if (!GOLF_RULE_KEYS.every((k) => isNum(m[k]))) return null;
-    return { type: "rules", decel: m.decel as number, cupMaxSpeed: m.cupMaxSpeed as number, maxStrokes: m.maxStrokes as number, holes: m.holes as number };
+    return { type: "rules", decel: m.decel as number, cupMaxSpeed: m.cupMaxSpeed as number, holes: m.holes as number };
   }
   if (m.type === "markers") {
     if (!Array.isArray(m.markers) || m.markers.length > MAX_EXTRA_MARKERS * 4) return null;
@@ -233,7 +234,7 @@ export function golfServer() {
         }
         return id;
       };
-      if (msg.type === "restart" || msg.type === "field" || msg.type === "rules" || msg.type === "markers" || msg.type === "putter") {
+      if (msg.type === "advanceRound" || msg.type === "restart" || msg.type === "field" || msg.type === "rules" || msg.type === "markers" || msg.type === "putter") {
         if (!isOverview) {
           rejected("not overview");
           return;
@@ -294,6 +295,17 @@ export function golfServer() {
           room.broadcast({ type: "putter", id: msg.playerId, angleDeg: msg.angleDeg, dps: msg.dps } satisfies ServerMessage, id);
           return;
         }
+        case "advanceRound": {
+          const events = game.advanceRound(now);
+          if (!events) {
+            console.log(`[golf] ${id} advanceRound rejected: ${game.lastRejectReason}`);
+            rejected(game.lastRejectReason);
+            return;
+          }
+          console.log(`[golf] ${id} advanceRound → ${describeEvents(events)}`);
+          for (const event of events) broadcastState(room, now, event);
+          return;
+        }
         case "restart": {
           // 転がっている最中でも通す（運営の操作。クライアントは roll: null で描画を止める）
           const events = game.restart(now);
@@ -324,7 +336,7 @@ export function golfServer() {
             return;
           }
           const c = game.config;
-          console.log(`[golf] ${id} rules → decel=${c.decel} cupMaxSpeed=${c.cupMaxSpeed} maxStrokes=${c.maxStrokes} holes=${c.holes}`);
+          console.log(`[golf] ${id} rules → decel=${c.decel} cupMaxSpeed=${c.cupMaxSpeed} holes=${c.holes}`);
           room.state.lastBroadcastMs = now;
           room.broadcast({ type: "config", config: game.config, state: game.snapshot(now, events[0]) } satisfies ServerMessage);
           return;
