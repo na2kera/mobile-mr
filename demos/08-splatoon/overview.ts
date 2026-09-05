@@ -12,6 +12,7 @@ import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
 import { FACE_LABELS, MARKER_FACES, MAX_EXTRA_MARKERS, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
+import { draggedMarkerPos, faceNormal, rayPlaneHit } from "../../src/shared/marker-drag";
 import { connectGame } from "./game-client";
 import type { GameClient } from "./game-client";
 import { InkView, inkColorHex, inkColorName } from "./ink-view";
@@ -21,6 +22,8 @@ import { createSplatSound } from "./splat-sound";
 // Phase 8 / issue #19・#21: PC の俯瞰画面。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
 // コート全体（四方の壁 + 床の塗り）・全員の頭と手・飛んでいるインクを描き、「対戦開始」「フィールドの寸法」「追加マーカーの配置」を送る唯一の端末。
 // 追加マーカー（issue #30）は配置どおりの位置に枠と ID を描き、各プレイヤーがいまどのマーカーで位置合わせしているかを一覧に出す（貼りズレの診断用）。
+// 枠は入力欄の行（未送信の下書き）を描き、3D の枠をドラッグすると行の X/Y/Z が書き換わる（issue #43。送るのは今までどおり「反映」）。
+// マーカー以外を掴むと空間全体が回る（OrbitControls）。
 // 座標系はスマホと同じ field 座標系（マーカー座標系）で、ここではそれをワールド座標にそのまま置く。
 // 描画のうち塗り（InkView）・飛行（inkAt）・ピアの頭と手は main.ts と同じ式（俯瞰なので視点だけ違う）
 
@@ -52,6 +55,9 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 document.querySelector<HTMLDivElement>("#app")!.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
+// 「箱を持って回す」手触り（issue #43）: 回転の中心はコートの箱の中心（fitCamera）、離しても少し回り続ける慣性
+controls.enableDamping = true;
+controls.dampingFactor = 0.12;
 
 function resize() {
   camera.aspect = innerWidth / innerHeight;
@@ -86,53 +92,83 @@ function buildField() {
   fitCamera();
 }
 
-/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す。追加マーカーの配置も反映する */
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（追加マーカーの枠は行から描くので renderPanel が更新する） */
 function applyFieldConfig(cfg: FieldConfig): boolean {
   const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
   fieldCfg = cfg;
   if (changed) buildField();
-  applyMarkerLayout(cfg.markers ?? []);
   return changed;
 }
 // マーカーの枠（壁の原点。スマホの位置合わせの基準がどこかを示す）
 const markerFrameGeometry = new THREE.PlaneGeometry(MARKER_MM / 1000, MARKER_MM / 1000);
 field.add(new THREE.Mesh(markerFrameGeometry, new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.5, side: THREE.DoubleSide })));
 field.add(new THREE.AxesHelper(0.3));
-// 追加マーカーの枠 + ID（issue #30）。配置どおりの位置と向きに描く（スマホ側の枠と同じ。貼る位置の目安）
+// 追加マーカーの枠 + ID（issue #30）。入力欄の行（使う行）を配置どおりの位置と向きに描く（スマホ側の枠と同じ。貼る位置の目安）。
+// サーバーの配置と同じ枠は黄、まだ「反映」していない下書きはオレンジ（issue #43）。枠は掴んでドラッグできる
 const markerFrames = new THREE.Group();
 field.add(markerFrames);
-let markerLayoutKey = "";
-function applyMarkerLayout(markers: MarkerPlacement[]) {
-  const key = JSON.stringify(markers);
-  if (key === markerLayoutKey) return;
-  markerLayoutKey = key;
-  for (const child of [...markerFrames.children]) {
-    child.removeFromParent();
-    child.traverse((o) => {
-      if (o instanceof THREE.Mesh) {
-        (o.material as THREE.Material & { map?: THREE.Texture | null }).map?.dispose();
-        (o.material as THREE.Material).dispose();
-        if (o.geometry !== markerFrameGeometry) o.geometry.dispose();
-      }
+const MARKER_FRAME_COLOR = 0xfdd663;
+const MARKER_DRAFT_COLOR = 0xf5a05a;
+/** 枠（見た目）と、それより広い見えない掴み領域（10cm の枠は俯瞰の距離だと十数 px しかなく掴みにくい） */
+type MarkerFrame = { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; hit: THREE.Mesh; label: TextPanel; rowIndex: number };
+const MARKER_GRAB_M = Math.max(0.3, (MARKER_MM / 1000) * 1.5);
+const markerGrabGeometry = new THREE.PlaneGeometry(MARKER_GRAB_M, MARKER_GRAB_M);
+const markerGrabMaterial = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+let markerFrameList: MarkerFrame[] = [];
+let markerFramesKey = "";
+/**
+ * 行 → 枠。使う行の数・面・ID が変わったら作り直し、位置と色は毎回そのまま書き直す（ドラッグ中は毎 move で呼ばれるので、
+ * 位置だけの変化でテクスチャを作り直さない）。位置が空欄・数値でない行の枠は隠す
+ */
+function syncMarkerFrames() {
+  const rows = markerRows.map((r, i) => ({ row: r, i })).filter(({ row }) => row.use.checked);
+  const key = rows.map(({ row, i }) => `${i}:${row.face.value}:${row.id.value}`).join("|");
+  if (key !== markerFramesKey) {
+    markerFramesKey = key;
+    // 古い枠を指したままにしない（作り直した枠は次の pointermove で当て直す）
+    hoverFrame = null;
+    updateCursor();
+    for (const f of markerFrameList) {
+      f.mesh.removeFromParent();
+      f.mesh.material.dispose();
+      f.label.mesh.material.map?.dispose();
+      f.label.mesh.material.dispose();
+      f.label.mesh.geometry.dispose();
+    }
+    markerFrameList = rows.map(({ row, i }) => {
+      const mesh = new THREE.Mesh(markerFrameGeometry, new THREE.MeshBasicMaterial({ color: MARKER_FRAME_COLOR, transparent: true, opacity: 0.6, side: THREE.DoubleSide }));
+      mesh.matrixAutoUpdate = false;
+      const label = new TextPanel(0.3, 0.09, 256, 6);
+      label.mesh.position.set(0, (MARKER_MM / 1000) * 0.9, 0.005);
+      label.set(`${FACE_LABELS[row.face.value as MarkerFace]} ${row.id.value}`, cssColor(MARKER_FRAME_COLOR));
+      mesh.add(label.mesh);
+      const hit = new THREE.Mesh(markerGrabGeometry, markerGrabMaterial);
+      mesh.add(hit);
+      markerFrames.add(mesh);
+      return { mesh, hit, label, rowIndex: i };
     });
   }
-  for (const m of markers) {
-    const mesh = new THREE.Mesh(markerFrameGeometry, new THREE.MeshBasicMaterial({ color: 0xfdd663, transparent: true, opacity: 0.6, side: THREE.DoubleSide }));
-    mesh.matrixAutoUpdate = false;
-    mesh.matrix.fromArray(markerToFieldMatrix(m));
-    const label = new TextPanel(0.3, 0.09, 256, 6);
-    label.mesh.position.set(0, (MARKER_MM / 1000) * 0.9, 0.005);
-    label.set(`${FACE_LABELS[m.face]} ${m.id}`, "#fdd663");
-    mesh.add(label.mesh);
-    markerFrames.add(mesh);
+  const server = fieldCfg.markers ?? [];
+  for (const f of markerFrameList) {
+    const m = rowPlacement(markerRows[f.rowIndex]);
+    const valid = m.pos.every(Number.isFinite);
+    f.mesh.visible = valid;
+    if (!valid) continue;
+    f.mesh.matrix.fromArray(markerToFieldMatrix(m));
+    const sent = server.some((s) => s.id === m.id && s.face === m.face && s.pos.every((v, k) => v === m.pos[k]));
+    const hovered = hoverFrame === f || drag?.frame === f;
+    f.mesh.material.color.setHex(sent ? MARKER_FRAME_COLOR : MARKER_DRAFT_COLOR);
+    f.mesh.material.opacity = hovered ? 0.9 : 0.6;
   }
+  // 作り直した直後の pointerdown でも当たるよう、描画を待たずワールド行列を更新しておく
+  markerFrames.updateMatrixWorld(true);
 }
 
-// 視点: コートの後方上空から壁を見下ろす。OrbitControls で回せる
+// 視点: コートの後方上空から壁を見下ろす。OrbitControls で回せる（回転の中心はコートの箱の中心）
 function fitCamera() {
   const { wallW, wallH, floorDrop, floorDepth } = fieldCfg;
   camera.position.set(wallW * 0.9, -floorDrop + wallH * 1.1, floorDepth + wallW * 0.9);
-  controls.target.set(0, -floorDrop + wallH * 0.35, floorDepth / 2);
+  controls.target.set(0, -floorDrop + wallH / 2, floorDepth / 2);
   controls.update();
 }
 buildField();
@@ -601,16 +637,152 @@ function setRowPos(row: MarkerRow, p: readonly number[]) {
  * （Number("") は 0 になり、入力途中の空欄が「原点の位置」として配られてしまう。外部レビュー指摘）
  */
 function readMarkerRows(): MarkerPlacement[] {
-  const out: MarkerPlacement[] = [];
-  for (const row of markerRows) {
-    if (!row.use.checked) continue;
-    const face = row.face.value as MarkerFace;
-    // 床の Y は入力欄に関係なく床の高さ（寸法から）
-    const y = face === "floor" ? -fieldCfg.floorDrop : row.pos[1].valueAsNumber;
-    out.push({ id: row.id.valueAsNumber, face, pos: [row.pos[0].valueAsNumber, y, row.pos[2].valueAsNumber] });
-  }
-  return out;
+  return markerRows.filter((row) => row.use.checked).map(rowPlacement);
 }
+/** 1 行 → 配置（使う / 使わないは見ない）。床の Y は入力欄に関係なく床の高さ（寸法から） */
+function rowPlacement(row: MarkerRow): MarkerPlacement {
+  const face = row.face.value as MarkerFace;
+  const y = face === "floor" ? -fieldCfg.floorDrop : row.pos[1].valueAsNumber;
+  return { id: row.id.valueAsNumber, face, pos: [row.pos[0].valueAsNumber, y, row.pos[2].valueAsNumber] };
+}
+/** 追加マーカーを変えられるか（練習中か結果表示中で、送信中でない。行の入力欄とドラッグで共通） */
+function markersEditable(): boolean {
+  const s = auth?.state;
+  return joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !markersPending;
+}
+
+// ---- 3D の枠のドラッグ（issue #43）: 枠を掴むとその面の平面上で動かし、行の X/Y/Z に書き戻す。枠以外を掴むと OrbitControls で空間が回る ----
+// OrbitControls も同じ canvas の pointerdown を見るので、枠に当たったときは親（#app）の capture で先に受けて伝播を止める
+const appEl = document.querySelector<HTMLDivElement>("#app")!;
+const raycaster = new THREE.Raycaster();
+const pointerNdc = new THREE.Vector2();
+type Drag = { frame: MarkerFrame; row: MarkerRow; face: MarkerFace; pos0: V3; hit0: V3; normal: V3; pointerId: number };
+let drag: Drag | null = null;
+let hoverFrame: MarkerFrame | null = null;
+/** ドラッグで行を書き換えた回数（HUD。ヘッドレス確認用） */
+let markerDrags = 0;
+
+/** 画面の点 → レイ（field 座標系 = ワールド）。origin と dir を配列で返す（marker-drag.ts の純粋関数に渡す） */
+function pointerRay(e: { clientX: number; clientY: number }): { origin: V3; dir: V3 } {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(pointerNdc, camera);
+  const { origin, direction } = raycaster.ray;
+  return { origin: [origin.x, origin.y, origin.z], dir: [direction.x, direction.y, direction.z] };
+}
+/** 画面の点の下にある枠（掴み領域で判定。手前のもの）。ラベルは当てない */
+function frameAt(e: { clientX: number; clientY: number }): MarkerFrame | null {
+  pointerRay(e);
+  const hits = raycaster.intersectObjects(
+    markerFrameList.filter((f) => f.mesh.visible).map((f) => f.hit),
+    false,
+  );
+  if (hits.length === 0) return null;
+  return markerFrameList.find((f) => f.hit === hits[0].object) ?? null;
+}
+function updateCursor() {
+  renderer.domElement.style.cursor = drag ? "grabbing" : hoverFrame ? "grab" : "";
+}
+
+/**
+ * OrbitControls の慣性の残りを使い切る。`enabled = false` は入力を止めるだけで、毎フレームの `update()` が残った damping を
+ * 適用し続けるので、空間を回した直後に枠を掴むとドラッグ中もカメラが動いてレイがずれる（codex レビュー指摘）。
+ * damping を切って 1 回 update すると残りの回転を一度に適用して 0 に戻す（レイを計算する前に呼ぶ）
+ */
+function settleOrbit() {
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = true;
+}
+/** ドラッグを中断する（行の同期・編集不可への遷移・ポインタの解放。行の値はその時点のまま） */
+function cancelDrag() {
+  if (!drag) return;
+  try {
+    renderer.domElement.releasePointerCapture(drag.pointerId);
+  } catch {
+    // 取れていなければ何もしない
+  }
+  drag = null;
+  controls.enabled = true;
+  updateCursor();
+}
+
+appEl.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (e.button !== 0 || drag || !markersEditable()) return;
+    if (!frameAt(e)) return;
+    // 枠に当たった。慣性の残りを使い切ってから、同じカメラで当たり判定と掴み点をやり直す
+    // （慣性で跳んだ後のカメラで掴み点を計算すると平面の遠い点になり、少しの移動で枠が数 m 飛ぶ）
+    settleOrbit();
+    const frame = frameAt(e);
+    if (!frame) return;
+    const row = markerRows[frame.rowIndex];
+    const m = rowPlacement(row);
+    const normal = faceNormal(m.face);
+    const { origin, dir } = pointerRay(e);
+    const hit0 = rayPlaneHit(origin, dir, m.pos, normal);
+    if (!hit0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    // 伝播を止めるので window の pointerdown（着弾の音の解錠）に届かない。ここで解錠しておく
+    splatSound.unlock();
+    controls.enabled = false;
+    drag = { frame, row, face: m.face, pos0: m.pos, hit0, normal, pointerId: e.pointerId };
+    try {
+      renderer.domElement.setPointerCapture(e.pointerId);
+    } catch {
+      // 合成イベント（pointerId が無い）では取れない。ドラッグは動く
+    }
+    updateCursor();
+    renderPanel();
+  },
+  { capture: true },
+);
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (drag) {
+    if (e.pointerId !== drag.pointerId) return;
+    // ドラッグ中に試合が始まる・切断するなどで編集できなくなったら、そこで止める（行は無効化されているのに書き換え続けない）
+    if (!markersEditable()) {
+      cancelDrag();
+      renderPanel();
+      return;
+    }
+    const { origin, dir } = pointerRay(e);
+    const hit = rayPlaneHit(origin, dir, drag.pos0, drag.normal);
+    if (!hit) return;
+    const next = draggedMarkerPos(drag.face, drag.pos0, drag.hit0, hit, e.shiftKey);
+    const cur = rowPlacement(drag.row).pos;
+    if (next.every((v, k) => v === cur[k])) return;
+    setRowPos(drag.row, next);
+    markerDrags++;
+    renderPanel();
+    return;
+  }
+  const frame = markersEditable() ? frameAt(e) : null;
+  if (frame !== hoverFrame) {
+    hoverFrame = frame;
+    updateCursor();
+    syncMarkerFrames();
+  }
+});
+function endDrag(e: PointerEvent) {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  cancelDrag();
+  hoverFrame = frameAt(e);
+  updateCursor();
+  renderPanel();
+}
+// pointerup は window で受ける（setPointerCapture が取れなかったとき canvas の外で離しても取りこぼさない）
+addEventListener("pointerup", endDrag);
+addEventListener("pointercancel", endDrag);
+renderer.domElement.addEventListener("lostpointercapture", endDrag);
+renderer.domElement.addEventListener("pointerleave", () => {
+  if (drag || !hoverFrame) return;
+  hoverFrame = null;
+  updateCursor();
+  syncMarkerFrames();
+});
 /** 行とサーバーの配置が違うか（順序は問わない: 行は ID で埋めるのでサーバーの並びと一致しないことがある） */
 function markerRowsChanged(): boolean {
   const key = (ms: readonly MarkerPlacement[]) => JSON.stringify([...ms].sort((a, b) => a.id - b.id));
@@ -621,6 +793,8 @@ function markerRowsChanged(): boolean {
  * 残りの行は使わない状態にしておすすめの値を入れる
  */
 function syncMarkerRows() {
+  // ドラッグ中に届いたら（自分の「反映」の応答か、別の俯瞰画面の変更）ドラッグは中断し、行はサーバーの配置に揃える
+  cancelDrag();
   const markers = fieldCfg.markers ?? [];
   const assigned = new Map<MarkerRow, MarkerPlacement>();
   const pending: MarkerPlacement[] = [];
@@ -764,10 +938,12 @@ function renderPanel() {
         ? "「反映」で全員のフィールドが変わります（塗りは消えます）"
         : `いま: 幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m、マーカーの高さ ${fieldCfg.floorDrop}m（${s?.totalCells ?? 0} セル）`;
   // 追加マーカーも練習中か結果表示中だけ（寸法と同じ）。床の行の Y は寸法から決まるので入力不可
-  const markersEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !markersPending;
+  const canEditMarkers = markersEditable();
   const markerRowsValue = readMarkerRows();
   const markersInvalid = validateMarkerLayout(markerRowsValue, MARKER_ID, fieldCfg.floorDrop);
-  const canApplyMarkers = markersEditable && markerRowsChanged() && markersInvalid === null;
+  const canApplyMarkers = canEditMarkers && markerRowsChanged() && markersInvalid === null;
+  // 3D の枠は行の下書きを描く（ドラッグ中は毎 move で来る。位置と色だけ書き直すので軽い）
+  syncMarkerFrames();
   const markersHintText = !joined
     ? ""
     : markersInvalid
@@ -786,7 +962,7 @@ function renderPanel() {
           return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
         })
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, markersEditable, canApplyMarkers, markersPending, markersHintText, rowStates]);
+  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, canEditMarkers, canApplyMarkers, markersPending, markersHintText, rowStates]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
@@ -798,16 +974,20 @@ function renderPanel() {
   applySizeButton.textContent = fieldPending ? "送信中…" : "反映";
   sizeHint.textContent = sizeHintText;
   for (const row of markerRows) {
-    row.use.disabled = !markersEditable;
+    row.use.disabled = !canEditMarkers;
     row.root.classList.toggle("off", !row.use.checked);
     const isFloor = row.face.value === "floor";
     if (isFloor) row.pos[1].value = String(-fieldCfg.floorDrop);
-    row.face.disabled = !markersEditable;
-    row.id.disabled = !markersEditable;
-    row.pos[0].disabled = !markersEditable;
-    row.pos[1].disabled = !markersEditable || isFloor;
+    row.face.disabled = !canEditMarkers;
+    row.id.disabled = !canEditMarkers;
+    row.pos[0].disabled = !canEditMarkers;
+    row.pos[1].disabled = !canEditMarkers || isFloor;
     row.pos[1].title = isFloor ? "床のマーカーの高さは「マーカーの高さ」から自動" : "";
-    row.pos[2].disabled = !markersEditable;
+    row.pos[2].disabled = !canEditMarkers;
+  }
+  if (!canEditMarkers && hoverFrame) {
+    hoverFrame = null;
+    updateCursor();
   }
   applyMarkersButton.disabled = !canApplyMarkers;
   applyMarkersButton.textContent = markersPending ? "送信中…" : "反映";
@@ -857,7 +1037,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent} markersSent=${markersSent} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;
@@ -870,6 +1050,21 @@ if (ROOM === null) {
 } else {
   connect();
 }
+
+// ヘッドレス確認用（scripts/headless-splatoon.mjs）: 行の枠の画面座標と視点の位置。CDP の実マウスでドラッグして確かめる
+const projected = new THREE.Vector3();
+(window as Window & { __overviewDebug?: unknown }).__overviewDebug = {
+  /** 行番号 → 枠の中心の画面座標 [x, y]（CSS px。枠が無い・画面外なら null） */
+  markerScreen(rowIndex: number): [number, number] | null {
+    const f = markerFrameList.find((x) => x.rowIndex === rowIndex);
+    if (!f || !f.mesh.visible) return null;
+    projected.setFromMatrixPosition(f.mesh.matrixWorld).project(camera);
+    if (Math.abs(projected.x) > 1 || Math.abs(projected.y) > 1) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    return [rect.left + ((projected.x + 1) / 2) * rect.width, rect.top + ((1 - projected.y) / 2) * rect.height];
+  },
+  cameraPos: (): V3 => [camera.position.x, camera.position.y, camera.position.z],
+};
 
 addEventListener("pagehide", () => {
   client?.dispose();
