@@ -71,6 +71,7 @@ Phase 1〜9 は上記「ライブラリ化の3段階戦略」の段階1にあた
 - **new-demo** — 新しいデモページの追加（ディレクトリ規約・vite.config 登録・一覧ページ更新まで）
 - **pain-point** — 開発中に見つけた痛点を `docs/PAIN_POINTS.md` に記録する。痛点の記録はこのプロジェクトの成果物の一部
 - **iphone-test** — iPhone 実機（iOS Safari）での確認手順とハマりどころチェックリスト
+- **dev-address** — 実機から開く dev サーバーの URL を答える（`https://<ホスト名>.local:<port>/` の形。IP 直打ちで答えない）
 
 ## 開発環境の前提
 
