@@ -3,6 +3,7 @@
 //   - 入室したら練習（practice。時間無制限に自由に塗れる。issue #20）→ 俯瞰画面の「対戦開始」（start）で
 //     カウントダウン（waiting。waitSec）→ 試合（matchSec）→ 結果（resultSec）→ 格子とインクをリセットして練習に戻る
 //   - 俯瞰画面の「終了」（stop）で試合を途中で終えられる（即座に結果へ）。カウントダウン中の stop は中止して練習に戻る（issue #32）
+//   - 俯瞰画面の「インクリセット」（reset）で、練習中の格子・インク残量・飛行中の弾を初期化する（issue #47）
 //   - 発射（shot）は位置・速度・半径・インク残量を検証し、着弾を simulateInk で決めて格子に塗る
 //   - インクは撃つのをやめると回復し、グー（fist）の間は速く回復する（issue #20「グーで補充」）
 //   - 得点 = 自分の色のセル数（四方の壁 + 床）。勝者はセル最多の人（同点は複数）
@@ -52,6 +53,8 @@ export type GameEvent =
   | { kind: "cancel" }
   /** 俯瞰画面がフィールドの寸法を変えた（格子は作り直し = 塗りは消える。config は field メッセージで配る） */
   | { kind: "field" }
+  /** 俯瞰画面が練習中のインクを消した（格子・インク残量・飛行中の弾を初期化） */
+  | { kind: "reset" }
   /** 個人戦の結果。winners = 最多セルのプレイヤー id（同点は複数。誰も塗っていなければ空）。stopped = 俯瞰画面が途中で終えた */
   | { kind: "result"; winners: string[]; winnerNames: string[]; stopped?: boolean }
   | { kind: "shot"; by: string };
@@ -382,6 +385,16 @@ export class SplatoonGame {
     }
     this.lastRejectReason = `nothing to stop during ${this.phase}`;
     return [];
+  }
+
+  /** 俯瞰画面から練習中の塗りを消す。対戦の途中経過や結果は誤操作で消せない */
+  resetPractice(now: number): GameEvent[] {
+    if (this.phase !== "practice") {
+      this.lastRejectReason = `cannot reset during ${this.phase}`;
+      return [];
+    }
+    this.resetField(now);
+    return [{ kind: "reset" }];
   }
 
   /**

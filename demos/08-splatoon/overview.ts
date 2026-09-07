@@ -336,11 +336,14 @@ let auth: { state: GameSnapshot; recvMs: number } | null = null;
 let lastEventKey = "";
 let startsSent = 0;
 let stopsSent = 0;
+let resetsSent = 0;
 let lastRejectReason = "";
 /** 「対戦開始」を送ってから state / rejected / 切断のいずれかが来るまで（二重送信の防止） */
 let startPending = false;
 /** 「対戦を終了」を送ってから state / rejected / 切断のいずれかが来るまで */
 let stopPending = false;
+/** 「練習のインクをリセット」を送ってから reset state / rejected / 切断のいずれかが来るまで */
+let resetPending = false;
 /** 寸法の「反映」を送ってから field / rejected / 切断のいずれかが来るまで */
 let fieldPending = false;
 let fieldsSent = 0;
@@ -371,6 +374,13 @@ function onState(state: GameSnapshot) {
   }
   if (state.phase === "practice" || state.phase === "result") stopPending = false;
   const ev = state.event;
+  if (ev?.kind === "reset") {
+    resetPending = false;
+    lastRejectReason = "";
+    for (const s of shots.values()) s.mesh.removeFromParent();
+    shots.clear();
+    splatted.clear();
+  }
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
     lastEventKey = key;
@@ -403,6 +413,7 @@ function connect() {
           joined = false;
           startPending = false;
           stopPending = false;
+          resetPending = false;
           fieldPending = false;
           markersPending = false;
         }
@@ -443,6 +454,7 @@ function connect() {
         lastRejectReason = reason;
         startPending = false;
         stopPending = false;
+        resetPending = false;
         fieldPending = false;
         markersPending = false;
         console.log(`[overview] rejected by server: ${reason}`);
@@ -544,6 +556,7 @@ function updateShots(now: number) {
 
 // ---- 操作パネル ----
 const phaseEl = document.querySelector<HTMLDivElement>("#phase")!;
+const resetButton = document.querySelector<HTMLButtonElement>("#reset-practice")!;
 const startButton = document.querySelector<HTMLButtonElement>("#start-match")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop-match")!;
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;
@@ -907,6 +920,16 @@ stopButton.addEventListener("click", () => {
   }
   renderPanel();
 });
+resetButton.addEventListener("click", () => {
+  if (!client || resetPending) return;
+  if (client.sendReset()) {
+    resetsSent++;
+    resetPending = true;
+    lastRejectReason = "";
+    console.log("[overview] reset sent");
+  }
+  renderPanel();
+});
 
 let lastPanelKey = "";
 function renderPanel() {
@@ -925,6 +948,7 @@ function renderPanel() {
   }
   const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0 && !startPending;
   const canStop = joined && s !== undefined && (s.phase === "waiting" || s.phase === "play") && !stopPending;
+  const canReset = joined && s?.phase === "practice" && !resetPending;
   const stopText = stopPending ? "送信中…" : s?.phase === "waiting" ? "カウントダウンを中止" : "対戦を終了";
   // 寸法は練習中か結果表示中だけ変えられる（カウントダウン中・試合中は入力ごと無効）
   const sizeEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !fieldPending;
@@ -962,13 +986,15 @@ function renderPanel() {
           return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
         })
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, canEditMarkers, canApplyMarkers, markersPending, markersHintText, rowStates]);
+  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, canReset, resetPending, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, canEditMarkers, canApplyMarkers, markersPending, markersHintText, rowStates]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
   startButton.disabled = !canStart;
   stopButton.disabled = !canStop;
   stopButton.textContent = stopText;
+  resetButton.disabled = !canReset;
+  resetButton.textContent = resetPending ? "送信中…" : "練習のインクをリセット";
   for (const key of FIELD_SIZE_KEYS) sizeInputs[key].disabled = !sizeEditable;
   applySizeButton.disabled = !canApplySize;
   applySizeButton.textContent = fieldPending ? "送信中…" : "反映";
@@ -1037,7 +1063,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} resets=${resetsSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;

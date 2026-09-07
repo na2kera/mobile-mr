@@ -16,8 +16,9 @@ export const SPLATOON_PATH = "/api/splatoon";
  * v8: 俯瞰画面の stop（対戦を途中で終える / カウントダウンを中止する。issue #32）と cancel イベント
  * v9: マルチマーカー（issue #30）。追加マーカーの配置（config.markers）を俯瞰画面の markers で変えて全員に配る。
  *     pose に markerIds（いまどのマーカーで位置合わせしているか）
+ * v10: 練習中のインクリセット（issue #47）。俯瞰画面の reset で格子・インク残量・飛行中の弾を初期化する。
  */
-export const SPLATOON_PROTOCOL_VERSION = 9;
+export const SPLATOON_PROTOCOL_VERSION = 10;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -63,6 +64,8 @@ export type ClientMessage =
   | { type: "start" }
   /** 対戦を途中で終える（俯瞰画面だけが送れる。試合中は即座に結果へ、カウントダウン中は中止して練習に戻る。issue #32） */
   | { type: "stop" }
+  /** 練習中のインクを消す（俯瞰画面だけが送れる。格子・インク残量・飛行中の弾を初期化する。issue #47） */
+  | { type: "reset" }
   /** フィールドの寸法の変更（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける。格子は作り直す = 塗りは消える） */
   | ({ type: "field" } & FieldSize)
   /** 追加マーカーの配置の変更（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける。塗りは消えない。issue #30） */

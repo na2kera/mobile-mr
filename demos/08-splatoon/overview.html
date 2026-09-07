@@ -75,7 +75,8 @@
         color: #9aa0a6;
         cursor: default;
       }
-      /* 途中終了（issue #32）。開始と同じ形だが、押し間違えないよう塗りつぶさない */
+      /* 状態を消す操作。開始と同じ形だが、押し間違えないよう塗りつぶさない */
+      #reset-practice,
       #stop-match {
         width: 100%;
         font-size: 0.9rem;
@@ -88,6 +89,10 @@
         color: #f28b82;
         cursor: pointer;
       }
+      #reset-practice {
+        margin: 0 0 4px;
+      }
+      #reset-practice:disabled,
       #stop-match:disabled {
         border-color: #3c4043;
         color: #5f6368;
@@ -314,6 +319,7 @@
         </div>
         <div id="markers-hint"></div>
       </fieldset>
+      <button id="reset-practice" type="button" disabled>練習のインクをリセット</button>
       <button id="start-match" type="button" disabled>対戦開始</button>
       <button id="stop-match" type="button" disabled>対戦を終了</button>
       <ul id="players"></ul>
