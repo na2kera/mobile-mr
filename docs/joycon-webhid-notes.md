@@ -1,6 +1,6 @@
-# Joy-Con を WebHID から使うときのメモ（Phase 10 MR ゴルフ用）
+# Joy-Con を WebHID から使うときのメモ（Phase 10 MR ゴルフ / 10-2 MR バッティング）
 
-2026-09-05、Phase 10（`demos/10-golf/`）で Joy-Con をパターにするために調べた仕様の要点。
+2026-09-05、Phase 10（`demos/10-golf/`）で Joy-Con をパターにするために調べ、Phase 10-2（`demos/10-2-batting/`）の投球・打撃入力でも再利用した仕様の要点。
 一次資料は dekuNukem の逆解析ノートと joy-con-webhid / joycon-toolweb / Linux hid-nintendo の実装で、
 codex（gpt-5.6）に照合させた結果を要約した。**実機（macOS Chrome + Joy-Con）での動作は未確認**。
 
@@ -67,6 +67,13 @@ WebHID の `event.data` は reportId を除いた 48 バイト。下は **ID 込
 | +Z | ボタン面から手前 | 背面へ |
 
 L と R は Y・Z の符号が逆（X まわりに 180° 回した関係。右手系のまま）。ゴルフの振り検出は軸を決め打ちせず「バックスイングの回転ベクトルの向き」を振りの軸にするので、L / R も持ち方も問わない。
+
+## MR バッティングでの球種選択と振り検出
+
+- 投手は Joy-Con L の方向ボタンで、↑ストレート / →カーブ / ←スライダー / ↓フォークを選ぶ。無入力はストレート。複数方向が同時に入った場合の優先順は「下、左、右、上」（`pitchTypeFromButtons` の判定順）。Joy-Con R の A/B/X/Y は方向ボタンの代用にはしていないため、2台使う場合は L を投手、R を打者へ明示的に割り当てる
+- レポートのボタン値はその瞬間の状態でしかなく、投球の 0 通過（インパクト）より先に指を離すと球種が失われる。そのため `overview.ts` は、検出中の振りで最後に観測した方向を `selectedPitch` に保持し、ボタンを離してもインパクトまで使う。次に静止して `address` へ戻った時点でストレートへリセットする
+- バッティング用 `SwingDetector` の初期値は `stillDps=25`、`stillMs=250`、`minBackswingDeg=8`、`minImpactDps=30`、`maxSwingMs=3000`、`swingStillMs=450`。ゴルフの共通既定（最小 6° / 20dps）より誤検出を抑える側へ上げている。俯瞰画面の `?minBackswing=8&minImpactDps=30` などで実機調整できる
+- 速度は `impactSpeed(dps, armM, gain)` で換算し、初期値は `armM=0.65`、投球 `pitchGain=1.2`、打撃 `batGain=1.5`。上記のしきい値と補正値はフェイク Joy-Con / ヘッドレス Chrome での初期推奨値で、実 Joy-Con では持ち方・腕の長さと合わせて調整が必要
 
 ## 参考
 
