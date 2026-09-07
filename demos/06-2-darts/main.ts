@@ -16,6 +16,7 @@ import type { MarkerAnchor } from "../../src/shared/marker-anchor";
 import { createHandTracker } from "../../src/shared/hand-tracker";
 import type { HandTracker } from "../../src/shared/hand-tracker";
 import { HandView } from "../../src/shared/hand-view";
+import { HandOccluder } from "../../src/shared/hand-occluder";
 import { LANDMARK_COUNT } from "../../src/shared/hand-math";
 import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
 import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
@@ -73,6 +74,14 @@ const HAND_SCALE = numParam("handScale", 1, { min: 0.2, max: 5 });
 const MATCH_DIST_M = numParam("matchDist", 0.15, { min: 0.02, max: 2 });
 const MATCH_SPEED_MPS = numParam("matchSpeed", 2, { min: 0, max: 20 });
 const SWAP_HANDS = params.get("swapHands") === "1";
+// 手のオクルージョン（issue #14。src/shared/hand-occluder.ts）。0 で切る
+const OCCLUSION = params.get("occlusion") !== "0";
+/** 手のメッシュの太さの余白 [m] */
+const OCCLUDER_PAD = numParam("occluderPad", 0.005, { min: 0, max: 0.05 });
+/** 1 で手のメッシュを緑の加算で見せる（背景の手をどれだけ覆えているかの確認用） */
+const OCCLUDER_DEBUG = params.get("occluderDebug") === "1";
+/** 1 で手のメッシュに通常の視差を付ける（既定は背景と同じ視差ゼロ。実機での比較用） */
+const OCCLUDER_PARALLAX = params.get("occluderParallax") === "1";
 const OFFICIAL_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const MODEL_URLS = params.get("model")
@@ -332,6 +341,28 @@ const handSlots = new HandSlots({
   matchSpeedMps: MATCH_SPEED_MPS,
   swapHands: SWAP_HANDS,
 });
+// 手のオクルージョン: スロットごとに 1 つ、骨格と同じ点でカメラの子に置く（issue #14）。
+// 深度だけ書くので、ボード・ダーツ・マーカー枠のうち手の奥にある部分が消えて背景の実際の手が見える
+const handOccluders: HandOccluder[] = OCCLUSION
+  ? handSlots.slots.map(() => {
+      const occ = new HandOccluder({
+        pad: OCCLUDER_PAD,
+        debug: OCCLUDER_DEBUG,
+        zeroParallax: !OCCLUDER_PARALLAX,
+        mainCamera: camera,
+      });
+      camera.add(occ.group);
+      return occ;
+    })
+  : [];
+
+function updateHandOccluders() {
+  for (const [i, occ] of handOccluders.entries()) {
+    const slot = handSlots.slots[i];
+    if (slot.view.visible && slot.ema) occ.update(slot.ema);
+    else occ.hide();
+  }
+}
 
 // ---- レンダラー + 2眼 ----
 let passthrough: Passthrough | null = null;
@@ -514,6 +545,7 @@ function updateHands(now: number) {
     }
   }
   handSlots.update(now);
+  updateHandOccluders();
 }
 
 function applyHandResult(result: HandResultLike, now: number) {
@@ -921,7 +953,7 @@ function renderHud() {
     `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(performance.now(), MARKER_LOST_MS) ? " (holding last pose)" : ""}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
-      `hands=${lastResultHands} ${handSlots.describe() || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
+      `hands=${lastResultHands} ${handSlots.describe() || "-"} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms occluder=${OCCLUSION ? `${handOccluders.filter((o) => o.visible).length}/${handOccluders.length} pad=${OCCLUDER_PAD}${OCCLUDER_PARALLAX ? " parallax" : ""}${OCCLUDER_DEBUG ? " debug" : ""}` : "off"}`,
     `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} swing=${swinging() ? "yes" : "no"} last=${lastSwingInfo || "-"}`,
     s &&
       `game: phase=${s.phase} round=${s.round} turn=${s.turn?.playerId ?? "-"}#${s.turn?.index ?? "-"} players=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} darts=${s.darts.length} throws=${localThrows}/${acceptedThrows} seq=${s.seq}`,
