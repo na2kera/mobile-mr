@@ -184,6 +184,7 @@ function parseOverviewHud(hud) {
     field: hud.match(/field=(\S+)/)?.[1] ?? "",
     starts: Number(hud.match(/starts=(\d+)/)?.[1] ?? -1),
     stops: Number(hud.match(/stops=(\d+)/)?.[1] ?? -1),
+    resets: Number(hud.match(/resets=(\d+)/)?.[1] ?? -1),
     dismisses: Number(hud.match(/dismisses=(\d+)/)?.[1] ?? -1),
     fields: Number(hud.match(/fields=(\d+)/)?.[1] ?? -1),
     markers: hud.match(/\bmarkers=(\S+)/)?.[1] ?? "",
@@ -301,6 +302,13 @@ try {
   check("tankShow=always: 合成の手が消えている間は視界の下に出る", tankPlaces2.has("view"), [...tankPlaces2].join(","));
   const buttonEnabled = await p3.eval("(() => { const b = document.querySelector('#start-match'); return b && !b.disabled; })()");
   check("俯瞰画面の「対戦開始」が押せる状態", buttonEnabled === true);
+  const resetEnabled = await p3.eval("(() => { const b = document.querySelector('#reset-practice'); return b && !b.disabled; })()");
+  check("練習中は俯瞰画面の「練習のインクをリセット」が押せる", resetEnabled === true);
+  await p3.eval("document.querySelector('#reset-practice').click()");
+  await sleep(1500);
+  const resetOv = await readOverview();
+  check("インクリセットが送られ、全クライアントに reset イベントが届く", resetOv.resets === 1 && p1.logs.some((l) => /\[game\] event reset phase=practice/.test(l)) && p2.logs.some((l) => /\[game\] event reset phase=practice/.test(l)), `resets=${resetOv.resets}`);
+  check("サーバーが練習のインクリセットを記録している", serverLines.some((l) => /reset practice ink/.test(l)));
   check("寸法は URL に無く、既定（3x2.4x2.5、マーカー 1.2）で全員が一致している", pr1.field === "3x2.4x2.5/1.2" && pr2.field === "3x2.4x2.5/1.2" && prOv.field === "3x2.4x2.5/1.2", `${pr1.field} / ${pr2.field} / ${prOv.field}`);
 
   // ---- 塗れる空間の大きさとマーカーの高さを俯瞰画面で変える（練習中。入力欄 → 反映）----
@@ -515,6 +523,8 @@ try {
   console.log(`play window2: ${show(hud2)}`);
   console.log(`play overview: ${showOv(hudOv)}`);
   check("俯瞰画面の start が送られ、試合（play）になっている", hudOv.starts === 1 && hud1.phase === "play" && hud2.phase === "play" && hudOv.phase === "play");
+  const resetDisabled = await p3.eval("(() => { const b = document.querySelector('#reset-practice'); return b && b.disabled; })()");
+  check("試合中は「練習のインクをリセット」が押せない", resetDisabled === true);
   check("試合の得点は練習の塗りが消えてから入り直している（練習より小さい）", (hud1.scores[hud1.me] ?? 0) > 0 && (hud1.scores[hud1.me] ?? 0) < (pr1.scores[pr1.me] ?? 0) + (hud1.sent - pr1.sent) * 200, JSON.stringify([pr1.scores, hud1.scores]));
   check("ウィンドウ 1 で連射が受理され続けている（形の判定 → 連射 → サーバー検証）", hud1.accepted > pr1.accepted, `${pr1.accepted} → ${hud1.accepted}`);
   check("ウィンドウ 2 でも連射が受理され続けている", hud2.accepted > pr2.accepted, `${pr2.accepted} → ${hud2.accepted}`);

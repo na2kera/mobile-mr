@@ -44,7 +44,7 @@
 - WebXR には依存しない。`HeadTracker` / `StereoRenderer` のような interface でスマホ実装と WebXR 実装を差し替え可能にする方針（ただし抽象化を急がない。上記方針を優先）
 - **既存ライブラリ（three-stdlib の DeviceOrientationControls、three 同梱の StereoEffect 等）は暫定採用。SDK 化の段階でコア部分は自力実装に移行する方針**。理由: 許可フロー等の制御点をラップでは持てない・拡張の余地がない・依存先が保守停止している・この空白領域こそがプロジェクトの存在意義（詳細: [PR #1 のコメント](https://github.com/na2kera/mobile-mr/pull/1#issuecomment-5255304585)）。移行は一括ではなく、痛点が実害になった箇所から順に行う。移行のタイミングと進め方は上記「ライブラリ化の3段階戦略」の段階3に従う
 
-## ロードマップ（現在地: Phase 10 PC 確認済み → 実機確認）
+## ロードマップ（現在地: Phase 10-2 PC 確認済み → 実機確認）
 
 1. ~~Phase 1: スマホVR~~ — Three.js シーンを左右2眼レンダリング + DeviceOrientation で頭追従（完了: `demos/01-stereo-box/`）
 2. ~~Phase 2: Passthrough MR~~ — 背面カメラ映像を背景に（完了: `demos/02-passthrough/`）
@@ -55,15 +55,16 @@
    - Phase 6-2: MR ダーツ（統合ゲーム第2弾。`demos/06-2-darts/`）— 壁のマーカーにボード、手を振って投げる、何人でも参加順に 3 投ずつ。サーバー権威（`server/darts.ts`）。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**（PR #11 マージ済み 2026-08-27）
 7. ~~Phase 7: Surface Mapping~~ — 壁のマーカー座標系を Surface にし、指差しの視線で UV を指してペイント、サーバー権威で共有（完了: `demos/07-surface-mapping/`、`server/surface.ts` + 共通化した `server/room-server.ts`。iPhone 実機で確認済み 2026-08-29。PR #12）
 8. ~~Phase 8: MRスプラトゥーン~~ — 壁マーカー 1 枚で四方の壁 + 床の箱型コート（3.0×2.5m）を作り、パーの間「目 → 手」の向きへインクを連射（タンク 50 発・撃つのをやめると回復、グーで速く回復）、参加順に 8 色の個人戦。サーバー権威の格子で塗りと得点を共有（完了: `demos/08-splatoon/`、`server/splatoon.ts`。**iPhone 実機で確認済み** 2026-09-02。PR #15）
-   - 追加機能（issue #18〜#21）: 入室後は練習（自由に塗れる）→ PC の俯瞰画面（`overview.html`、全体表示 + 「対戦開始」）で 1 分の対戦を開始（途中終了も可。issue #32）→ 結果（俯瞰画面が「結果を閉じる」まで表示されたまま。issue #45、プロトコル v10）→ 練習。PC 確認済み・**実機未確認**
+   - 追加機能（issue #18〜#21）: 入室後は練習（自由に塗れる）→ PC の俯瞰画面（`overview.html`、全体表示 + 「対戦開始」）で 1 分の対戦を開始（途中終了も可。issue #32）→ 結果（俯瞰画面が「結果を閉じる」まで表示されたまま。issue #45、プロトコル v11）→ 練習。PC 確認済み・**実機未確認**
    - 塗れる空間の大きさ（幅・高さ・奥行き）とマーカーの高さ（床からマーカー中心まで）は URL クエリではなくサーバーの状態で、俯瞰画面の入力欄 → 「反映」で開始前に変えて全員に配る（プロトコル v7。PC 確認済み・**実機未確認**）
    - マルチマーカー（issue #30）: 床・左右・背面の壁の追加マーカーの配置（面 + 原点からの位置）をサーバーの状態にして俯瞰画面から配り、どれが見えてもアンカー（原点の姿勢）に直す（`src/shared/marker-layout.ts`、`marker-anchor.ts` の `extraMarkers`。アンカーは 1 つのまま）。フェイクカメラは field 座標系のマーカーをピンホール投影する 3D 版（`src/shared/fake-markers.ts`）。印刷は `markers.html`。プロトコル v9。PC 確認済み・**実機未確認**
    - マーカー配置のドラッグ（issue #43）: 俯瞰画面の 3D の枠を掴んでその面の上を動かすと入力欄の X/Y/Z が変わる（送信は「反映」のまま。Shift で水平・垂直に固定、未反映の枠はオレンジ、枠以外を掴むと空間が回る）。純粋な数学は `src/shared/marker-drag.ts`。PC（Node + ヘッドレス Chrome の実マウス）確認済み・**実機未確認**
 9. ~~Phase 9: 現実の人物と Player ID の対応（Body Tracking はここで扱う）~~ — MediaPipe PoseLandmarker で相手の体を検出し、05 と同じ最小二乗で 3D 化、ピアの申告位置と角度 + 距離で 1 対 1 に対応づけて名札を付ける。「誰をどこで見たか」をサーバー経由で相手に返す（PC 確認済み: `demos/09-person-id/`、`server/person.ts`。**実機は未確認**）
 10. **Phase 10: MR ゴルフ（統合ゲーム第 4 弾。Joy-Con をパターに）** — 08 の箱型コートの床をグリーンにし、Switch の Joy-Con をパターにする。iOS Safari からは Joy-Con の IMU が読めない（Gamepad API はボタンだけ、WebHID 無し）ので、**PC の俯瞰画面（Chrome）が WebHID で Joy-Con を読み、振りを検出して「誰の 1 打か」を付けてサーバーへ送る**（CONCEPT.md「外付けハードはサーバーで合流」）。各ラウンド一人一打で、正面の遠いカップに対して平坦・横勾配・障害物を攻略する。狙いは視線（構え = 画面タップ / A）、無ければ正面。サーバー権威の転がり（`src/shared/golf-sim.ts`、`golf-game.ts`、`server/golf.ts`）、振りの検出は `swing-detector.ts`（静止で構え → バックスイング → 戻りの 0 通過）、Joy-Con の仕様は `docs/joycon-webhid-notes.md`。Joy-Con が無いときは画面長押しで溜め打ち。PC（Node テスト + ヘッドレス Chrome + フェイク Joy-Con）で確認済み、**実機（iPhone + Joy-Con + Mac Chrome）は未確認** ← いまここ
+   - **Phase 10-2: MR バッティング（統合ゲーム第 5 弾。Joy-Con をバットと投球入力に）** — 1人なら bot 投手とのフリーバッティング、2人なら参加順で打者と投手に分かれる。投手は Joy-Con の方向ボタンを押しながら振り、↑ストレート / →カーブ / ←スライダー / ↓フォークを選択し、投球速度と打球の強さは振りの速さで決まる。Phase 10 の WebHID ハブと `swing-detector.ts` を再利用し、役割・投球・打撃判定と軌道はサーバー権威（`demos/10-2-batting/`、`src/shared/batting-game.ts`、`batting-sim.ts`、`server/batting.ts`）。PC（Node テスト + ヘッドレス Chrome + フェイクカメラ / Joy-Con）で確認済み、**実機（iPhone + Joy-Con + Mac Chrome）は未確認** ← いまここ
 11. Phase 11: SDK / ライブラリ化（`@mobile-mr/core` ほか。詳細は CONCEPT.md §6）
 
-Phase 1〜10 は上記「ライブラリ化の3段階戦略」の段階1にあたる。Phase 11 は別リポジトリでの段階2 → このリポジトリへの段階3、の順で進める。
+Phase 1〜10-2 は上記「ライブラリ化の3段階戦略」の段階1にあたる。Phase 11 は別リポジトリでの段階2 → このリポジトリへの段階3、の順で進める。
 
 ## プロジェクトスキル
 

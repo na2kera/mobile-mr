@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>10-2. MR Batting 俯瞰画面 — Mobile MR</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100dvh;
+        overflow: hidden;
+        background: #000;
+        color: #e8eaed;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #app, #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #panel {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 5;
+        box-sizing: border-box;
+        width: 340px;
+        max-height: calc(100dvh - 24px);
+        padding: 14px 16px;
+        overflow-y: auto;
+        border: 1px solid #3c4043;
+        border-radius: 12px;
+        background: rgba(20, 22, 26, 0.9);
+        font-size: 0.84rem;
+      }
+      #panel h1 { margin: 0 0 6px; font-size: 1rem; }
+      #panel .sub {
+        margin: 0 0 10px;
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #phase { margin: 8px 0; font-size: 1.08rem; font-weight: 700; }
+      fieldset {
+        margin: 0 0 9px;
+        padding: 8px 10px;
+        border: 1px solid #3c4043;
+        border-radius: 8px;
+      }
+      legend { padding: 0 4px; color: #9aa0a6; font-size: 0.75rem; }
+      .primary, .secondary {
+        width: 100%;
+        padding: 9px;
+        border-radius: 999px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .primary { border: 0; background: #8ab4f8; color: #14161a; }
+      .secondary {
+        border: 1px solid #f28b82;
+        background: transparent;
+        color: #f28b82;
+      }
+      button:disabled { opacity: 0.45; cursor: default; }
+      #roles {
+        display: grid;
+        gap: 6px;
+        margin: 0 0 10px;
+        padding: 0;
+        list-style: none;
+      }
+      #roles li {
+        padding: 7px 9px;
+        border-radius: 7px;
+        background: rgba(60, 64, 67, 0.55);
+      }
+      #joycon-rows .jc {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 4px 8px;
+        align-items: center;
+        padding: 7px 0;
+        border-top: 1px solid #3c4043;
+      }
+      #joycon-rows .name { font-weight: 700; }
+      #joycon-rows .meta {
+        grid-column: 1 / -1;
+        color: #9aa0a6;
+        font-size: 0.7rem;
+        white-space: pre-wrap;
+      }
+      #joycon-rows select {
+        max-width: 170px;
+        padding: 4px 6px;
+        border: 1px solid #5f6368;
+        border-radius: 6px;
+        background: #14161a;
+        color: #e8eaed;
+      }
+      #joycon-hint, #status {
+        margin-top: 7px;
+        color: #9aa0a6;
+        font-size: 0.72rem;
+        white-space: pre-wrap;
+      }
+      #panel a { color: #9aa0a6; font-size: 0.75rem; }
+      #hud {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        z-index: 6;
+        color: rgba(232, 234, 237, 0.5);
+        font-size: 10px;
+        white-space: pre;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="panel">
+      <h1>10-2. MR Batting 俯瞰画面</h1>
+      <p class="sub">
+        PC Chrome で Joy-Con の IMU を読み、同じ room の投手・打者へ割り当てるハブです。
+        3D表示はドラッグで回転、ホイールで拡大できます。
+      </p>
+      <div id="phase">接続中…</div>
+      <ul id="roles"></ul>
+      <fieldset>
+        <legend>Joy-Con（Mac の Bluetooth 接続後）</legend>
+        <button id="connect-joycon" class="primary" type="button">Joy-Con を接続</button>
+        <div id="joycon-rows"></div>
+        <div id="joycon-hint"></div>
+      </fieldset>
+      <button id="restart" class="secondary" type="button" disabled>記録をリセット</button>
+      <div id="status"></div>
+      <p>
+        <a href="./">← プレイヤー画面</a> ／
+        <a href="../10-golf/joycon-test.html" target="_blank">Joy-Con 診断</a> ／
+        <a href="/">デモ一覧</a>
+      </p>
+    </div>
+    <div id="hud"></div>
+    <script type="module" src="./overview.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>10-2. MR Batting — Mobile MR</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100dvh;
+        overflow: hidden;
+        background: #000;
+        color: #e8eaed;
+        font-family: system-ui, -apple-system, sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app, #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        box-sizing: border-box;
+        padding: 24px;
+        overflow-y: auto;
+        background: #14161a;
+        text-align: center;
+      }
+      #start-overlay h1 { margin: 0; font-size: 1.15rem; }
+      #start-overlay p {
+        max-width: 38rem;
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.84rem;
+      }
+      #start-overlay strong { color: #e8eaed; }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label { font-size: 0.9rem; font-weight: 600; }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        outline: none;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #name-hint { color: #9aa0a6; font-size: 0.75rem; }
+      #name-error, #room-error { color: #f28b82 !important; }
+      #name-error[hidden], #room-error[hidden] { display: none; }
+      #start-button {
+        width: 100%;
+        padding: 14px 48px;
+        border: 0;
+        border-radius: 999px;
+        background: #8ab4f8;
+        color: #14161a;
+        font-size: 1.05rem;
+        font-weight: 700;
+      }
+      #start-overlay a { color: #9aa0a6; font-size: 0.8rem; }
+      body.started #start-overlay { display: none; }
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(0, 0, 0, 0.85);
+        text-align: center;
+      }
+      @media (orientation: portrait) and (pointer: coarse) {
+        body.started #rotate-hint { display: flex; }
+      }
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        transform: translateX(-50%);
+        padding: 10px 24px;
+        border: 0;
+        border-radius: 999px;
+        background: #8ab4f8;
+        color: #14161a;
+        font-weight: 700;
+      }
+      #fs-button[hidden] { display: none; }
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        color: rgba(232, 234, 237, 0.5);
+        font-size: 10px;
+        white-space: pre;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>10-2. MR Batting</h1>
+      <p>
+        壁のマーカーを原点に、手前の投手から奥の打者へボールが飛びます。
+        <strong>1人なら bot 相手のフリーバッティング</strong>、
+        同じ room に2人入ると参加順で<strong>1人目が打者、2人目が投手</strong>になります。
+      </p>
+      <p>
+        Joy-Con はスマホではなく
+        <a href="./overview.html">PC Chrome の俯瞰画面</a>へ接続します。
+        投手は方向ボタンを押しながら振り、
+        <strong>↑ストレート / →カーブ / ←スライダー / ↓フォーク</strong>を選択。
+        球速と打球の強さは Joy-Con の振りの速さで変わります。
+        2台ある場合は俯瞰画面で投手・打者へ1台ずつ割り当ててください。
+      </p>
+      <p>
+        Joy-Con が無い場合は画面を長押しして離すと、打者はスイング、投手はストレートを投げます。
+        同じ URL（既定 room: demo、分ける場合は ?room=名前）を開いてください。
+      </p>
+      <p id="room-error" hidden></p>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
+      <p>
+        PC確認: ?fakecam=1&amp;autostart=1&amp;name=PC&amp;fakeAction=0.6。
+        実機調整: ?armM=0.65&amp;pitchGain=1.2&amp;batGain=1.5 は俯瞰画面側、
+        検出しきい値は ?minBackswing=8&amp;minImpactDps=30。
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

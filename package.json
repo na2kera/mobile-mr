@@ -23,6 +23,8 @@
     "check:person": "node scripts/headless-person.mjs",
     "test:golf": "node scripts/test-golf.mjs",
     "check:golf": "node scripts/headless-golf.mjs",
+    "test:batting": "node scripts/test-batting.mjs",
+    "check:batting": "node scripts/headless-batting.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
     "fetch:models": "node scripts/fetch-models.mjs"
   },

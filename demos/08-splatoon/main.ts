@@ -684,6 +684,13 @@ function onState(state: GameSnapshot) {
   const serverInk = state.ink?.[selfId];
   if (serverInk !== undefined) inkLocal = serverInk;
   const ev = state.event;
+  if (ev?.kind === "reset") {
+    // リセット前に飛んでいたローカルの玉が、空の格子を受け取った後で再着弾しないよう捨てる
+    clearPredicted();
+    for (const s of shots.values()) s.mesh.removeFromParent();
+    shots.clear();
+    splatted.clear();
+  }
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
     lastEventKey = key;
