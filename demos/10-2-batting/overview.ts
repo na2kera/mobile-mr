@@ -351,6 +351,7 @@ const joyconRows = document.querySelector<HTMLDivElement>("#joycon-rows")!;
 const joyconHint = document.querySelector<HTMLDivElement>("#joycon-hint")!;
 const connectButton =
   document.querySelector<HTMLButtonElement>("#connect-joycon")!;
+let lastPanelKey = "";
 
 function playerOf(slot: JoyConSlot): string | null {
   if (slot.assign === "none") return null;
@@ -652,7 +653,6 @@ if (FAKE_JOYCON) {
   };
 }
 
-let lastPanelKey = "";
 function renderPanel() {
   const now = performance.now();
   const state = auth?.state;

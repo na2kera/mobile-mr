@@ -250,7 +250,8 @@ function fakeStream(): MediaStream {
       pos: [0, 0, 0],
     }),
   };
-  const camToField = fakeCameraToField([0, 0.25, 1.45], 0, 0);
+  // 150mm マーカーで約67px（既存ヘッドレス確認の安定域）になる距離。
+  const camToField = fakeCameraToField([0, 0.1, 0.75], 0, 0);
   return createFakeCameraStream(
     (ctx, canvas, frame) => {
       drawCheckerboard(ctx, canvas, frame);
@@ -365,7 +366,7 @@ function onState(state: GameSnapshot) {
   if (!state.hit) liveHit = null;
   const event = state.event;
   const key = event ? `${state.seq}:${event.kind}` : "";
-  if (key && key !== lastEventKey) {
+  if (event && key !== lastEventKey) {
     lastEventKey = key;
     if (event.kind === "pitch") {
       flash = {
