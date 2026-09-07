@@ -377,7 +377,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 3. game =================
 {
-  const g = new SplatoonGame({ matchSec: 30, resultSec: 2, wallW: 2, wallH: 1, waitSec: 1 });
+  const g = new SplatoonGame({ matchSec: 30, wallW: 2, wallH: 1, waitSec: 1 });
   check("誰もいなくても tick は何も起こさない（練習のまま）", g.tick(0).length === 0 && g.phase === "practice");
   check("プレイヤーがいないと start は拒否", g.start(0).length === 0 && g.lastRejectReason === "no players" && g.phase === "practice");
   const e1 = g.join("p1", "A", 1000);
@@ -397,11 +397,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("カウントダウン中の resetPractice は拒否", g.resetPractice(1250).length === 0 && /waiting/.test(g.lastRejectReason));
   check("カウントダウン中の start は無視", g.start(1300).length === 0 && /waiting/.test(g.lastRejectReason) && g.phase === "waiting");
   check("カウントダウン中は撃てない", g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 1300) === null && g.lastRejectReason === "not playing");
+  check("カウントダウン中の dismiss は拒否（閉じるのは結果表示中だけ）", g.dismiss(1300).length === 0 && /nothing to dismiss during waiting/.test(g.lastRejectReason) && g.phase === "waiting");
   check("カウントダウンの前は tick しても始まらない", g.tick(1500).length === 0 && g.phase === "waiting");
   const es = g.tick(2200);
   check("カウントダウンが過ぎると開始（matchSec の計測はここから）。練習の塗りは消える", es[0]?.kind === "start" && g.phase === "play" && g.phaseEndsAt === 32200 && g.scores().p1 === 0);
   check("試合中の resetPractice は拒否", g.resetPractice(2250).length === 0 && /play/.test(g.lastRejectReason));
   check("試合中の start は無視", g.start(2300).length === 0 && /play/.test(g.lastRejectReason));
+  check("試合中の dismiss は拒否", g.dismiss(2300).length === 0 && /nothing to dismiss during play/.test(g.lastRejectReason) && g.phase === "play");
   g.join("p2", "B", 2100);
   g.join("p3", "C", 2200);
   check("個人戦: 参加順に別の色（2, 3）", g.players.get("p2").color === 2 && g.players.get("p3").color === 3);
@@ -446,8 +448,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("勝者が退出しても winnerNames は確定時のまま", snapAfterLeave.winners.includes(winId) && snapAfterLeave.winnerNames[0] === winName);
   const survivor = [...g.players.keys()][0];
   check("result 中は発射できない", g.shoot(survivor, [0, 0, 2], [0, 0, -3], 0.09, 32500) === null && g.lastRejectReason === "not playing");
-  const ev2 = g.tick(34200);
-  check("結果表示が終わると練習に戻る（格子は消える・自動では次の試合にならない）", ev2[0]?.kind === "practice" && g.phase === "practice" && g.phaseEndsAt === Infinity && Object.values(g.scores()).every((v) => v === 0));
+  // 結果は時間では消えない（issue #45）: いくら tick しても result のまま、snapshot の phaseEndsAt は null（時間表示なし）
+  check("結果表示は時間では終わらない（1 時間 tick しても result・得点も残る）", g.tick(32200 + 3600 * 1000).length === 0 && g.phase === "result" && g.phaseEndsAt === Infinity && g.snapshot(32200 + 3600 * 1000).phaseEndsAt === null && Object.values(g.scores()).some((v) => v > 0));
+  const ev2 = g.dismiss(34200);
+  check("俯瞰画面の dismiss で練習に戻る（格子は消える・自動では次の試合にならない）", ev2[0]?.kind === "practice" && g.phase === "practice" && g.phaseEndsAt === Infinity && Object.values(g.scores()).every((v) => v === 0) && g.winners === null);
+  check("練習中の dismiss は拒否（閉じるものが無い）", g.dismiss(34300).length === 0 && /nothing to dismiss during practice/.test(g.lastRejectReason) && g.phase === "practice");
   const snap = g.snapshot(34200, true);
   check("snapshot: grids は 5 枚、totalCells は全部の和", Object.keys(snap.grids).length === 5 && snap.totalCells === Object.values(snap.grids).reduce((a, gs) => a + gs.length, 0));
   const inks = Object.values(snap.ink);
@@ -455,7 +460,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("練習に戻るとインクは満タン", inks.every((v) => v === 1));
   // 途中終了（issue #32）: 試合中の stop は即座に結果、カウントダウン中の stop は中止して練習、それ以外は拒否
   {
-    const gs = new SplatoonGame({ matchSec: 60, resultSec: 5, waitSec: 1, wallW: 2, wallH: 1 });
+    const gs = new SplatoonGame({ matchSec: 60, waitSec: 1, wallW: 2, wallH: 1 });
     check("練習中の stop は拒否（終えるものが無い）", gs.stop(0).length === 0 && /practice/.test(gs.lastRejectReason) && gs.phase === "practice");
     gs.join("p1", "A", 0);
     gs.join("p2", "B", 0);
@@ -471,9 +476,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check("再び開始できる（waitSec 後に play。塗りは消える）", gs.phase === "play" && gs.scores().p1 === 0 && gs.phaseEndsAt === 67000);
     check("試合中に p2 が塗る", gs.shoot("p2", [0.5, 0, 1], [0, -2, -4.5], 0.09, 7100)?.landing?.hit === true, gs.lastRejectReason);
     const stopped = gs.stop(8000);
-    check("試合中の stop は時間切れを待たず result（stopped 付き・勝者は最多セル = p2・結果表示は resultSec）", stopped[0]?.kind === "result" && stopped[0].stopped === true && stopped[0].winners.length === 1 && stopped[0].winners[0] === "p2" && gs.phase === "result" && gs.phaseEndsAt === 13000);
+    check("試合中の stop は時間切れを待たず result（stopped 付き・勝者は最多セル = p2・結果表示は終わらない）", stopped[0]?.kind === "result" && stopped[0].stopped === true && stopped[0].winners.length === 1 && stopped[0].winners[0] === "p2" && gs.phase === "result" && gs.phaseEndsAt === Infinity);
     check("result 中の stop は拒否", gs.stop(8100).length === 0 && /result/.test(gs.lastRejectReason) && gs.phase === "result");
-    check("stop 後の result は時間で練習に戻る", gs.tick(13000)[0]?.kind === "practice" && gs.phase === "practice");
+    check("stop 後の result も時間では終わらず、dismiss で練習に戻る", gs.tick(13000).length === 0 && gs.phase === "result" && gs.dismiss(13000)[0]?.kind === "practice" && gs.phase === "practice");
     gs.start(14000);
     gs.tick(15000);
     check("2 戦目で p1 が塗る", gs.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 15100)?.landing?.hit === true, gs.lastRejectReason);
@@ -486,7 +491,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check("中止後の練習で撃てる（インクも新品）", gs.inkOf("p1", 76600) === 1 && gs.shoot("p1", [0, 0, 1], [0, -2, -4.5], 0.09, 76600) !== null, gs.lastRejectReason);
   }
   // 結果表示中にも start できる（次の対戦へ）
-  const g2 = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
+  const g2 = new SplatoonGame({ matchSec: 10, waitSec: 1 });
   g2.join("q1", "Q", 0);
   g2.start(0);
   g2.tick(1000);
@@ -599,7 +604,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 3e. フィールドの寸法の変更（俯瞰画面から。練習中か結果表示中だけ）=================
 {
-  const g = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
+  const g = new SplatoonGame({ matchSec: 10, waitSec: 1 });
   g.join("p1", "A", 0);
   g.updatePose("p1", [0, 0.1, 1], 10);
   g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 20);
@@ -626,7 +631,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ================= 3f. 追加マーカーの配置（俯瞰画面から。練習中か結果表示中だけ。塗りは消えない）=================
 {
-  const g = new SplatoonGame({ matchSec: 10, resultSec: 5, waitSec: 1 });
+  const g = new SplatoonGame({ matchSec: 10, waitSec: 1 });
   g.join("p1", "A", 0);
   g.updatePose("p1", [0, 0.1, 1], 10);
   g.shoot("p1", [0, 0, 1], [0, 0, -5], 0.09, 20);
@@ -794,6 +799,21 @@ try {
   ov.send({ type: "stop" });
   const rejStopResult = await ov.waitFor((m) => m.type === "rejected" && /nothing to stop/.test(m.reason));
   check("結果表示中の stop は俯瞰画面に rejected: nothing to stop during result", rejStopResult !== null);
+  // 結果を閉じる（issue #45）: 結果は時間では消えない。スマホからの dismiss は拒否、俯瞰画面の dismiss で練習（格子付き）が全員に配られる
+  const resultIdle = await a.waitFor((m) => m.type === "state" && m.state.phase === "result" && a.msgs.indexOf(m) > a.msgs.indexOf(stoppedSt), 2500);
+  check("結果表示中の定期 state は phaseEndsAt が null（時間表示なし）で result のまま", resultIdle !== null && resultIdle.state.phaseEndsAt === null && resultIdle.state.winners?.[0] === "p2");
+  const rejCountBeforeDismiss = b.msgs.filter((m) => m.type === "rejected" && /overview/.test(m.reason)).length;
+  b.send({ type: "dismiss" });
+  const rejPhoneDismiss = await b.waitFor(() => b.msgs.filter((m) => m.type === "rejected" && /overview/.test(m.reason)).length > rejCountBeforeDismiss);
+  check("スマホからの dismiss には rejected: not overview が返る", rejPhoneDismiss !== null);
+  check("スマホの dismiss では結果が消えない", !a.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice"));
+  ov.send({ type: "dismiss" });
+  const dismissedSt = await a.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice");
+  check("俯瞰画面の dismiss で練習に戻る state が全員に配られる（格子付き・phaseEndsAt は null・得点は 0・勝者の表示は消える）", dismissedSt !== null && dismissedSt.state.phase === "practice" && dismissedSt.state.grids && dismissedSt.state.phaseEndsAt === null && Object.values(dismissedSt.state.scores).every((v) => v === 0) && dismissedSt.state.winners === null);
+  check("俯瞰画面にも practice が届く", (await ov.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 1000)) !== null);
+  ov.send({ type: "dismiss" });
+  const rejDismissPractice = await ov.waitFor((m) => m.type === "rejected" && /nothing to dismiss/.test(m.reason));
+  check("練習中の dismiss は俯瞰画面に rejected: nothing to dismiss during practice", rejDismissPractice !== null && /practice/.test(rejDismissPractice.reason));
   // 俯瞰画面の再接続: 新しい id で welcome、peers に古い id は残らない
   ov.ws.close();
   await sleep(100);
@@ -911,9 +931,13 @@ try {
     const cStart = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "start", 2000);
     check("一周: start（格子付き・練習の得点は 0）", cStart && cStart.state.grids && (cStart.state.scores[cStart.state.players[0].id] ?? 0) === 0);
     const cResult = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "result", 13000);
-    check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && typeof cResult.state.phaseEndsAt === "number");
-    const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 10000);
-    check("一周: 結果表示のあと練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
+    check("一周: 10 秒後に result（格子付き・winners は空 = だれも塗れず・phaseEndsAt は null = 時間では終わらない）", cResult && cResult.state.grids && Array.isArray(cResult.state.winners) && cResult.state.phase === "result" && cResult.state.phaseEndsAt === null);
+    // 結果は俯瞰画面が閉じるまで残る（issue #45）: しばらく待っても practice にならない
+    await sleep(2500);
+    check("一周: 結果は自動では消えない（2.5 秒待っても result のまま）", !cyc.msgs.some((m) => m.type === "state" && m.state.event?.kind === "practice") && cyc.msgs.filter((m) => m.type === "state").at(-1)?.state.phase === "result");
+    cycOv.send({ type: "dismiss" });
+    const cPractice = await cyc.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 2000);
+    check("一周: 俯瞰画面の dismiss で練習に戻る（格子付き・phaseEndsAt は null・インクは満タン）", cPractice && cPractice.state.grids && cPractice.state.phase === "practice" && cPractice.state.phaseEndsAt === null && cPractice.state.ink[cPractice.state.players[0].id] === 1);
     // 俯瞰画面のソケットは別なので、届くまで少し待つ（同時判定だとレースで落ちることがあった）
     check("一周: 俯瞰画面にも同じ event が届く", (await cycOv.waitFor((m) => m.type === "state" && m.state.event?.kind === "practice", 1000)) !== null);
     cyc.ws.close();

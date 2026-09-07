@@ -46,6 +46,8 @@ export type GameClient = {
   sendStop: () => boolean;
   /** 練習中のインクリセット（俯瞰画面だけ。送れたら true） */
   sendReset: () => boolean;
+  /** 結果を閉じて練習に戻る（俯瞰画面だけ。結果表示中だけ。送れたら true。issue #45） */
+  sendDismiss: () => boolean;
   /** フィールドの寸法の変更（俯瞰画面だけ。送れたら true） */
   sendField: (size: FieldSize) => boolean;
   /** 追加マーカーの配置の変更（俯瞰画面だけ。送れたら true） */
@@ -157,6 +159,9 @@ export function connectGame(
     },
     sendReset() {
       return send({ type: "reset" });
+    },
+    sendDismiss() {
+      return send({ type: "dismiss" });
     },
     sendField(size) {
       return send({ type: "field", wallW: size.wallW, wallH: size.wallH, floorDepth: size.floorDepth, floorDrop: size.floorDrop });
