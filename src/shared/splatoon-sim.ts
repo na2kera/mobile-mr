@@ -41,10 +41,8 @@ export type FieldConfig = {
   gravity: number;
   /** 飛行の打ち切り [s] */
   maxFlightSec: number;
-  /** 1 試合の長さ [s] */
+  /** 1 試合の長さ [s]（結果表示は時間では終わらない: 俯瞰画面が閉じるまで残す。issue #45） */
   matchSec: number;
-  /** 結果表示の長さ [s] */
-  resultSec: number;
   /** 1 発の速さ [m/s] と半径 [m]（連射なので固定） */
   shotSpeed: number;
   shotRadius: number;
@@ -78,7 +76,6 @@ export const DEFAULT_FIELD: FieldConfig = {
   gravity: 4,
   maxFlightSec: 3,
   matchSec: 60,
-  resultSec: 8,
   shotSpeed: 5,
   shotRadius: 0.09,
   tankShots: 50,

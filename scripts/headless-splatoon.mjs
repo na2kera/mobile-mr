@@ -159,6 +159,8 @@ function parseHud(hud) {
     tankLow: hud.match(/\btankLow=(\S+)/)?.[1] ?? "",
     fist: hud.match(/\bfist=(\S+)/)?.[1] ?? "",
     phase: g?.[1] ?? "",
+    /** 残り秒（"12s" → 12。練習中・結果表示中は 0） */
+    left: g ? Number(g[2].replace(/s$/, "")) : -1,
     color: g ? Number(g[3]) : 0,
     players: (g?.[4] ?? "").split(",").filter(Boolean),
     scores,
@@ -182,6 +184,7 @@ function parseOverviewHud(hud) {
     field: hud.match(/field=(\S+)/)?.[1] ?? "",
     starts: Number(hud.match(/starts=(\d+)/)?.[1] ?? -1),
     stops: Number(hud.match(/stops=(\d+)/)?.[1] ?? -1),
+    dismisses: Number(hud.match(/dismisses=(\d+)/)?.[1] ?? -1),
     fields: Number(hud.match(/fields=(\d+)/)?.[1] ?? -1),
     markers: hud.match(/\bmarkers=(\S+)/)?.[1] ?? "",
     markersSent: Number(hud.match(/markersSent=(\d+)/)?.[1] ?? -1),
@@ -536,9 +539,27 @@ try {
   console.log(`stopped overview: ${showOv(stOv)} stops=${stOv.stops}`);
   check("「対戦を終了」で時間切れ（matchSec 既定 60 秒）を待たず結果（result）になる", stOv.stops === 1 && st1.phase === "result" && stOv.phase === "result");
   check("サーバーが stop → result を記録している", serverLines.some((l) => /stop → result/.test(l)));
-  const stopDisabled = await p3.eval("(() => { const b = document.querySelector('#stop-match'); return b && b.disabled; })()");
-  check("結果表示中は「対戦を終了」が押せない", stopDisabled === true);
   check("スマホ側にも result イベントが届いている（視界に「そこまで！」）", p1.logs.some((l) => /\[game\] event result phase=result/.test(l)));
+
+  // ---- 結果を閉じる（issue #45。結果は俯瞰画面が閉じるまで残る）----
+  await sleep(3000);
+  const held1 = await readHud(p1);
+  const heldOv = await readOverview();
+  check("結果は時間では消えない（3 秒待っても両方 result のまま・時間表示なし）", held1.phase === "result" && heldOv.phase === "result" && held1.left === 0, `${held1.phase}/${heldOv.phase} left=${held1.left}`);
+  const dismissEnabled = await p3.eval("(() => { const b = document.querySelector('#stop-match'); return b && !b.disabled ? b.textContent : null; })()");
+  check("結果表示中は同じボタンが「結果を閉じて練習に戻る」になり押せる", dismissEnabled === "結果を閉じて練習に戻る", String(dismissEnabled));
+  await p3.eval("document.querySelector('#stop-match').click()");
+  await sleep(1500);
+  const dm1 = await readHud(p1);
+  const dmOv = await readOverview();
+  console.log(`dismissed window1: ${show(dm1)}`);
+  console.log(`dismissed overview: ${showOv(dmOv)} dismisses=${dmOv.dismisses}`);
+  // 得点は 0 に戻ったあと合成の手がすぐ練習で塗り始めるので、ここではフェーズだけ見る（格子のリセットは Node テスト側）
+  check("「結果を閉じる」で練習に戻る（dismiss が送られ、両方 practice）", dmOv.dismisses === 1 && dm1.phase === "practice" && dmOv.phase === "practice", `${dm1.phase}/${dmOv.phase} dismisses=${dmOv.dismisses}`);
+  check("サーバーが dismiss → practice を記録している", serverLines.some((l) => /dismiss → practice/.test(l)));
+  check("スマホ側に practice イベントが届いている（視界に「練習に戻りました」）", p1.logs.some((l) => /\[game\] event practice phase=practice/.test(l)));
+  const stopDisabled = await p3.eval("(() => { const b = document.querySelector('#stop-match'); return b && b.disabled; })()");
+  check("練習中は「対戦を終了」が押せない", stopDisabled === true);
   check("例外が出ていない", p1.exceptions.length === 0 && p2.exceptions.length === 0 && p3.exceptions.length === 0 && p4.exceptions.length === 0, [...p1.exceptions, ...p2.exceptions, ...p3.exceptions, ...p4.exceptions].slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[game] shot sent")).slice(0, 2)) console.log(`window1 log: ${l}`);
   for (const l of p3.logs.filter((l) => l.startsWith("[overview]")).slice(0, 4)) console.log(`overview log: ${l}`);

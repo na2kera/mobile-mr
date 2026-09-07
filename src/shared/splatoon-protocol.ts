@@ -16,8 +16,9 @@ export const SPLATOON_PATH = "/api/splatoon";
  * v8: 俯瞰画面の stop（対戦を途中で終える / カウントダウンを中止する。issue #32）と cancel イベント
  * v9: マルチマーカー（issue #30）。追加マーカーの配置（config.markers）を俯瞰画面の markers で変えて全員に配る。
  *     pose に markerIds（いまどのマーカーで位置合わせしているか）
+ * v10: 結果表示は時間では終わらず（phaseEndsAt は null）、俯瞰画面の dismiss（結果を閉じる）で練習に戻る（issue #45）
  */
-export const SPLATOON_PROTOCOL_VERSION = 9;
+export const SPLATOON_PROTOCOL_VERSION = 10;
 
 export const NAME_MAX_LENGTH = 12;
 
@@ -63,6 +64,8 @@ export type ClientMessage =
   | { type: "start" }
   /** 対戦を途中で終える（俯瞰画面だけが送れる。試合中は即座に結果へ、カウントダウン中は中止して練習に戻る。issue #32） */
   | { type: "stop" }
+  /** 結果を閉じて練習に戻る（俯瞰画面だけが送れる。結果表示中だけ受け付ける。結果は時間では消えない。issue #45） */
+  | { type: "dismiss" }
   /** フィールドの寸法の変更（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける。格子は作り直す = 塗りは消える） */
   | ({ type: "field" } & FieldSize)
   /** 追加マーカーの配置の変更（俯瞰画面だけが送れる。練習中か結果表示中に受け付ける。塗りは消えない。issue #30） */

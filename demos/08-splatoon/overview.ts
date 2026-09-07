@@ -336,10 +336,11 @@ let auth: { state: GameSnapshot; recvMs: number } | null = null;
 let lastEventKey = "";
 let startsSent = 0;
 let stopsSent = 0;
+let dismissesSent = 0;
 let lastRejectReason = "";
 /** 「対戦開始」を送ってから state / rejected / 切断のいずれかが来るまで（二重送信の防止） */
 let startPending = false;
-/** 「対戦を終了」を送ってから state / rejected / 切断のいずれかが来るまで */
+/** 「対戦を終了」「結果を閉じる」を送ってから state / rejected / 切断のいずれかが来るまで（同じボタンなので 1 つのフラグ） */
 let stopPending = false;
 /** 寸法の「反映」を送ってから field / rejected / 切断のいずれかが来るまで */
 let fieldPending = false;
@@ -369,7 +370,9 @@ function onState(state: GameSnapshot) {
     startPending = false;
     lastRejectReason = "";
   }
-  if (state.phase === "practice" || state.phase === "result") stopPending = false;
+  // stop の結果（result / practice）と dismiss の結果（practice）が届いたら送信中を解く。
+  // 結果表示中は dismiss を送るまで state が result のまま来続けるので、「送ってから最初の state」で解かないよう event の有無で分ける
+  if (state.phase === "practice" || (state.phase === "result" && state.event?.kind === "result")) stopPending = false;
   const ev = state.event;
   const key = ev ? `${state.seq}:${ev.kind}` : "";
   if (key && key !== lastEventKey) {
@@ -896,14 +899,18 @@ startButton.addEventListener("click", () => {
   }
   renderPanel();
 });
-// 途中終了（issue #32）: 試合中は即座に結果へ、カウントダウン中は中止して練習へ。確認ダイアログは出さない（運営の操作なので即時）
+// 途中終了（issue #32）: 試合中は即座に結果へ、カウントダウン中は中止して練習へ。確認ダイアログは出さない（運営の操作なので即時）。
+// 結果表示中は同じボタンが「結果を閉じる」（issue #45。結果は時間では消えないので、練習に戻すのはこのボタンか「次の対戦を開始」）。
+// 手元のフェーズで送るメッセージを分けるので、時間切れの直後に「対戦を終了」を押しても dismiss にはならない（stop が result で拒否されるだけ）
 stopButton.addEventListener("click", () => {
   if (!client || stopPending) return;
-  if (client.sendStop()) {
-    stopsSent++;
+  const inResult = auth?.state.phase === "result";
+  if (inResult ? client.sendDismiss() : client.sendStop()) {
+    if (inResult) dismissesSent++;
+    else stopsSent++;
     stopPending = true;
     lastRejectReason = "";
-    console.log("[overview] stop sent");
+    console.log(`[overview] ${inResult ? "dismiss" : "stop"} sent`);
   }
   renderPanel();
 });
@@ -920,12 +927,14 @@ function renderPanel() {
   else if (s.phase === "waiting") phaseText = `開始まで ${left} 秒`;
   else if (s.phase === "play") phaseText = `対戦中 残り ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
   else {
+    // 結果は俯瞰画面が閉じるまで表示されたまま（issue #45）
     const w = s.winnerNames ?? [];
     phaseText = w.length === 0 ? "結果: だれも塗れず…" : `結果: ${w.join("・")} の勝ち！`;
   }
   const canStart = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && s.players.length > 0 && !startPending;
-  const canStop = joined && s !== undefined && (s.phase === "waiting" || s.phase === "play") && !stopPending;
-  const stopText = stopPending ? "送信中…" : s?.phase === "waiting" ? "カウントダウンを中止" : "対戦を終了";
+  // 結果表示中も押せる（「結果を閉じる」= dismiss。issue #45）
+  const canStop = joined && s !== undefined && (s.phase === "waiting" || s.phase === "play" || s.phase === "result") && !stopPending;
+  const stopText = stopPending ? "送信中…" : s?.phase === "waiting" ? "カウントダウンを中止" : s?.phase === "result" ? "結果を閉じて練習に戻る" : "対戦を終了";
   // 寸法は練習中か結果表示中だけ変えられる（カウントダウン中・試合中は入力ごと無効）
   const sizeEditable = joined && s !== undefined && (s.phase === "practice" || s.phase === "result") && !fieldPending;
   const sizeInvalid = validateFieldSize(readSizeInputs(), fieldCfg.cellM);
@@ -1037,7 +1046,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} dismisses=${dismissesSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;
