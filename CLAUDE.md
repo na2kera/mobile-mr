@@ -52,7 +52,7 @@
 4. ~~Phase 4: Multiplayer（WebSocket、Room / position / rotation 共有）~~ — マーカー座標系の pose を交換し相手位置にアバター表示（完了: `demos/04-shared-room/`）
 5. ~~Phase 5: MediaPipe で Hand Tracking~~ — 手の 3D 化とボール・ボタン・指差し操作（完了: `demos/05-hand-interaction/`。Body は Phase 9 で扱う）
 6. ~~Phase 6: MRバレーボール（統合ゲーム第1弾）~~ — サーバー権威の物理 + bot + 2台対戦（完了: `demos/06-volleyball/`。iPhone 実機 + ゴーグルで確認済み 2026-08-27）
-   - Phase 6-2: MR ダーツ（統合ゲーム第2弾。`demos/06-2-darts/`）— 壁のマーカーにボード、手を振って投げる、何人でも参加順に 3 投ずつ。サーバー権威（`server/darts.ts`）。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**（PR #11 マージ済み 2026-08-27）
+   - Phase 6-2: MR ダーツ（統合ゲーム第2弾。`demos/06-2-darts/`）— 壁のマーカーにボード、手を振って投げる、何人でも参加順に 3 投ずつ。サーバー権威（`server/darts.ts`）。PC（Node テスト + ヘッドレス Chrome）で確認済み、**実機は未確認**（PR #11 マージ済み 2026-08-27）。手のオクルージョン（issue #14。手の 21 点から深度だけ書くメッシュを視差ゼロで置き、手の奥の仮想物を消す。`src/shared/hand-occluder.ts`）は PC 確認済み・**実機未確認**
 7. ~~Phase 7: Surface Mapping~~ — 壁のマーカー座標系を Surface にし、指差しの視線で UV を指してペイント、サーバー権威で共有（完了: `demos/07-surface-mapping/`、`server/surface.ts` + 共通化した `server/room-server.ts`。iPhone 実機で確認済み 2026-08-29。PR #12）
 8. ~~Phase 8: MRスプラトゥーン~~ — 壁マーカー 1 枚で四方の壁 + 床の箱型コート（3.0×2.5m）を作り、パーの間「目 → 手」の向きへインクを連射（タンク 50 発・撃つのをやめると回復、グーで速く回復）、参加順に 8 色の個人戦。サーバー権威の格子で塗りと得点を共有（完了: `demos/08-splatoon/`、`server/splatoon.ts`。**iPhone 実機で確認済み** 2026-09-02。PR #15）
    - 追加機能（issue #18〜#21）: 入室後は練習（自由に塗れる）→ PC の俯瞰画面（`overview.html`、全体表示 + 「対戦開始」）で 1 分の対戦を開始（途中終了も可。issue #32）→ 結果（俯瞰画面が「結果を閉じる」まで表示されたまま。issue #45、プロトコル v11）→ 練習。PC 確認済み・**実機未確認**
