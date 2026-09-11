@@ -30,10 +30,14 @@ const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 14;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s]（カウントダウン 1s + 発射 3〜4 回） */
 const PLAY_WAIT_SEC = Number(process.env.PLAY_WAIT_SEC ?? "") || 12;
 const BASE = `https://localhost:${PORT}/demos/08-splatoon/`;
-// tankHoldMs=0: 合成の手が消える約 200ms の間にタンクが視界の下へ移る（tankShow=always のウィンドウ 2）のを見るため（既定 800ms の猶予は切る）
+// tankHoldMs=0: 合成の手が消える約 200ms の間にタンクが視界の下へ移る（tankShow=always のウィンドウ 2）のを見るため（既定 800ms の猶予は切る）。
+// markerMm=100: 合成カメラの幾何（原点マーカーが 80px に映る距離 0.74m・ID 5 は 0.25m 右）はこの実寸で調整してある。
+// 既定（150mm）だと距離が 1.11m になり、視軸から 13° の ID 5 で POSIT の 2 解（鏡像のヨー 25°）が誤差僅差になって
+// 拾われることがある（原点だけ・床だけの窓は影響なし）。room 設定なので俯瞰画面にも同じ値を付ける
+const MARKER_MM = 100;
 const COMMON =
-  "fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check&waitSec=1&tankHoldMs=0";
-const OVERVIEW = `${BASE}overview.html?room=check&waitSec=1`;
+  `fov=70&camZoom=1&fakecam=1&autostart=1&fakehands=1&fakeMarkerPx=80&handSmooth=1&room=check&waitSec=1&tankHoldMs=0&markerMm=${MARKER_MM}`;
+const OVERVIEW = `${BASE}overview.html?room=check&waitSec=1&markerMm=${MARKER_MM}`;
 
 if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);
@@ -152,9 +156,9 @@ function parseHud(hud) {
     /** 位置合わせに使っている ID の集合（"id=0+5" → {0, 5}） */
     markerIds: new Set((hud.match(/marker=id=([\d+]+)/)?.[1] ?? "").split("+").filter(Boolean).map(Number)),
     spread: Number(hud.match(/spread=([\d.]+)m/)?.[1] ?? 0),
-    /** 水平化（issue #55）前の傾き [deg]（マーカーごと。"tilt=3,8°" → [3, 8]） */
-    tilts: (hud.match(/tilt=([\d,]+)°/)?.[1] ?? "").split(",").filter(Boolean).map(Number),
-    /** 直近の観測がアンカーを動かした距離 [m]（"Δ=0.02m"。補正量） */
+    /** 水平化する前のアンカーの傾き [deg]（worldUp があるときだけ HUD に出る） */
+    tilt: hud.match(/tilt=([\d.]+)deg/) ? Number(hud.match(/tilt=([\d.]+)deg/)[1]) : null,
+    /** 直近の観測がアンカーを動かした距離 [m]（"Δ=0.02m"。補正量。issue #55） */
     correction: Number(hud.match(/Δ=([\d.]+)m/)?.[1] ?? NaN),
     tracking: /marker=id=/.test(hud) && !/holding last pose/.test(hud),
     layout: hud.match(/layout=(\S+)/)?.[1] ?? "",
@@ -515,11 +519,36 @@ try {
   const self4err = h4.self ? Math.hypot(h4.self[0] - 0.15, h4.self[1] + 0.5, h4.self[2] - 0.75) : Infinity;
   check("床のマーカーから出した自分の位置がフェイクカメラの位置 (0.15,-0.5,0.75) に 8cm 以内で一致", self4err < 0.08, `self=${JSON.stringify(h4.self)} err=${self4err.toFixed(3)}m`);
   check("床のマーカーだけの端末も入室して連射が受理される", h4.me.startsWith("p") && h4.accepted >= 2 && h4.phase === "practice", `${h4.sent}/${h4.accepted}`);
-  // 水平化（issue #55）: 見下ろすフェイクカメラでも「映像の中の上」をワールドに直して渡しているので、傾きはほぼ 0 で棄却されない
-  check("床のマーカーの観測の傾き（tilt=）が 5° 未満で、補正量（Δ=）が HUD に出ている", h4.tilts.length === 1 && h4.tilts[0] < 5 && Number.isFinite(h4.correction), `tilts=${JSON.stringify(h4.tilts)} Δ=${h4.correction}`);
-  check("2 枚同時のウィンドウ 1 も両方の傾きが 5° 未満", mk1.tilts.length === 2 && mk1.tilts.every((t) => t < 5), `tilts=${JSON.stringify(mk1.tilts)}`);
   const ov4 = await readOverview();
   check("俯瞰画面でも 4 つ目の端末は床のマーカー（1）で位置合わせしていると見える", ov4.peerMarkers[h4.me] === "1", JSON.stringify(ov4.peerMarkers));
+  check("フェイクカメラでは重力での水平化が既定 on（HUD に gravityAlign=1 と tilt=）", /gravityAlign=1/.test(await p4.eval("document.querySelector('#hud').textContent")) && h4.tilt !== null && h4.tilt < 5, `tilt=${h4.tilt}`);
+  check("HUD の marker= に補正量 Δ=（その観測がアンカーを動かした距離）が出る（issue #55 の診断表示）", Number.isFinite(h4.correction), `Δ=${h4.correction}`);
+
+  // ---- 重力での水平化（issue #54）: 原点マーカーを 25° 傾けて描き（POSIT の傾き誤差 or 傾いて貼った状態）、
+  // 水平化あり（既定）なら field は水平のままで自分の位置が合い、なし（?gravityAlign=0）なら傾きのぶん位置がずれる ----
+  // 既定のフェイクカメラの位置: 原点マーカーが fakeMarkerPx=80 で正面に映る距離 d = markerSize × focal / (0.8 × 80)
+  const FAKE_FOCAL = 640 / 2 / Math.tan((68 * Math.PI) / 180 / 2);
+  const dTilt = ((MARKER_MM / 1000) * FAKE_FOCAL) / (0.8 * 80);
+  const openTiltWindow = async (name, extra) => {
+    const created = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
+    const t = (await cdpJson("/json")).find((x) => x.id === created.result.targetId);
+    const p = await openPage(t, name);
+    await p.send("Page.navigate", { url: `${BASE}?${COMMON}&name=${name}&fakeTilt=25${extra}` });
+    const t0 = Date.now();
+    let h = await readHud(p);
+    while (Date.now() - t0 < 40000 && !(h.me.startsWith("p") && h.marker.startsWith("id=") && h.self)) {
+      await sleep(500);
+      h = await readHud(p);
+    }
+    console.log(`tilt window ${name}: marker=${h.marker} self=${JSON.stringify(h.self)} (expected (0,0,${dTilt.toFixed(3)}))`);
+    return { page: p, hud: h, err: h.self ? Math.hypot(h.self[0], h.self[1], h.self[2] - dTilt) : Infinity };
+  };
+  const tiltOn = await openTiltWindow("TiltOn", "");
+  check("傾いた原点マーカーでも水平化ありなら自分の位置がフェイクカメラの位置に 8cm 以内で一致（床が浮かない・壁が寄らない）", tiltOn.err < 0.08, `err=${tiltOn.err.toFixed(3)}m`);
+  check("HUD の tilt= に水平化前の傾き（≈25°）が出る（診断表示）", tiltOn.hud.tilt !== null && Math.abs(tiltOn.hud.tilt - 25) < 6, `tilt=${tiltOn.hud.tilt}`);
+  const tiltOff = await openTiltWindow("TiltOff", "&gravityAlign=0");
+  check("水平化なし（?gravityAlign=0）だと同じ映像で自分の位置が 0.3m 以上ずれる（issue #54 の症状の再現）", tiltOff.err > 0.3 && tiltOff.hud.tilt === null, `err=${tiltOff.err.toFixed(3)}m`);
+  for (const w of [tiltOn, tiltOff]) await w.page.send("Page.navigate", { url: "about:blank" });
 
   // ---- 対戦開始（俯瞰画面のボタン）----
   await p3.eval("document.querySelector('#start-match').click()");

@@ -2,14 +2,17 @@
 // 1 枚 1 ページで出す。SVG は検出と同じ辞書（marker-detector.ts の markerSvg）から生成するので、03 の marker-0.svg と同じ描き方。
 // ?mm= で黒い正方形の一辺 [mm]、?ids= で印刷する ID の並び（既定 0,1,2,3,4,5）、?markerId= で原点の ID
 import { markerIdCount, markerSvg } from "../../src/shared/marker-detector";
-import { SUGGESTED_MARKERS } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, SUGGESTED_MARKERS } from "../../src/shared/marker-layout";
 import { numParam, params } from "../../src/shared/url-params";
 
-const MM = numParam("mm", 150, { min: 20, max: 1000 });
+/** 黒い正方形の一辺 [mm]。既定はデモ側の ?markerMm= の既定と同じ値（1 か所で持つ。issue #54） */
+const MM = numParam("mm", DEFAULT_MARKER_MM, { min: 20, max: 1000 });
 const ORIGIN_ID = Math.round(numParam("markerId", 0, { min: 0, max: markerIdCount() - 1 }));
 document.documentElement.style.setProperty("--marker-mm", String(MM));
 document.querySelector<HTMLParagraphElement>("#size-note")!.textContent =
-  `1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が ${MM}mm になります（?mm= で変更。全員のデモ URL に ?markerMm=${MM} を付けます。追加マーカーも同じ大きさで印刷してください）。`;
+  MM === DEFAULT_MARKER_MM
+    ? `1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が ${MM}mm（デモの ?markerMm= の既定と同じ）になります（?mm= で変えたときは全員のデモ URL に ?markerMm=実測値 を付けます。追加マーカーも同じ大きさで印刷してください）。`
+    : `1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が ${MM}mm になります（デモの既定 ${DEFAULT_MARKER_MM}mm と違うので、全員のデモ URL と俯瞰画面に ?markerMm=${MM} を付けます。追加マーカーも同じ大きさで印刷してください）。`;
 
 type Sheet = { id: number; title: string; up: string };
 const idsRaw = params.get("ids");

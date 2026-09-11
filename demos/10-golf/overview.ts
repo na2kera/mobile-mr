@@ -9,7 +9,7 @@ import type { GameSnapshot } from "../../src/shared/golf-game";
 import { scoreTotal, shotLabel } from "../../src/shared/golf-score";
 import { holeHint } from "../../src/shared/golf-sim";
 import type { PlayerPose } from "../../src/shared/golf-protocol";
-import { FACE_LABELS, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, FACE_LABELS, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
 import type { MarkerPlacement } from "../../src/shared/marker-layout";
 import { createFieldSetupPanel } from "../../src/shared/field-setup-panel";
 import { SwingDetector, impactSpeed } from "../../src/shared/swing-detector";
@@ -34,7 +34,7 @@ import type { JoyCon } from "./joycon-hid";
 // ---- パラメータ ----
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
 const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });

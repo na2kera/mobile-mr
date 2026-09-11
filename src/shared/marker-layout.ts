@@ -21,6 +21,13 @@ export type MarkerPlacement = {
   pos: V3;
 };
 
+/**
+ * マーカー（黒い正方形）の一辺の既定値 [mm]。08 系（08 / 10 / 10-2）のデモ・俯瞰画面の `?markerMm=` と
+ * 印刷ページ（demos/08-splatoon/markers.html の `?mm=`）で共有する。印刷とデモの既定が食い違うと距離が
+ * 定数倍ずれる（150mm を 100mm と思えば壁が 2/3 の距離に来る。issue #54 の調査で判明した罠）ので 1 か所で持つ
+ */
+export const DEFAULT_MARKER_MM = 150;
+
 /** 追加マーカーの枚数の上限（四方 + 床 + 予備） */
 export const MAX_EXTRA_MARKERS = 8;
 /** 辞書 ARUCO_MIP_36h12 の ID の上限 */
@@ -128,6 +135,49 @@ function cross(a: V3, b: V3): V3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
 
+function normalize(v: V3): V3 {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
+}
+
+function dot(a: V3, b: V3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+// ---- 重力でアンカーの姿勢を水平に直す（issue #54。marker-anchor.ts から使う）----
+// 単一マーカーの POSIT はほぼ正面から見た四角形の「傾き（ピッチ / ロール）」をほとんど決められない
+// （辺長の 1% の誤差で約 8°。2 解の鏡像が選ばれると真値の 2 倍ずれる。scripts/test-splatoon.mjs の
+// 合成実験では 150mm を 1.5m から見て p90 で 30° 超）。傾きが 20° ずれると壁の下端は 0.4m 手前、
+// 足元の床は 0.5m 浮く。一方、ジャイロ（DeviceOrientation）の重力方向は 1〜2° で信用でき、
+// 壁のマーカーは天地を合わせて貼る前提（Y = 鉛直上）なので、アンカーの Y 軸を重力の上に固定し、
+// マーカーからは「上まわりの向き（ヨー）」と位置だけを採る
+
+/** 回転行列（列優先 16 要素）の Y 軸と up の角度 [deg]（0 = 水平に貼れている / 推定が合っている） */
+export function tiltDegOf(m: number[], up: V3): number {
+  const y = normalize([m[4], m[5], m[6]]);
+  const d = Math.max(-1, Math.min(1, dot(y, normalize(up))));
+  return (Math.acos(d) * 180) / Math.PI;
+}
+
+/**
+ * 回転行列 m（列優先 16 要素）の Y 軸を up に一致させ、ヨー（up まわりの向き）は m の Z 軸（マーカーの法線 =
+ * 部屋側）を up に直交する面へ射影して保つ。Z が up とほぼ平行なら（傾きが 90° 近い異常値）X 軸で代用する。
+ * 返り値は列優先 16 要素で並進は 0（呼び出し側が位置を別に決める）
+ */
+export function levelRotation(m: number[], up: V3): number[] {
+  const y = normalize(up);
+  const zRaw: V3 = [m[8], m[9], m[10]];
+  let z: V3 = normalize([zRaw[0] - y[0] * dot(zRaw, y), zRaw[1] - y[1] * dot(zRaw, y), zRaw[2] - y[2] * dot(zRaw, y)]);
+  if (Math.hypot(z[0], z[1], z[2]) < 0.5) {
+    // Z が up に平行: X 軸から直交系を作る（X を射影 → Z = X × Y）
+    const xRaw: V3 = [m[0], m[1], m[2]];
+    const x = normalize([xRaw[0] - y[0] * dot(xRaw, y), xRaw[1] - y[1] * dot(xRaw, y), xRaw[2] - y[2] * dot(xRaw, y)]);
+    z = normalize(cross(x, y));
+  }
+  const x = normalize(cross(y, z));
+  return [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, 0, 0, 0, 1];
+}
+
 /**
  * 配置の検証（サーバーの rejected の文言と俯瞰画面の表示で共有）。不正なら理由、正しければ null。
  * 床のマーカーの高さは床（-floorDrop）に固定する（床に置くものなので入力させず、寸法から決める）
@@ -216,63 +266,4 @@ export function fusePoseCandidates(candidates: readonly PoseCandidate[]): { pos:
     quat: [q[0] / len, q[1] / len, q[2] / len, q[3] / len],
     spread,
   };
-}
-
-// ---- 重力による水平化（issue #55。marker-anchor.ts から使う） ----
-
-/** 回転 + 並進の 4x4（列優先）で方向ベクトルを変換する（並進は掛けない） */
-export function transformDirection(m: number[], d: V3): V3 {
-  return [m[0] * d[0] + m[4] * d[1] + m[8] * d[2], m[1] * d[0] + m[5] * d[1] + m[9] * d[2], m[2] * d[0] + m[6] * d[1] + m[10] * d[2]];
-}
-
-/**
- * 観測した姿勢（anchor → world の 4x4、列優先）の「アンカー座標系で鉛直上を向くはずの軸（anchorUp）」を、
- * ワールドの鉛直上（worldUp。DeviceOrientation 由来のカメラ姿勢ではワールドの +Y）に最短の回転で合わせる。
- * 回転はマーカーの中心 pivot（ワールド）のまわりに掛ける = マーカーの位置は信用し、傾きだけ直す。
- *
- * 背景: 平面マーカーの POSIT は表裏 2 解の取り違え（面の傾きの誤り）が起きやすい。原点マーカーではマーカー自身が
- * 原点なので位置にほとんど効かないが、追加マーカーでは「マーカー → 原点」の腕の長さ（1〜2m）で増幅されて原点が
- * 1〜2m 飛ぶ（Node の実験: 100mm の床マーカーを立って見る幾何で p90 1.9m → 水平化で 0.05m）。
- * 「マーカーは水平 / 鉛直に貼ってある」前提が使える場では、傾きは IMU の重力の方が POSIT より信用できる。
- *
- * @returns matrix 直した姿勢、tiltDeg 直す前の傾き [deg]（2 解の選択と、大きすぎる観測の棄却に使う）
- */
-export function levelPose(anchorWorld: number[], pivot: V3, anchorUp: V3, worldUp: V3): { matrix: number[]; tiltDeg: number } {
-  const a = normalize(transformDirection(anchorWorld, anchorUp));
-  const b = normalize(worldUp);
-  const c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const tiltDeg = (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI;
-  let r: number[]; // 3x3 行優先 [r00, r01, r02, r10, ...]
-  let v = cross(a, b);
-  const s2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-  if (s2 < 1e-18) {
-    if (c > 0) return { matrix: anchorWorld.slice(), tiltDeg };
-    // 真逆（180°）: a に直交する任意の軸で 180° 回す（棄却される傾きだが、有限の行列は返す）
-    const axis = normalize(Math.abs(a[0]) < 0.9 ? cross(a, [1, 0, 0]) : cross(a, [0, 1, 0]));
-    const [x, y, z] = axis;
-    r = [2 * x * x - 1, 2 * x * y, 2 * x * z, 2 * x * y, 2 * y * y - 1, 2 * y * z, 2 * x * z, 2 * y * z, 2 * z * z - 1];
-  } else {
-    // Rodrigues: R = I + [v]x + [v]x^2 (1 - c) / |v|^2
-    const k = (1 - c) / s2;
-    const [x, y, z] = v;
-    r = [
-      1 + k * (-y * y - z * z), -z + k * x * y, y + k * x * z,
-      z + k * x * y, 1 + k * (-x * x - z * z), -x + k * y * z,
-      -y + k * x * z, x + k * y * z, 1 + k * (-x * x - y * y),
-    ];
-  }
-  // 回転 R をワールドで左から掛け（R × M）、並進は pivot のまわりに回す: t' = R (t - pivot) + pivot
-  const rot4 = [r[0], r[3], r[6], 0, r[1], r[4], r[7], 0, r[2], r[5], r[8], 0, 0, 0, 0, 1];
-  const out = mulMat4(rot4, anchorWorld);
-  const d: V3 = [anchorWorld[12] - pivot[0], anchorWorld[13] - pivot[1], anchorWorld[14] - pivot[2]];
-  const rd = transformDirection(rot4, d);
-  out[12] = rd[0] + pivot[0];
-  out[13] = rd[1] + pivot[1];
-  out[14] = rd[2] + pivot[2];
-  return { matrix: out, tiltDeg };
-}
-
-function normalize(v: V3): V3 {
-  const len = Math.hypot(v[0], v[1], v[2]);
-  return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
 }

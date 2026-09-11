@@ -10,7 +10,7 @@ import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
 import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
 import { markerBits } from "../../src/shared/marker-detector";
-import { FACE_LABELS, MARKER_FACES, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, transformPoint } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
 import type { FakeMarker } from "../../src/shared/fake-markers";
@@ -45,7 +45,8 @@ const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 const CAM_RES = resolutionParam("camRes", [1280, 720]);
 
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+/** マーカーの一辺 [mm]。既定は 08 の印刷ページと同じ DEFAULT_MARKER_MM（issue #54） */
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
@@ -89,6 +90,8 @@ const FAKE_STROKE_SEC = params.has("fakeStroke") ? numParam("fakeStroke", 1.5, {
 const FAKE_STROKE_FACE = numParam("fakeStrokeFace", 0, { min: -90, max: 90 });
 
 const touch = isTouchDevice();
+/** 重力でアンカーを水平に直す（issue #54。08 と同じ。ジャイロとフェイクカメラで既定 on、PC + 実カメラでは off。?gravityAlign=0/1） */
+const GRAVITY_ALIGN = params.has("gravityAlign") ? params.get("gravityAlign") !== "0" : touch || FAKE_CAM;
 
 // 実機（ゴーグルに入れた iPhone）では console も HUD も読めないので、ログを dev サーバーのファイル
 // （logs/client.log）へ残す。HUD の全文を定期的に送るので、あとから「いつ何が起きたか」を追える
@@ -275,7 +278,22 @@ function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
     const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / (0.8 * FAKE_MARKER_PX);
     pos = [(-FAKE_SHIFT * d) / FAKE_FOCAL_PX, (FAKE_SHIFT_Y * d) / FAKE_FOCAL_PX, d];
   }
-  return { markers, camToField: fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH) };
+  const camToField = fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH);
+  fakeCamToField = camToField;
+  return { markers, camToField };
+}
+/** 直近に作ったフェイクカメラの姿勢（カメラ → field。worldUp 用） */
+let fakeCamToField: number[] | null = null;
+/** ワールド座標系での「上」（marker-anchor.ts の worldUp。08 と同じ: ジャイロは Y、フェイクカメラは合成カメラの姿勢から） */
+const worldUpVec = new THREE.Vector3();
+function worldUp(): THREE.Vector3 | null {
+  if (!GRAVITY_ALIGN) return null;
+  if (!FAKE_CAM) return worldUpVec.set(0, 1, 0);
+  if (!fakeCamToField) return null;
+  const fieldToCam = invertRigid(fakeCamToField);
+  const o = transformPoint(fieldToCam, [0, 0, 0]);
+  const u = transformPoint(fieldToCam, [0, 1, 0]);
+  return worldUpVec.set(u[0] - o[0], u[1] - o[1], u[2] - o[2]).transformDirection(camera.matrixWorld);
 }
 function fakeStream(): MediaStream {
   const world = fakeWorld();
@@ -316,6 +334,7 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     camHFovDeg: () => pt.camHFovDeg,
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
+    worldUp,
   });
 }
 
@@ -826,7 +845,7 @@ nameForm.addEventListener("submit", (event) => {
   const name = readPlayerName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms strokeMax=${STROKE_MAX} armM=${ARM_M} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} strokeMax=${STROKE_MAX} armM=${ARM_M} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   runStartFlow(touch, {
     onSensor: (state) => {

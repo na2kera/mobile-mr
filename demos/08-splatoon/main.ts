@@ -15,7 +15,7 @@ import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
 import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
 import { markerBits } from "../../src/shared/marker-detector";
-import { FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, transformDirection } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, mulMat4, transformPoint } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
 import type { FakeMarker } from "../../src/shared/fake-markers";
@@ -64,10 +64,7 @@ import { createSplatSound } from "./splat-sound";
 //     対戦中は視界の上に自分の塗り率と順位を大きく出す（issue #32「パーセント表示がもう少し大きく」）
 //   - マルチマーカー（issue #30）: 正面のマーカー（原点）に加えて床・左右・背面の壁に貼った追加マーカーの配置を
 //     俯瞰画面から配り、どれが見えてもアンカー（原点の姿勢）に直す（marker-anchor.ts の extraMarkers）。
-//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ。
-//     追加マーカーから出した原点は POSIT の表裏 2 解の取り違えで 1〜2m 飛ぶので（issue #55）、マーカーは水平 / 鉛直に
-//     貼ってある前提で観測の傾きを重力（DeviceOrientation のワールド +Y）に合わせて直す（marker-anchor.ts の level）。
-//     HUD の marker= に tilt=（直す前の傾き）と Δ=（その観測がアンカーを動かした距離 = 補正量）を出す
+//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
 //   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
@@ -80,7 +77,8 @@ const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 const CAM_RES = resolutionParam("camRes", [1280, 720]);
 
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+/** マーカーの一辺 [mm]。既定は印刷ページ（markers.html）と同じ DEFAULT_MARKER_MM（食い違うと距離が定数倍ずれる。issue #54） */
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
@@ -88,8 +86,6 @@ const MARKER_DET_W = numParam("detW", 960, { min: 64, max: 4096 });
 const MARKER_SMOOTH = numParam("smooth", 0.5, { min: 0.01, max: 1 });
 const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000 });
 const MARKER_LOST_MS = numParam("lostMs", 500, { min: 50, max: 10000 });
-/** 重力で水平化する前の傾きの上限 [deg]（issue #55。超える観測は捨てる。0 で水平化しない = 従来どおり） */
-const MARKER_MAX_TILT = numParam("maxTilt", 30, { min: 0, max: 90 });
 
 const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
@@ -177,8 +173,16 @@ const FAKE_TIMING = {
   restSec: numParam("fakeRestSec", FAKE_REST_SEC, { min: 0, max: 60 }),
 };
 
+/** フェイクカメラの原点マーカーを X 軸まわりに傾けて描く角度 [deg]（+ で上端が視点側へ）。重力での水平化の確認用（issue #54） */
+const FAKE_TILT_DEG = numParam("fakeTilt", 0, { min: -80, max: 80 });
+
 /** タッチ端末（実機）か。PC は OrbitControls + キーボード */
 const touch = isTouchDevice();
+/**
+ * 重力でアンカーを水平に直す（issue #54。marker-anchor.ts の worldUp）。ジャイロ（実機）とフェイクカメラでは既定 on、
+ * PC + 実カメラ（OrbitControls）ではワールドと重力が対応しないので off。?gravityAlign=0/1 で上書き
+ */
+const GRAVITY_ALIGN = params.has("gravityAlign") ? params.get("gravityAlign") !== "0" : touch || FAKE_CAM;
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -488,8 +492,14 @@ const FAKE_FOCAL_PX = FAKE_CAM_W / 2 / Math.tan(THREE.MathUtils.degToRad(params.
 /** 描かないマーカーの ID（ヘッドレス確認から window.__fakeMarkers.hidden で切り替えて、ロスト → 別マーカーへの切り替えを見る） */
 const fakeHidden = new Set<number>(FAKE_HIDE_ORIGIN ? [MARKER_ID] : []);
 if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = { hidden: fakeHidden };
+/** 直近に作ったフェイクカメラの姿勢（カメラ → field。fakeWorldUp 用） */
+let fakeCamToField: number[] | null = null;
 function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
-  const markers: FakeMarker[] = [{ id: MARKER_ID, bits: markerBits(MARKER_ID), toField: markerToFieldMatrix({ id: MARKER_ID, face: "wall", pos: [0, 0, 0] }) }];
+  // 原点マーカー。?fakeTilt= があれば X 軸まわりに傾けて描く（重力は field の上のまま → 水平化が効くかを見る）
+  const t = THREE.MathUtils.degToRad(FAKE_TILT_DEG);
+  const tiltX = [1, 0, 0, 0, 0, Math.cos(t), Math.sin(t), 0, 0, -Math.sin(t), Math.cos(t), 0, 0, 0, 0, 1];
+  const originToField = mulMat4(markerToFieldMatrix({ id: MARKER_ID, face: "wall", pos: [0, 0, 0] }), tiltX);
+  const markers: FakeMarker[] = [{ id: MARKER_ID, bits: markerBits(MARKER_ID), toField: originToField }];
   for (const m of FAKE_MARKERS) {
     if (m.id === MARKER_ID || !(MARKER_FACES as readonly string[]).includes(m.face)) continue;
     markers.push({ id: m.id, bits: markerBits(m.id), toField: markerToFieldMatrix({ id: m.id, face: m.face as MarkerFace, pos: m.pos }) });
@@ -503,21 +513,23 @@ function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
     const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / (0.8 * FAKE_MARKER_PX);
     pos = [(-FAKE_SHIFT * d) / FAKE_FOCAL_PX, (FAKE_SHIFT_Y * d) / FAKE_FOCAL_PX, d];
   }
-  return { markers, camToField: fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH) };
+  const camToField = fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH);
+  fakeCamToField = camToField;
+  return { markers, camToField };
 }
-/** フェイクカメラの field → カメラ座標系（水平化のワールド上向きに使う。姿勢は URL で固定なので 1 回だけ計算） */
-const fakeFieldToCam: number[] | null = FAKE_CAM ? invertRigid(fakeWorld().camToField) : null;
-const worldUpVec = new THREE.Vector3();
 /**
- * 水平化（issue #55）に使うワールドの鉛直上。実機は DeviceOrientation のワールド +Y そのもの。
- * フェイクカメラは映像の姿勢（fakePitch / fakeYaw）が仮想カメラ（OrbitControls）と違うので、
- * 映像の中の「上」（field の +Y をフェイクカメラ座標系に直したもの）を仮想カメラの姿勢でワールドに回す
+ * ワールド座標系での「上」（marker-anchor.ts の worldUp）。ジャイロならワールドの Y がそのまま重力の上。
+ * フェイクカメラなら「合成カメラから見た field の上」を仮想カメラの姿勢でワールドへ回す（実機でジャイロが返す値の代わり）
  */
-function worldUpForLeveling(): V3 {
-  if (!fakeFieldToCam) return [0, 1, 0];
-  const up = transformDirection(fakeFieldToCam, [0, 1, 0]);
-  worldUpVec.set(up[0], up[1], up[2]).transformDirection(camera.matrixWorld);
-  return [worldUpVec.x, worldUpVec.y, worldUpVec.z];
+const worldUpVec = new THREE.Vector3();
+function worldUp(): THREE.Vector3 | null {
+  if (!GRAVITY_ALIGN) return null;
+  if (!FAKE_CAM) return worldUpVec.set(0, 1, 0);
+  if (!fakeCamToField) return null;
+  const fieldToCam = invertRigid(fakeCamToField);
+  const o = transformPoint(fieldToCam, [0, 0, 0]);
+  const u = transformPoint(fieldToCam, [0, 1, 0]);
+  return worldUpVec.set(u[0] - o[0], u[1] - o[1], u[2] - o[2]).transformDirection(camera.matrixWorld);
 }
 function fakeStream(): MediaStream {
   const world = fakeWorld();
@@ -562,8 +574,7 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     // 連射中にフィールドが飛ぶと発射の向きがずれるので lerp だけ
     // 発射間隔（250ms）よりわずかに長く。連射の合間には再スナップできる
     canSnap: () => performance.now() - lastShotMs > 300,
-    // 重力で水平化（issue #55）。原点は壁のマーカーなのでアンカーの +Y が鉛直上
-    level: MARKER_MAX_TILT > 0 ? { anchorUp: [0, 1, 0], maxTiltDeg: MARKER_MAX_TILT, worldUp: worldUpForLeveling } : undefined,
+    worldUp,
   });
 }
 
@@ -1353,7 +1364,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms maxTilt=${MARKER_MAX_TILT} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

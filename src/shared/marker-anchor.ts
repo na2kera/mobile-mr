@@ -9,17 +9,16 @@
 // アンカーは 1 つのままなので、呼び出し側（field = anchor）は枚数を意識しない。
 // 同じフレームで複数見えたときは画面上の大きさで重み付き平均し、候補のばらつき（spread）を診断用に返す
 //
-// 重力による水平化（issue #55、level オプション）: 平面マーカーの POSIT は表裏 2 解の取り違え（面の傾きの誤り）が
-// 起きやすい。原点マーカーではマーカー自身が原点なので位置にほぼ効かないが、追加マーカーでは「マーカー → 原点」の
-// 腕の長さで増幅され、原点が 1〜2m 飛ぶ（= 追加マーカーを見ているとき「補正されている感がない」）。
-// DeviceOrientation 由来のカメラ姿勢はワールドの +Y が鉛直上なので、「マーカーは水平 / 鉛直に貼ってある」前提で
-// 観測した姿勢の傾きを重力に合わせて直し、2 解は傾きの小さい方を採り、傾きが上限を超える観測は捨てる
+// 重力での水平化（issue #54）: worldUp を渡すと、各観測から出したアンカーの姿勢の Y 軸を重力の上に固定し、
+// マーカーからは位置とヨーだけを採る。単一マーカーの傾き推定はほぼ正面で 10〜30° ずれ（POSIT の 2 解の
+// 鏡像が選ばれることもある）、床が浮く・壁が手前に来る原因になっていた（marker-layout.ts の levelRotation 参照）。
+// POSIT の 2 解を重力で選び直すことは試したが、横から見たマーカーでは 2 解の差がヨー（重力では決まらない）なので
+// 傾きの僅差で鏡像のヨーを拾ってしまい（ヘッドレスで原点が 0.47m ずれた）、水平化だけにした
 import * as THREE from "three";
 import { createMarkerDetector } from "./marker-detector";
 import type { MarkerObservation } from "./marker-detector";
-import { fusePoseCandidates, levelPose } from "./marker-layout";
+import { fusePoseCandidates, levelRotation, tiltDegOf } from "./marker-layout";
 import type { PoseCandidate } from "./marker-layout";
-import type { V3 } from "./surface";
 
 export type ExtraMarker = {
   id: number;
@@ -63,31 +62,18 @@ export type MarkerAnchorOptions = {
    */
   canSnap?: () => boolean;
   /**
-   * 重力による水平化（issue #55）。省略時は POSIT の best 解をそのまま使う（06〜07・09 はこちら）。
-   * ワールドの +Y が鉛直上（DeviceOrientationControls / OrbitControls）で、原点・追加マーカーとも水平 / 鉛直に
-   * 貼ってある場（08）で使う。観測ごとに 2 解（best / alternative）のうち傾きの小さい方を採り、
-   * その傾きをマーカーの中心まわりの回転で 0 にしてからアンカーに直す
+   * ワールド座標系での「上」（重力の逆向き。単位ベクトル）。ジャイロ（DeviceOrientationControls）なら (0,1,0)、
+   * PC のフェイクカメラなら合成カメラの姿勢から出せる。返すとアンカーの Y 軸をこれに固定して傾きの誤差を消す
+   * （壁のマーカーは天地を合わせて貼る前提）。null / 省略なら従来どおりマーカーの姿勢をそのまま使う
+   * （OrbitControls + 実カメラのように重力とワールドが対応しない環境）
    */
-  level?: {
-    /** アンカー座標系で鉛直上を向く軸（壁の原点マーカー: [0, 1, 0]。机に置いたマーカーなら [0, 0, 1]） */
-    anchorUp: V3;
-    /** 直す前の傾き [deg] がこれを超える観測は捨てる（2 解の両方が外れている = 検出の崩れ） */
-    maxTiltDeg: number;
-    /**
-     * ワールドの鉛直上（省略時は [0, 1, 0]）。PC のフェイクカメラは映像の姿勢（fakePitch）が仮想カメラと違うので、
-     * 映像の中の「上」を仮想カメラ経由でワールドに直したものを返す（08 の worldUpForLeveling）
-     */
-    worldUp?: () => V3;
-  };
+  worldUp?: () => THREE.Vector3 | null;
 };
 
 export type MarkerAnchor = {
   /** 描画ループから毎フレーム呼ぶ。新しい映像フレームがあり間引き条件を満たせば検出する */
   update(now: number): void;
-  /**
-   * HUD 用（"id=0+1 err=0.03,0.05 tilt=3,8° spread=0.02m Δ=0.02m 18ms" / "lost (1.2s)" / "searching"）。
-   * tilt は水平化前の傾き（level のときだけ）、Δ はこの観測がアンカーを動かした距離（= 補正量。0 なら補正していない）
-   */
+  /** HUD 用（"id=0+1 err=0.03,0.05 spread=0.02m tilt=3deg Δ=0.02m 18ms" / "lost (1.2s)" / "searching"）。Δ は補正量（correctionM） */
   readonly info: string;
   /** 直近に観測を採用した時刻 [ms]。一度も無ければ -Infinity */
   readonly lastAcceptedMs: number;
@@ -99,7 +85,15 @@ export type MarkerAnchor = {
   readonly usedIds: readonly number[];
   /** 直近の採用で複数マーカーが見えたときの、原点の位置の候補のばらつき [m]（1 枚なら 0）。貼りズレの診断用 */
   readonly spreadM: number;
-  /** 直近の採用で、観測がアンカーを動かそうとした距離 [m]（採用前の位置と観測の差。「本当に補正されているか」の診断用） */
+  /**
+   * 直近の採用で、水平化する前のアンカーの Y 軸が worldUp からずれていた角度 [deg]（複数なら最大）。
+   * worldUp が無ければ 0。大きいほど「POSIT の傾き推定がずれていた（水平化で救った）」か「マーカーが傾いて貼ってある」
+   */
+  readonly tiltDeg: number;
+  /**
+   * 直近の採用で、観測がアンカーを動かそうとした距離 [m]（採用前のアンカーの位置と観測の差。issue #55「本当に補正されているか」の
+   * 診断用。追加マーカーを見ながら歩いて 0 のままなら補正していない）
+   */
   readonly correctionM: number;
   /** lostMs 以内に観測を採用していれば true */
   isTracking(now: number, lostMs: number): boolean;
@@ -118,10 +112,10 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
   const targetQuat = new THREE.Quaternion();
   const targetScale = new THREE.Vector3();
   const markerWorld = new THREE.Matrix4();
-  const anchorWorld = new THREE.Matrix4();
+  const levelWorld = new THREE.Matrix4();
   const markerCenter = new THREE.Vector3();
+  const anchorOffset = new THREE.Vector3();
   const identity = new THREE.Matrix4();
-  const DEFAULT_WORLD_UP: V3 = [0, 1, 0];
   /** toAnchor の逆行列（アンカー → マーカー）。検出のたびに invert しないようキャッシュ */
   const inverseCache = new WeakMap<THREE.Matrix4, THREE.Matrix4>();
   function inverseOf(m: THREE.Matrix4): THREE.Matrix4 {
@@ -140,6 +134,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     everDetected: false,
     usedIds: [] as number[],
     spreadM: 0,
+    tiltDeg: 0,
     correctionM: 0,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
@@ -184,68 +179,49 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     return extra ? extra.toAnchor : null;
   }
 
-  /**
-   * 1 つの解（マーカー → カメラ）からアンカー → ワールドを出す。level のときは傾きを重力に合わせて直す。
-   * マーカーのカメラ座標系での姿勢 × カメラのワールド姿勢 = マーカー座標系 → ワールド。
-   * 追加マーカーなら、さらに（マーカー → アンカー）の逆を掛けてアンカー座標系 → ワールドに直す
-   */
-  function anchorFromSolution(matrix: THREE.Matrix4, toAnchor: THREE.Matrix4): { matrix: THREE.Matrix4; tiltDeg: number } {
-    markerWorld.multiplyMatrices(camera.matrixWorld, matrix);
-    anchorWorld.copy(markerWorld);
-    if (toAnchor !== identity) anchorWorld.multiply(inverseOf(toAnchor));
-    if (!opts.level) return { matrix: anchorWorld, tiltDeg: 0 };
-    // 傾きはマーカーの中心（信用する位置）のまわりで直す。腕の長さぶん原点が動く
-    markerCenter.setFromMatrixPosition(markerWorld);
-    const leveled = levelPose(anchorWorld.toArray(), [markerCenter.x, markerCenter.y, markerCenter.z], opts.level.anchorUp, opts.level.worldUp?.() ?? DEFAULT_WORLD_UP);
-    return { matrix: anchorWorld.fromArray(leveled.matrix), tiltDeg: leveled.tiltDeg };
-  }
-
   function apply(observations: MarkerObservation[], now: number) {
     // 姿勢が信用できる観測のうち、配置が分かっているマーカーだけを候補にする（同じ ID が複数見えたら最初の 1 つ）
     const candidates: PoseCandidate[] = [];
-    const used: { id: number; error: number; tiltDeg: number }[] = [];
-    const rejected: string[] = [];
+    const used: { id: number; error: number }[] = [];
+    const up = opts.worldUp?.() ?? null;
+    const upArr: [number, number, number] | null = up ? [up.x, up.y, up.z] : null;
+    let maxTilt = 0;
     camera.updateMatrixWorld();
     for (const o of observations) {
-      if (!Number.isFinite(o.error) || o.error > opts.maxPoseError) {
-        rejected.push(`id=${o.id} err=${o.error.toFixed(2)}`);
-        continue;
-      }
+      if (!Number.isFinite(o.error) || o.error > opts.maxPoseError) continue;
       if (used.some((u) => u.id === o.id)) continue;
       const toAnchor = toAnchorOf(o.id);
-      if (!toAnchor) {
-        rejected.push(`id=${o.id} (not in layout)`);
-        continue;
+      if (!toAnchor) continue;
+      // マーカーのカメラ座標系での姿勢 × カメラのワールド姿勢 = マーカー座標系 → ワールド。
+      // 追加マーカーなら、さらに（マーカー → アンカー）の逆を掛けてアンカー座標系 → ワールドに直す
+      markerWorld.multiplyMatrices(camera.matrixWorld, o.matrix);
+      if (toAnchor !== identity) markerWorld.multiply(inverseOf(toAnchor));
+      if (upArr) {
+        maxTilt = Math.max(maxTilt, tiltDegOf(markerWorld.elements, upArr));
+        // 水平化: 回転は Y = up（ヨーは推定の法線から）、位置は「マーカーの中心 − R・(アンカー座標系でのマーカーの位置)」。
+        // マーカーの中心は傾きの推定に依らずほぼ正しい（画像位置と大きさで決まる）ので、
+        // 追加マーカーから原点までのオフセットだけ水平化した回転で戻す
+        levelWorld.fromArray(levelRotation(markerWorld.elements, upArr));
+        markerCenter.setFromMatrixPosition(o.matrix).applyMatrix4(camera.matrixWorld);
+        anchorOffset.setFromMatrixPosition(toAnchor).applyMatrix4(levelWorld);
+        targetPos.copy(markerCenter).sub(anchorOffset);
+        targetQuat.setFromRotationMatrix(levelWorld);
+      } else {
+        markerWorld.decompose(targetPos, targetQuat, targetScale);
       }
-      let solution = o.matrix;
-      let tiltDeg = 0;
-      if (opts.level) {
-        // 2 解のうち重力に合う（傾きの小さい）方。再投影誤差はほぼ同じなので誤差では選べない
-        tiltDeg = anchorFromSolution(o.matrix, toAnchor).tiltDeg;
-        if (o.alternative && Number.isFinite(o.alternative.error) && o.alternative.error <= opts.maxPoseError) {
-          const altTilt = anchorFromSolution(o.alternative.matrix, toAnchor).tiltDeg;
-          if (altTilt < tiltDeg) {
-            solution = o.alternative.matrix;
-            tiltDeg = altTilt;
-          }
-        }
-        if (tiltDeg > opts.level.maxTiltDeg) {
-          rejected.push(`id=${o.id} tilt=${tiltDeg.toFixed(0)}°`);
-          continue;
-        }
-      }
-      anchorFromSolution(solution, toAnchor).matrix.decompose(targetPos, targetQuat, targetScale);
       candidates.push({
         pos: [targetPos.x, targetPos.y, targetPos.z],
         quat: [targetQuat.x, targetQuat.y, targetQuat.z, targetQuat.w],
         weight: o.sidePx * o.sidePx,
       });
-      used.push({ id: o.id, error: o.error, tiltDeg });
+      used.push({ id: o.id, error: o.error });
     }
     const fused = fusePoseCandidates(candidates);
     if (!fused) {
-      if (rejected.length > 0 && now - lastRejectLogMs > 2000) {
-        console.log(`[marker] observed but rejected: ${rejected.join(", ")}`);
+      if (observations.length > 0 && now - lastRejectLogMs > 2000) {
+        console.log(
+          `[marker] observed but rejected: ${observations.map((o) => `id=${o.id} err=${o.error.toFixed(2)}`).join(", ")}`,
+        );
         lastRejectLogMs = now;
       }
       if (self.everDetected) {
@@ -272,7 +248,8 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     self.lastAcceptedMs = now;
     self.usedIds = used.map((u) => u.id);
     self.spreadM = fused.spread;
-    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${opts.level ? ` tilt=${used.map((u) => u.tiltDeg.toFixed(0)).join(",")}°` : ""}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""} Δ=${self.correctionM.toFixed(2)}m ${self.detMs.toFixed(0)}ms`;
+    self.tiltDeg = maxTilt;
+    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""}${upArr ? ` tilt=${maxTilt.toFixed(0)}deg` : ""} Δ=${self.correctionM.toFixed(2)}m ${self.detMs.toFixed(0)}ms`;
   }
 
   return self;

@@ -50,12 +50,12 @@ import {
   describeMarkers,
   fusePoseCandidates,
   invertRigid,
-  levelPose,
+  levelRotation,
   markerAxes,
   markerToFieldMatrix,
   mulMat4,
   suggestedMarkerPos,
-  transformDirection,
+  tiltDegOf,
   transformPoint,
   validateMarkerLayout,
   withFloorDrop,
@@ -302,6 +302,96 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ]);
   check("fusePoseCandidates: 0° と 90°（Y）の等重み → 45°", rot && near(rot.quat[1], Math.sin(Math.PI / 8), 1e-9) && near(rot.quat[3], Math.cos(Math.PI / 8), 1e-9));
   check("fusePoseCandidates: 空なら null、重み 0 だけでも null", fusePoseCandidates([]) === null && fusePoseCandidates([{ pos: [0, 0, 0], quat: [0, 0, 0, 1], weight: 0 }]) === null);
+  // 重力での水平化（issue #54）: X 軸まわりに 25° 傾いた壁マーカーの姿勢（POSIT の傾き誤差 or 傾いて貼った）を
+  // Y = 上に直し、ヨー（Y まわり）は保つ
+  const rotX = (deg) => {
+    const t = (deg * Math.PI) / 180;
+    return [1, 0, 0, 0, 0, Math.cos(t), Math.sin(t), 0, 0, -Math.sin(t), Math.cos(t), 0, 0, 0, 0, 1];
+  };
+  const rotY = (deg) => {
+    const t = (deg * Math.PI) / 180;
+    return [Math.cos(t), 0, -Math.sin(t), 0, 0, 1, 0, 0, Math.sin(t), 0, Math.cos(t), 0, 0, 0, 0, 1];
+  };
+  const tilted = mulMat4(rotY(30), rotX(25));
+  check("tiltDegOf: X 軸まわりに 25° 傾けた回転の Y 軸は上から 25°、水平なら 0", near(tiltDegOf(tilted, [0, 1, 0]), 25, 1e-9) && near(tiltDegOf(rotY(30), [0, 1, 0]), 0, 1e-9));
+  const leveled = levelRotation(tilted, [0, 1, 0]);
+  const yaw30 = rotY(30);
+  check("levelRotation: Y 軸が (0,1,0) になり、ヨー 30° は保たれる（= rotY(30)）", leveled.every((v, i) => near(v, yaw30[i], 1e-9)));
+  check("levelRotation: 並進は 0（位置は呼び出し側が決める）", leveled[12] === 0 && leveled[13] === 0 && leveled[14] === 0 && leveled[15] === 1);
+  // 上が (0,1,0) でない（フェイクカメラで合成カメラが傾いている）場合も、その up に Y を揃える
+  const upTilt = [0, Math.cos(0.3), Math.sin(0.3)];
+  const leveled2 = levelRotation(rotX(40), upTilt);
+  check("levelRotation: 任意の up に Y を揃え、X・Y・Z が右手系の単位直交ベクトル", near(tiltDegOf(leveled2, upTilt), 0, 1e-9) && near(Math.hypot(leveled2[0], leveled2[1], leveled2[2]), 1, 1e-9) && near(leveled2[0] * leveled2[8] + leveled2[1] * leveled2[9] + leveled2[2] * leveled2[10], 0, 1e-9));
+  // Z が up と平行（傾き 90° の異常値）でも壊れず、X 軸から向きを作る
+  const degenerate = levelRotation(rotX(90), [0, 1, 0]);
+  check("levelRotation: Z が up と平行でも直交系を返す（X 軸で代用）", degenerate.every(Number.isFinite) && near(tiltDegOf(degenerate, [0, 1, 0]), 0, 1e-9) && near(Math.hypot(degenerate[8], degenerate[9], degenerate[10]), 1, 1e-9));
+  // 床マーカーから原点を出す: 床マーカーの姿勢に傾き誤差があっても、水平化した回転で「マーカー中心 − R・pos」を取れば原点が合う
+  const floorPlacement = { id: 1, face: "floor", pos: [0.2, -1, 0.6] };
+  const floorToField = markerToFieldMatrix(floorPlacement);
+  // 床マーカーの推定姿勢: 回転だけ X 軸まわりに 20° ずれ、中心の位置は正しい（画像位置と大きさで決まるので傾きに依らない）
+  const floorEst = mulMat4(rotX(20), floorToField);
+  floorEst[12] = floorPlacement.pos[0];
+  floorEst[13] = floorPlacement.pos[1];
+  floorEst[14] = floorPlacement.pos[2];
+  const anchorEst = mulMat4(floorEst, invertRigid(floorToField)); // 従来の「マーカー → アンカー」の逆を掛けるだけ
+  check("床マーカーの傾きが 20° ずれると、従来の変換では原点が 0.3m 以上ずれる（issue #54 の機序）", Math.hypot(anchorEst[12], anchorEst[13], anchorEst[14]) > 0.3 && near(tiltDegOf(anchorEst, [0, 1, 0]), 20, 1e-9));
+  const lvl = levelRotation(anchorEst, [0, 1, 0]);
+  const offset = transformPoint(lvl, floorPlacement.pos);
+  const originFixed = [floorPlacement.pos[0] - offset[0], floorPlacement.pos[1] - offset[1], floorPlacement.pos[2] - offset[2]];
+  check("水平化した回転で「マーカー中心 − R_level・pos」を取ると原点が合う（marker-anchor.ts の位置の式）", nearV(originFixed, [0, 0, 0]) && near(tiltDegOf(lvl, [0, 1, 0]), 0, 1e-9));
+
+  // ---- issue #55 の再現: 追加マーカーを見ていると「補正されている感がない」----
+  // 実機の幾何（立って壁から 2.2m、100mm の床マーカーを見下ろす = 画面上 30px 前後）で js-aruco2 の POSIT
+  // （marker-detector.ts が使うもの）に投影 + 角の画素ノイズ（決定的な乱数）を入れる。POSIT の表裏 2 解の
+  // 取り違えは原点マーカーでは位置に 3〜6cm しか効かないが、追加マーカーでは「マーカー → 原点」の腕の長さで
+  // 増幅され原点が 1〜2m 飛ぶ。issue #54 の水平化（worldUp）で同じ幾何が数 cm に収まることを確かめる
+  {
+    const require = createRequire(import.meta.url);
+    const { POS } = require("js-aruco2/src/posit1.js");
+    const MARKER_M = 0.1;
+    const focal = 960 / 2 / Math.tan((68 * Math.PI) / 180 / 2); // detW=960・標準カメラ（68°）
+    let seed = 12345;
+    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+    // marker-detector.ts と同じ変換（POSIT の +Z 前方 → three.js の -Z 前方）
+    const positToMatrix = (r, t) => new Matrix4().set(r[0][0], r[0][1], -r[0][2], t[0], r[1][0], r[1][1], -r[1][2], t[1], -r[2][0], -r[2][1], r[2][2], -t[2], 0, 0, 0, 1);
+    const validPose = (e, r, t) => e >= 0 && r.length === 3 && r.every((row) => row.length === 3 && row.every(Number.isFinite)) && t.length === 3 && t.every(Number.isFinite);
+    const standing = { id: 1, face: "floor", pos: [0, -1.2, 1.0] }; // 床（マーカーの高さ 1.2m）、壁から 1m
+    const standingM = new Matrix4().fromArray(markerToFieldMatrix(standing));
+    const cam = new Matrix4().compose(new Vector3(0, 0.3, 2.2), new Quaternion().setFromEuler(new Euler((-51 * Math.PI) / 180, 0, 0, "YXZ")), new Vector3(1, 1, 1));
+    const markerToCam = new Matrix4().multiplyMatrices(cam.clone().invert(), standingM);
+    const fieldInv = standingM.clone().invert();
+    const posit = new POS.Posit(MARKER_M, focal);
+    const h = MARKER_M / 2;
+    const rawErr = [];
+    const leveledErr = [];
+    for (let i = 0; i < 300; i++) {
+      const pts = [[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]].map(([x, y, z]) => {
+        const p = new Vector3(x, y, z).applyMatrix4(markerToCam);
+        return { x: (focal * p.x) / -p.z + 0.5 * gauss(), y: (focal * p.y) / -p.z + 0.5 * gauss() };
+      });
+      const pose = posit.pose(pts);
+      const sol = validPose(pose.bestError, pose.bestRotation, pose.bestTranslation)
+        ? positToMatrix(pose.bestRotation, pose.bestTranslation)
+        : validPose(pose.alternativeError, pose.alternativeRotation, pose.alternativeTranslation)
+          ? positToMatrix(pose.alternativeRotation, pose.alternativeTranslation)
+          : null;
+      if (!sol) continue;
+      // 従来: anchor→world = cam × solution × (marker→anchor)⁻¹（field = world なので真値は原点 0）
+      const markerWorld = new Matrix4().multiplyMatrices(cam, sol);
+      const anchorRaw = new Matrix4().multiplyMatrices(markerWorld, fieldInv);
+      rawErr.push(new Vector3().setFromMatrixPosition(anchorRaw).length());
+      // 水平化（marker-anchor.ts の worldUp の式）: 回転は levelRotation、位置は「マーカー中心 − R_level・pos」
+      const lvl2 = levelRotation(anchorRaw.toArray(), [0, 1, 0]);
+      const c = new Vector3().setFromMatrixPosition(markerWorld);
+      const off = transformPoint(lvl2, standing.pos);
+      leveledErr.push(Math.hypot(c.x - off[0], c.y - off[1], c.z - off[2]));
+    }
+    const p90 = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
+    const max = (a) => Math.max(...a);
+    check("issue #55: 100mm の床マーカーを立って 2.2m から見下ろすと、従来の変換では原点が p90 で 0.5m 以上飛ぶ（再現）", rawErr.length >= 250 && p90(rawErr) > 0.5, `n=${rawErr.length} p90=${p90(rawErr)?.toFixed(2)} max=${max(rawErr).toFixed(2)}`);
+    check("issue #55: 重力での水平化（issue #54 の worldUp）で同じ幾何の原点の誤差が p90 < 0.15m・最大 < 0.3m", p90(leveledErr) < 0.15 && max(leveledErr) < 0.3, `p90=${p90(leveledErr)?.toFixed(2)} max=${max(leveledErr).toFixed(2)}`);
+  }
   // 検証
   const ok = [
     { id: 1, face: "floor", pos: [0, -1, 0.75] },
@@ -318,92 +408,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("withFloorDrop: 床のマーカーだけ高さが追従する", JSON.stringify(withFloorDrop(ok, 0.8)) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -0.8, 0.75] }, ok[1]]));
   check("suggestedMarkerPos: 床は床の高さ・コートの中央、左右は壁の位置、背面は奥", nearV(suggestedMarkerPos("floor", cfg), [0, -1, 0.75]) && nearV(suggestedMarkerPos("left", cfg), [-1, 0, 0.75]) && nearV(suggestedMarkerPos("right", cfg), [1, 0, 0.75]) && nearV(suggestedMarkerPos("back", cfg), [0, 0, 1.5]));
   check("describeMarkers", describeMarkers(ok) === "1:floor,2:left" && describeMarkers([]) === "-");
-
-  // ---- 重力による水平化（issue #55）----
-  {
-    const UP = [0, 1, 0];
-    const deg = (d) => (d * Math.PI) / 180;
-    const rotX = (a) => [1, 0, 0, 0, 0, Math.cos(a), Math.sin(a), 0, 0, -Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1];
-    const rotY = (a) => [Math.cos(a), 0, -Math.sin(a), 0, 0, 1, 0, 0, Math.sin(a), 0, Math.cos(a), 0, 0, 0, 0, 1];
-    const withT = (m, t) => { const o = m.slice(); o[12] = t[0]; o[13] = t[1]; o[14] = t[2]; return o; };
-    const level0 = levelPose(withT(rotY(deg(30)), [1, 2, 3]), [0, 0, 5], UP, UP);
-    check("levelPose: 水平な姿勢（ヨーだけ）はそのまま、tilt=0", near(level0.tiltDeg, 0) && level0.matrix.every((v, i) => near(v, withT(rotY(deg(30)), [1, 2, 3])[i])));
-    // 原点（アンカー）から 1.5m 先のマーカー中心（pivot）のまわりに X 軸で 20° 傾いた観測を直す
-    const pivot = [0, -1.2, 1.0];
-    const tilted = mulMat4(withT(rotX(deg(20)), pivot), withT(rotX(0), [-pivot[0], -pivot[1], -pivot[2]])); // pivot まわりの 20° 回転 × 単位
-    const lv = levelPose(tilted, pivot, UP, UP);
-    const upAfter = transformDirection(lv.matrix, UP);
-    check("levelPose: 20° 傾いた観測の tilt が 20°、直した後の上軸が鉛直", near(lv.tiltDeg, 20, 1e-9) && nearV(upAfter, UP, 1e-9), `tilt=${lv.tiltDeg} up=${upAfter}`);
-    check("levelPose: 直した後は元の（傾いていない）姿勢に戻る = 原点の位置も戻る（腕の長さぶん動く）", lv.matrix.every((v, i) => near(v, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1][i], 1e-9)), JSON.stringify(lv.matrix.slice(12, 15)));
-    // pivot は動かない（マーカーの位置は信用する）
-    const pivotLocal = transformPoint(invertRigid(tilted), pivot);
-    check("levelPose: pivot（マーカー中心）は直す前後で同じワールド位置", nearV(transformPoint(lv.matrix, pivotLocal), pivot, 1e-9));
-    // 一般の向き: 直した後の上軸は worldUp、回転は正規直交
-    const gen = levelPose(withT(mulMat4(rotY(deg(40)), rotX(deg(35))), [0.3, 0.1, -0.2]), [0.5, -0.5, 0.5], UP, [0.05, 1, -0.02]);
-    const wu = [0.05, 1, -0.02].map((v) => v / Math.hypot(0.05, 1, -0.02));
-    const gx = transformDirection(gen.matrix, [1, 0, 0]);
-    const gy = transformDirection(gen.matrix, [0, 1, 0]);
-    check("levelPose: 一般の向きでも上軸が worldUp（IMU の向き）に一致し、回転は正規直交のまま", nearV(gy, wu, 1e-9) && near(Math.hypot(...gx), 1, 1e-9) && near(gx[0] * gy[0] + gx[1] * gy[1] + gx[2] * gy[2], 0, 1e-9));
-    const flipped = levelPose(withT(rotX(Math.PI), [0, 0, 0]), [0, 0, 1], UP, UP);
-    check("levelPose: 真逆（180°）でも有限の行列と tilt=180 を返す", near(flipped.tiltDeg, 180, 1e-9) && flipped.matrix.every(Number.isFinite) && nearV(transformDirection(flipped.matrix, UP), UP, 1e-9));
-    // three.js との整合（marker-anchor.ts は Matrix4.toArray / fromArray で受け渡す）
-    const m3 = new Matrix4().fromArray(tilted);
-    const lv3 = levelPose(m3.toArray(), pivot, UP, UP);
-    check("levelPose: three.js の toArray / fromArray で受け渡しても同じ", lv3.matrix.every((v, i) => near(v, lv.matrix[i], 1e-12)));
-  }
-
-  // ---- issue #55 の再現: 実機の幾何で追加マーカーから出した原点が POSIT の 2 解の取り違えで飛び、水平化で直る ----
-  // js-aruco2 の POSIT（marker-detector.ts が使うもの）に、ピンホール投影 + 角の画素ノイズ（決定的な乱数）を入れて回す
-  {
-    const require = createRequire(import.meta.url);
-    const { POS } = require("js-aruco2/src/posit1.js");
-    const MARKER_M = 0.1;
-    const focal = 960 / 2 / Math.tan(deg(68) / 2); // detW=960・標準カメラ（68°）
-    let seed = 12345;
-    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
-    // marker-detector.ts の positToMatrix と同じ変換（POSIT の +Z 前方 → three.js の -Z 前方）
-    const positToMatrix = (r, t) => new Matrix4().set(r[0][0], r[0][1], -r[0][2], t[0], r[1][0], r[1][1], -r[1][2], t[1], -r[2][0], -r[2][1], r[2][2], -t[2], 0, 0, 0, 1);
-    const validPose = (e, r, t) => e >= 0 && r.length === 3 && r.every((row) => row.length === 3 && row.every(Number.isFinite)) && t.length === 3 && t.every(Number.isFinite);
-    function deg(d) { return (d * Math.PI) / 180; }
-    /** 立って（床から 1.5m）壁から 2.2m、床のマーカー（壁から 1m、マーカーの高さ 1.2m）を見下ろす */
-    const floorM = new Matrix4().fromArray(markerToFieldMatrix({ id: 1, face: "floor", pos: [0, -1.2, 1.0] }));
-    const cam = new Matrix4().compose(new Vector3(0, 0.3, 2.2), new Quaternion().setFromEuler(new Euler(deg(-51), 0, 0, "YXZ")), new Vector3(1, 1, 1));
-    const camInv = cam.clone().invert();
-    const markerToCam = new Matrix4().multiplyMatrices(camInv, floorM);
-    const fieldInv = floorM.clone().invert();
-    const posit = new POS.Posit(MARKER_M, focal);
-    const h = MARKER_M / 2;
-    const rawErr = [];
-    const leveledErr = [];
-    for (let i = 0; i < 300; i++) {
-      const pts = [[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]].map(([x, y, z]) => {
-        const p = new Vector3(x, y, z).applyMatrix4(markerToCam);
-        return { x: (focal * p.x) / -p.z + 0.5 * gauss(), y: (focal * p.y) / -p.z + 0.5 * gauss() };
-      });
-      const pose = posit.pose(pts);
-      const sols = [];
-      if (validPose(pose.bestError, pose.bestRotation, pose.bestTranslation)) sols.push(positToMatrix(pose.bestRotation, pose.bestTranslation));
-      if (validPose(pose.alternativeError, pose.alternativeRotation, pose.alternativeTranslation)) sols.push(positToMatrix(pose.alternativeRotation, pose.alternativeTranslation));
-      if (sols.length === 0) continue;
-      // marker-anchor.ts の anchorFromSolution と同じ: anchor→world = cam × solution × (marker→anchor)⁻¹。field = world なので真値は単位行列
-      const anchorOf = (m) => new Matrix4().multiplyMatrices(cam, m).multiply(fieldInv);
-      const originErr = (aw) => new Vector3().setFromMatrixPosition(aw).length();
-      rawErr.push(originErr(anchorOf(sols[0])));
-      let best = null;
-      for (const sol of sols) {
-        const mw = new Matrix4().multiplyMatrices(cam, sol);
-        const c = new Vector3().setFromMatrixPosition(mw);
-        const lv = levelPose(anchorOf(sol).toArray(), [c.x, c.y, c.z], [0, 1, 0], [0, 1, 0]);
-        if (!best || lv.tiltDeg < best.tiltDeg) best = lv;
-      }
-      leveledErr.push(originErr(new Matrix4().fromArray(best.matrix)));
-    }
-    const p90 = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
-    const max = (a) => Math.max(...a);
-    check("issue #55: 床マーカー（100mm・2.2m・見下ろし）の best 解だけでは原点が p90 で 0.5m 以上飛ぶ（再現）", rawErr.length >= 250 && p90(rawErr) > 0.5, `n=${rawErr.length} p90=${p90(rawErr)?.toFixed(2)} max=${max(rawErr).toFixed(2)}`);
-    check("issue #55: 2 解から傾きの小さい方を重力で水平化すると原点の誤差が p90 < 0.15m・最大 < 0.3m", p90(leveledErr) < 0.15 && max(leveledErr) < 0.3, `p90=${p90(leveledErr)?.toFixed(2)} max=${max(leveledErr).toFixed(2)}`);
-  }
   // 合成カメラの投影: 正面の原点マーカーを距離 d から見ると、一辺 s·f/d [px] の正方形が中央に映る
   const bits = Array.from({ length: 6 }, (_, y) => Array.from({ length: 6 }, (_, x) => (x + y) % 2 === 0));
   const f = 320 / Math.tan((68 / 2) * (Math.PI / 180));
