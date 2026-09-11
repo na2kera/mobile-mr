@@ -5,6 +5,7 @@
 //   4. server/splatoon.ts — WebSocket の受け付け・shot の配信・state の配信（Vite dev サーバーを起動して叩く）
 // テストフレームワークは使わない（04〜07 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import WebSocket from "ws";
 import {
   BACK_ID,
@@ -60,7 +61,7 @@ import {
   withFloorDrop,
 } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField, parseFakeMarkersParam, projectFakeMarker, projectFakeMarkers } from "../src/shared/fake-markers.ts";
-import { Matrix4, Quaternion, Vector3 } from "three";
+import { Euler, Matrix4, Quaternion, Vector3 } from "three";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -338,6 +339,59 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const offset = transformPoint(lvl, floorPlacement.pos);
   const originFixed = [floorPlacement.pos[0] - offset[0], floorPlacement.pos[1] - offset[1], floorPlacement.pos[2] - offset[2]];
   check("水平化した回転で「マーカー中心 − R_level・pos」を取ると原点が合う（marker-anchor.ts の位置の式）", nearV(originFixed, [0, 0, 0]) && near(tiltDegOf(lvl, [0, 1, 0]), 0, 1e-9));
+
+  // ---- issue #55 の再現: 追加マーカーを見ていると「補正されている感がない」----
+  // 実機の幾何（立って壁から 2.2m、100mm の床マーカーを見下ろす = 画面上 30px 前後）で js-aruco2 の POSIT
+  // （marker-detector.ts が使うもの）に投影 + 角の画素ノイズ（決定的な乱数）を入れる。POSIT の表裏 2 解の
+  // 取り違えは原点マーカーでは位置に 3〜6cm しか効かないが、追加マーカーでは「マーカー → 原点」の腕の長さで
+  // 増幅され原点が 1〜2m 飛ぶ。issue #54 の水平化（worldUp）で同じ幾何が数 cm に収まることを確かめる
+  {
+    const require = createRequire(import.meta.url);
+    const { POS } = require("js-aruco2/src/posit1.js");
+    const MARKER_M = 0.1;
+    const focal = 960 / 2 / Math.tan((68 * Math.PI) / 180 / 2); // detW=960・標準カメラ（68°）
+    let seed = 12345;
+    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+    // marker-detector.ts と同じ変換（POSIT の +Z 前方 → three.js の -Z 前方）
+    const positToMatrix = (r, t) => new Matrix4().set(r[0][0], r[0][1], -r[0][2], t[0], r[1][0], r[1][1], -r[1][2], t[1], -r[2][0], -r[2][1], r[2][2], -t[2], 0, 0, 0, 1);
+    const validPose = (e, r, t) => e >= 0 && r.length === 3 && r.every((row) => row.length === 3 && row.every(Number.isFinite)) && t.length === 3 && t.every(Number.isFinite);
+    const standing = { id: 1, face: "floor", pos: [0, -1.2, 1.0] }; // 床（マーカーの高さ 1.2m）、壁から 1m
+    const standingM = new Matrix4().fromArray(markerToFieldMatrix(standing));
+    const cam = new Matrix4().compose(new Vector3(0, 0.3, 2.2), new Quaternion().setFromEuler(new Euler((-51 * Math.PI) / 180, 0, 0, "YXZ")), new Vector3(1, 1, 1));
+    const markerToCam = new Matrix4().multiplyMatrices(cam.clone().invert(), standingM);
+    const fieldInv = standingM.clone().invert();
+    const posit = new POS.Posit(MARKER_M, focal);
+    const h = MARKER_M / 2;
+    const rawErr = [];
+    const leveledErr = [];
+    for (let i = 0; i < 300; i++) {
+      const pts = [[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]].map(([x, y, z]) => {
+        const p = new Vector3(x, y, z).applyMatrix4(markerToCam);
+        return { x: (focal * p.x) / -p.z + 0.5 * gauss(), y: (focal * p.y) / -p.z + 0.5 * gauss() };
+      });
+      const pose = posit.pose(pts);
+      const sol = validPose(pose.bestError, pose.bestRotation, pose.bestTranslation)
+        ? positToMatrix(pose.bestRotation, pose.bestTranslation)
+        : validPose(pose.alternativeError, pose.alternativeRotation, pose.alternativeTranslation)
+          ? positToMatrix(pose.alternativeRotation, pose.alternativeTranslation)
+          : null;
+      if (!sol) continue;
+      // 従来: anchor→world = cam × solution × (marker→anchor)⁻¹（field = world なので真値は原点 0）
+      const markerWorld = new Matrix4().multiplyMatrices(cam, sol);
+      const anchorRaw = new Matrix4().multiplyMatrices(markerWorld, fieldInv);
+      rawErr.push(new Vector3().setFromMatrixPosition(anchorRaw).length());
+      // 水平化（marker-anchor.ts の worldUp の式）: 回転は levelRotation、位置は「マーカー中心 − R_level・pos」
+      const lvl2 = levelRotation(anchorRaw.toArray(), [0, 1, 0]);
+      const c = new Vector3().setFromMatrixPosition(markerWorld);
+      const off = transformPoint(lvl2, standing.pos);
+      leveledErr.push(Math.hypot(c.x - off[0], c.y - off[1], c.z - off[2]));
+    }
+    const p90 = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
+    const max = (a) => Math.max(...a);
+    check("issue #55: 100mm の床マーカーを立って 2.2m から見下ろすと、従来の変換では原点が p90 で 0.5m 以上飛ぶ（再現）", rawErr.length >= 250 && p90(rawErr) > 0.5, `n=${rawErr.length} p90=${p90(rawErr)?.toFixed(2)} max=${max(rawErr).toFixed(2)}`);
+    check("issue #55: 重力での水平化（issue #54 の worldUp）で同じ幾何の原点の誤差が p90 < 0.15m・最大 < 0.3m", p90(leveledErr) < 0.15 && max(leveledErr) < 0.3, `p90=${p90(leveledErr)?.toFixed(2)} max=${max(leveledErr).toFixed(2)}`);
+  }
   // 検証
   const ok = [
     { id: 1, face: "floor", pos: [0, -1, 0.75] },

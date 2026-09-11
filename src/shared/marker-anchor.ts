@@ -73,7 +73,7 @@ export type MarkerAnchorOptions = {
 export type MarkerAnchor = {
   /** 描画ループから毎フレーム呼ぶ。新しい映像フレームがあり間引き条件を満たせば検出する */
   update(now: number): void;
-  /** HUD 用（"id=0+1 err=0.03,0.05 spread=0.02m 18ms" / "lost (1.2s)" / "searching"） */
+  /** HUD 用（"id=0+1 err=0.03,0.05 spread=0.02m tilt=3deg Δ=0.02m 18ms" / "lost (1.2s)" / "searching"）。Δ は補正量（correctionM） */
   readonly info: string;
   /** 直近に観測を採用した時刻 [ms]。一度も無ければ -Infinity */
   readonly lastAcceptedMs: number;
@@ -90,6 +90,11 @@ export type MarkerAnchor = {
    * worldUp が無ければ 0。大きいほど「POSIT の傾き推定がずれていた（水平化で救った）」か「マーカーが傾いて貼ってある」
    */
   readonly tiltDeg: number;
+  /**
+   * 直近の採用で、観測がアンカーを動かそうとした距離 [m]（採用前のアンカーの位置と観測の差。issue #55「本当に補正されているか」の
+   * 診断用。追加マーカーを見ながら歩いて 0 のままなら補正していない）
+   */
+  readonly correctionM: number;
   /** lostMs 以内に観測を採用していれば true */
   isTracking(now: number, lostMs: number): boolean;
 };
@@ -130,6 +135,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     usedIds: [] as number[],
     spreadM: 0,
     tiltDeg: 0,
+    correctionM: 0,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
     },
@@ -225,6 +231,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     }
     targetPos.set(fused.pos[0], fused.pos[1], fused.pos[2]);
     targetQuat.set(fused.quat[0], fused.quat[1], fused.quat[2], fused.quat[3]);
+    self.correctionM = self.everDetected ? anchor.position.distanceTo(targetPos) : 0;
     const snap =
       !self.everDetected ||
       ((opts.canSnap?.() ?? true) &&
@@ -242,7 +249,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     self.usedIds = used.map((u) => u.id);
     self.spreadM = fused.spread;
     self.tiltDeg = maxTilt;
-    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""}${upArr ? ` tilt=${maxTilt.toFixed(0)}deg` : ""} ${self.detMs.toFixed(0)}ms`;
+    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""}${upArr ? ` tilt=${maxTilt.toFixed(0)}deg` : ""} Δ=${self.correctionM.toFixed(2)}m ${self.detMs.toFixed(0)}ms`;
   }
 
   return self;

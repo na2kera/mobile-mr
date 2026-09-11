@@ -22,8 +22,9 @@ import WebSocket from "ws";
 
 const CHROME =
   process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 5189;
-const CDP_PORT = 9336;
+// 別の worktree で同時に走らせるときは PORT / CDP_PORT で変える（同じポートだと相手のサーバーに繋がって別のコードを確認してしまう）
+const PORT = Number(process.env.PORT ?? "") || 5189;
+const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9336;
 /** ページを開いてから練習の HUD を読むまでの待ち [s]（起動 + 発射 2〜3 回） */
 const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 14;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s]（カウントダウン 1s + 発射 3〜4 回） */
@@ -157,6 +158,8 @@ function parseHud(hud) {
     spread: Number(hud.match(/spread=([\d.]+)m/)?.[1] ?? 0),
     /** 水平化する前のアンカーの傾き [deg]（worldUp があるときだけ HUD に出る） */
     tilt: hud.match(/tilt=([\d.]+)deg/) ? Number(hud.match(/tilt=([\d.]+)deg/)[1]) : null,
+    /** 直近の観測がアンカーを動かした距離 [m]（"Δ=0.02m"。補正量。issue #55） */
+    correction: Number(hud.match(/Δ=([\d.]+)m/)?.[1] ?? NaN),
     tracking: /marker=id=/.test(hud) && !/holding last pose/.test(hud),
     layout: hud.match(/layout=(\S+)/)?.[1] ?? "",
     self: self && self.length === 3 && self.every(Number.isFinite) ? self : null,
@@ -519,6 +522,7 @@ try {
   const ov4 = await readOverview();
   check("俯瞰画面でも 4 つ目の端末は床のマーカー（1）で位置合わせしていると見える", ov4.peerMarkers[h4.me] === "1", JSON.stringify(ov4.peerMarkers));
   check("フェイクカメラでは重力での水平化が既定 on（HUD に gravityAlign=1 と tilt=）", /gravityAlign=1/.test(await p4.eval("document.querySelector('#hud').textContent")) && h4.tilt !== null && h4.tilt < 5, `tilt=${h4.tilt}`);
+  check("HUD の marker= に補正量 Δ=（その観測がアンカーを動かした距離）が出る（issue #55 の診断表示）", Number.isFinite(h4.correction), `Δ=${h4.correction}`);
 
   // ---- 重力での水平化（issue #54）: 原点マーカーを 25° 傾けて描き（POSIT の傾き誤差 or 傾いて貼った状態）、
   // 水平化あり（既定）なら field は水平のままで自分の位置が合い、なし（?gravityAlign=0）なら傾きのぶん位置がずれる ----
