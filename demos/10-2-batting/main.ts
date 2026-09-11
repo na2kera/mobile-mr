@@ -25,7 +25,7 @@ import {
   type MarkerAnchor,
 } from "../../src/shared/marker-anchor";
 import { markerBits } from "../../src/shared/marker-detector";
-import { markerToFieldMatrix } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, markerToFieldMatrix } from "../../src/shared/marker-layout";
 import {
   drawProjectedMarkers,
   fakeCameraToField,
@@ -70,7 +70,8 @@ const FOV_FIXED =
 const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
 const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
 const CAM_RES = resolutionParam("camRes", [1280, 720]);
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+/** マーカーの一辺 [mm]。既定は 08 の印刷ページと同じ DEFAULT_MARKER_MM（issue #54） */
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_SIZE_M = MARKER_MM / 1000;
 const MARKER_ID = Math.round(
   numParam("markerId", 0, { min: 0, max: 249 }),
@@ -104,6 +105,8 @@ const FAKE_ACTION_SEC = params.has("fakeAction")
   ? numParam("fakeAction", 0.6, { min: 0.05, max: 10 })
   : null;
 const touch = isTouchDevice();
+/** 重力でアンカーを水平に直す（issue #54。08 と同じ。ジャイロとフェイクカメラで既定 on、PC + 実カメラでは off。?gravityAlign=0/1） */
+const GRAVITY_ALIGN = params.has("gravityAlign") ? params.get("gravityAlign") !== "0" : touch || FAKE_CAM;
 
 let lastHudText = "";
 startRemoteLog({
@@ -270,6 +273,8 @@ function fakeStream(): MediaStream {
     { width: FAKE_W, height: FAKE_H },
   );
 }
+/** marker-anchor.ts の worldUp に返す「上」（毎回作らず使い回す） */
+const worldUpVec = new THREE.Vector3();
 async function startCamera(onProgress: (step: string) => void) {
   passthrough = await startPassthrough(
     scene,
@@ -298,6 +303,9 @@ async function startCamera(onProgress: (step: string) => void) {
     camHFovDeg: () => passthrough!.camHFovDeg,
     resnapAfterMs: 2000,
     snapDistanceM: 0.3,
+    // ジャイロならワールドの Y が重力の上。フェイクカメラは水平に正面を向いている（fakeCameraToField の pitch=0）ので
+    // 「合成カメラから見た上」= 仮想カメラの Y をワールドへ回したもの
+    worldUp: () => (GRAVITY_ALIGN ? (FAKE_CAM ? worldUpVec.set(0, 1, 0).transformDirection(camera.matrixWorld) : worldUpVec.set(0, 1, 0)) : null),
   });
 }
 
@@ -748,7 +756,7 @@ nameForm.addEventListener("submit", (event) => {
   const name = readName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} markerMm=${MARKER_MM} detW=${MARKER_DET_W}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} markerMm=${MARKER_MM} detW=${MARKER_DET_W} gravityAlign=${GRAVITY_ALIGN ? 1 : 0}`;
   connect(name);
   runStartFlow(touch, {
     onSensor: (status) => {
