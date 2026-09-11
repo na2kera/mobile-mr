@@ -15,7 +15,7 @@ import { setupPlayerNameField } from "../../src/shared/player-name";
 import { createMarkerAnchor } from "../../src/shared/marker-anchor";
 import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
 import { markerBits } from "../../src/shared/marker-detector";
-import { FACE_LABELS, MARKER_FACES, describeMarkers, markerToFieldMatrix } from "../../src/shared/marker-layout";
+import { FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, transformDirection } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
 import type { FakeMarker } from "../../src/shared/fake-markers";
@@ -64,7 +64,10 @@ import { createSplatSound } from "./splat-sound";
 //     対戦中は視界の上に自分の塗り率と順位を大きく出す（issue #32「パーセント表示がもう少し大きく」）
 //   - マルチマーカー（issue #30）: 正面のマーカー（原点）に加えて床・左右・背面の壁に貼った追加マーカーの配置を
 //     俯瞰画面から配り、どれが見えてもアンカー（原点の姿勢）に直す（marker-anchor.ts の extraMarkers）。
-//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ
+//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ。
+//     追加マーカーから出した原点は POSIT の表裏 2 解の取り違えで 1〜2m 飛ぶので（issue #55）、マーカーは水平 / 鉛直に
+//     貼ってある前提で観測の傾きを重力（DeviceOrientation のワールド +Y）に合わせて直す（marker-anchor.ts の level）。
+//     HUD の marker= に tilt=（直す前の傾き）と Δ=（その観測がアンカーを動かした距離 = 補正量）を出す
 //   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
 //     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
 //   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
@@ -85,6 +88,8 @@ const MARKER_DET_W = numParam("detW", 960, { min: 64, max: 4096 });
 const MARKER_SMOOTH = numParam("smooth", 0.5, { min: 0.01, max: 1 });
 const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000 });
 const MARKER_LOST_MS = numParam("lostMs", 500, { min: 50, max: 10000 });
+/** 重力で水平化する前の傾きの上限 [deg]（issue #55。超える観測は捨てる。0 で水平化しない = 従来どおり） */
+const MARKER_MAX_TILT = numParam("maxTilt", 30, { min: 0, max: 90 });
 
 const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
@@ -500,6 +505,20 @@ function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
   }
   return { markers, camToField: fakeCameraToField(pos, FAKE_YAW, FAKE_PITCH) };
 }
+/** フェイクカメラの field → カメラ座標系（水平化のワールド上向きに使う。姿勢は URL で固定なので 1 回だけ計算） */
+const fakeFieldToCam: number[] | null = FAKE_CAM ? invertRigid(fakeWorld().camToField) : null;
+const worldUpVec = new THREE.Vector3();
+/**
+ * 水平化（issue #55）に使うワールドの鉛直上。実機は DeviceOrientation のワールド +Y そのもの。
+ * フェイクカメラは映像の姿勢（fakePitch / fakeYaw）が仮想カメラ（OrbitControls）と違うので、
+ * 映像の中の「上」（field の +Y をフェイクカメラ座標系に直したもの）を仮想カメラの姿勢でワールドに回す
+ */
+function worldUpForLeveling(): V3 {
+  if (!fakeFieldToCam) return [0, 1, 0];
+  const up = transformDirection(fakeFieldToCam, [0, 1, 0]);
+  worldUpVec.set(up[0], up[1], up[2]).transformDirection(camera.matrixWorld);
+  return [worldUpVec.x, worldUpVec.y, worldUpVec.z];
+}
 function fakeStream(): MediaStream {
   const world = fakeWorld();
   return createFakeCameraStream(
@@ -543,6 +562,8 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     // 連射中にフィールドが飛ぶと発射の向きがずれるので lerp だけ
     // 発射間隔（250ms）よりわずかに長く。連射の合間には再スナップできる
     canSnap: () => performance.now() - lastShotMs > 300,
+    // 重力で水平化（issue #55）。原点は壁のマーカーなのでアンカーの +Y が鉛直上
+    level: MARKER_MAX_TILT > 0 ? { anchorUp: [0, 1, 0], maxTiltDeg: MARKER_MAX_TILT, worldUp: worldUpForLeveling } : undefined,
   });
 }
 
@@ -1332,7 +1353,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms maxTilt=${MARKER_MAX_TILT} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

@@ -5,6 +5,7 @@
 //   4. server/splatoon.ts — WebSocket の受け付け・shot の配信・state の配信（Vite dev サーバーを起動して叩く）
 // テストフレームワークは使わない（04〜07 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import WebSocket from "ws";
 import {
   BACK_ID,
@@ -49,16 +50,18 @@ import {
   describeMarkers,
   fusePoseCandidates,
   invertRigid,
+  levelPose,
   markerAxes,
   markerToFieldMatrix,
   mulMat4,
   suggestedMarkerPos,
+  transformDirection,
   transformPoint,
   validateMarkerLayout,
   withFloorDrop,
 } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField, parseFakeMarkersParam, projectFakeMarker, projectFakeMarkers } from "../src/shared/fake-markers.ts";
-import { Matrix4, Quaternion, Vector3 } from "three";
+import { Euler, Matrix4, Quaternion, Vector3 } from "three";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -315,6 +318,92 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("withFloorDrop: 床のマーカーだけ高さが追従する", JSON.stringify(withFloorDrop(ok, 0.8)) === JSON.stringify([{ id: 1, face: "floor", pos: [0, -0.8, 0.75] }, ok[1]]));
   check("suggestedMarkerPos: 床は床の高さ・コートの中央、左右は壁の位置、背面は奥", nearV(suggestedMarkerPos("floor", cfg), [0, -1, 0.75]) && nearV(suggestedMarkerPos("left", cfg), [-1, 0, 0.75]) && nearV(suggestedMarkerPos("right", cfg), [1, 0, 0.75]) && nearV(suggestedMarkerPos("back", cfg), [0, 0, 1.5]));
   check("describeMarkers", describeMarkers(ok) === "1:floor,2:left" && describeMarkers([]) === "-");
+
+  // ---- 重力による水平化（issue #55）----
+  {
+    const UP = [0, 1, 0];
+    const deg = (d) => (d * Math.PI) / 180;
+    const rotX = (a) => [1, 0, 0, 0, 0, Math.cos(a), Math.sin(a), 0, 0, -Math.sin(a), Math.cos(a), 0, 0, 0, 0, 1];
+    const rotY = (a) => [Math.cos(a), 0, -Math.sin(a), 0, 0, 1, 0, 0, Math.sin(a), 0, Math.cos(a), 0, 0, 0, 0, 1];
+    const withT = (m, t) => { const o = m.slice(); o[12] = t[0]; o[13] = t[1]; o[14] = t[2]; return o; };
+    const level0 = levelPose(withT(rotY(deg(30)), [1, 2, 3]), [0, 0, 5], UP, UP);
+    check("levelPose: 水平な姿勢（ヨーだけ）はそのまま、tilt=0", near(level0.tiltDeg, 0) && level0.matrix.every((v, i) => near(v, withT(rotY(deg(30)), [1, 2, 3])[i])));
+    // 原点（アンカー）から 1.5m 先のマーカー中心（pivot）のまわりに X 軸で 20° 傾いた観測を直す
+    const pivot = [0, -1.2, 1.0];
+    const tilted = mulMat4(withT(rotX(deg(20)), pivot), withT(rotX(0), [-pivot[0], -pivot[1], -pivot[2]])); // pivot まわりの 20° 回転 × 単位
+    const lv = levelPose(tilted, pivot, UP, UP);
+    const upAfter = transformDirection(lv.matrix, UP);
+    check("levelPose: 20° 傾いた観測の tilt が 20°、直した後の上軸が鉛直", near(lv.tiltDeg, 20, 1e-9) && nearV(upAfter, UP, 1e-9), `tilt=${lv.tiltDeg} up=${upAfter}`);
+    check("levelPose: 直した後は元の（傾いていない）姿勢に戻る = 原点の位置も戻る（腕の長さぶん動く）", lv.matrix.every((v, i) => near(v, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1][i], 1e-9)), JSON.stringify(lv.matrix.slice(12, 15)));
+    // pivot は動かない（マーカーの位置は信用する）
+    const pivotLocal = transformPoint(invertRigid(tilted), pivot);
+    check("levelPose: pivot（マーカー中心）は直す前後で同じワールド位置", nearV(transformPoint(lv.matrix, pivotLocal), pivot, 1e-9));
+    // 一般の向き: 直した後の上軸は worldUp、回転は正規直交
+    const gen = levelPose(withT(mulMat4(rotY(deg(40)), rotX(deg(35))), [0.3, 0.1, -0.2]), [0.5, -0.5, 0.5], UP, [0.05, 1, -0.02]);
+    const wu = [0.05, 1, -0.02].map((v) => v / Math.hypot(0.05, 1, -0.02));
+    const gx = transformDirection(gen.matrix, [1, 0, 0]);
+    const gy = transformDirection(gen.matrix, [0, 1, 0]);
+    check("levelPose: 一般の向きでも上軸が worldUp（IMU の向き）に一致し、回転は正規直交のまま", nearV(gy, wu, 1e-9) && near(Math.hypot(...gx), 1, 1e-9) && near(gx[0] * gy[0] + gx[1] * gy[1] + gx[2] * gy[2], 0, 1e-9));
+    const flipped = levelPose(withT(rotX(Math.PI), [0, 0, 0]), [0, 0, 1], UP, UP);
+    check("levelPose: 真逆（180°）でも有限の行列と tilt=180 を返す", near(flipped.tiltDeg, 180, 1e-9) && flipped.matrix.every(Number.isFinite) && nearV(transformDirection(flipped.matrix, UP), UP, 1e-9));
+    // three.js との整合（marker-anchor.ts は Matrix4.toArray / fromArray で受け渡す）
+    const m3 = new Matrix4().fromArray(tilted);
+    const lv3 = levelPose(m3.toArray(), pivot, UP, UP);
+    check("levelPose: three.js の toArray / fromArray で受け渡しても同じ", lv3.matrix.every((v, i) => near(v, lv.matrix[i], 1e-12)));
+  }
+
+  // ---- issue #55 の再現: 実機の幾何で追加マーカーから出した原点が POSIT の 2 解の取り違えで飛び、水平化で直る ----
+  // js-aruco2 の POSIT（marker-detector.ts が使うもの）に、ピンホール投影 + 角の画素ノイズ（決定的な乱数）を入れて回す
+  {
+    const require = createRequire(import.meta.url);
+    const { POS } = require("js-aruco2/src/posit1.js");
+    const MARKER_M = 0.1;
+    const focal = 960 / 2 / Math.tan(deg(68) / 2); // detW=960・標準カメラ（68°）
+    let seed = 12345;
+    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+    // marker-detector.ts の positToMatrix と同じ変換（POSIT の +Z 前方 → three.js の -Z 前方）
+    const positToMatrix = (r, t) => new Matrix4().set(r[0][0], r[0][1], -r[0][2], t[0], r[1][0], r[1][1], -r[1][2], t[1], -r[2][0], -r[2][1], r[2][2], -t[2], 0, 0, 0, 1);
+    const validPose = (e, r, t) => e >= 0 && r.length === 3 && r.every((row) => row.length === 3 && row.every(Number.isFinite)) && t.length === 3 && t.every(Number.isFinite);
+    function deg(d) { return (d * Math.PI) / 180; }
+    /** 立って（床から 1.5m）壁から 2.2m、床のマーカー（壁から 1m、マーカーの高さ 1.2m）を見下ろす */
+    const floorM = new Matrix4().fromArray(markerToFieldMatrix({ id: 1, face: "floor", pos: [0, -1.2, 1.0] }));
+    const cam = new Matrix4().compose(new Vector3(0, 0.3, 2.2), new Quaternion().setFromEuler(new Euler(deg(-51), 0, 0, "YXZ")), new Vector3(1, 1, 1));
+    const camInv = cam.clone().invert();
+    const markerToCam = new Matrix4().multiplyMatrices(camInv, floorM);
+    const fieldInv = floorM.clone().invert();
+    const posit = new POS.Posit(MARKER_M, focal);
+    const h = MARKER_M / 2;
+    const rawErr = [];
+    const leveledErr = [];
+    for (let i = 0; i < 300; i++) {
+      const pts = [[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]].map(([x, y, z]) => {
+        const p = new Vector3(x, y, z).applyMatrix4(markerToCam);
+        return { x: (focal * p.x) / -p.z + 0.5 * gauss(), y: (focal * p.y) / -p.z + 0.5 * gauss() };
+      });
+      const pose = posit.pose(pts);
+      const sols = [];
+      if (validPose(pose.bestError, pose.bestRotation, pose.bestTranslation)) sols.push(positToMatrix(pose.bestRotation, pose.bestTranslation));
+      if (validPose(pose.alternativeError, pose.alternativeRotation, pose.alternativeTranslation)) sols.push(positToMatrix(pose.alternativeRotation, pose.alternativeTranslation));
+      if (sols.length === 0) continue;
+      // marker-anchor.ts の anchorFromSolution と同じ: anchor→world = cam × solution × (marker→anchor)⁻¹。field = world なので真値は単位行列
+      const anchorOf = (m) => new Matrix4().multiplyMatrices(cam, m).multiply(fieldInv);
+      const originErr = (aw) => new Vector3().setFromMatrixPosition(aw).length();
+      rawErr.push(originErr(anchorOf(sols[0])));
+      let best = null;
+      for (const sol of sols) {
+        const mw = new Matrix4().multiplyMatrices(cam, sol);
+        const c = new Vector3().setFromMatrixPosition(mw);
+        const lv = levelPose(anchorOf(sol).toArray(), [c.x, c.y, c.z], [0, 1, 0], [0, 1, 0]);
+        if (!best || lv.tiltDeg < best.tiltDeg) best = lv;
+      }
+      leveledErr.push(originErr(new Matrix4().fromArray(best.matrix)));
+    }
+    const p90 = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length * 0.9)];
+    const max = (a) => Math.max(...a);
+    check("issue #55: 床マーカー（100mm・2.2m・見下ろし）の best 解だけでは原点が p90 で 0.5m 以上飛ぶ（再現）", rawErr.length >= 250 && p90(rawErr) > 0.5, `n=${rawErr.length} p90=${p90(rawErr)?.toFixed(2)} max=${max(rawErr).toFixed(2)}`);
+    check("issue #55: 2 解から傾きの小さい方を重力で水平化すると原点の誤差が p90 < 0.15m・最大 < 0.3m", p90(leveledErr) < 0.15 && max(leveledErr) < 0.3, `p90=${p90(leveledErr)?.toFixed(2)} max=${max(leveledErr).toFixed(2)}`);
+  }
   // 合成カメラの投影: 正面の原点マーカーを距離 d から見ると、一辺 s·f/d [px] の正方形が中央に映る
   const bits = Array.from({ length: 6 }, (_, y) => Array.from({ length: 6 }, (_, x) => (x + y) % 2 === 0));
   const f = 320 / Math.tan((68 / 2) * (Math.PI / 180));

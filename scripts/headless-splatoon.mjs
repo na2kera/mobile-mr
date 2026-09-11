@@ -22,8 +22,9 @@ import WebSocket from "ws";
 
 const CHROME =
   process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 5189;
-const CDP_PORT = 9336;
+// 別の worktree で同時に走らせるときは PORT / CDP_PORT で変える（同じポートだと相手のサーバーに繋がって別のコードを確認してしまう）
+const PORT = Number(process.env.PORT ?? "") || 5189;
+const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9336;
 /** ページを開いてから練習の HUD を読むまでの待ち [s]（起動 + 発射 2〜3 回） */
 const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 14;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s]（カウントダウン 1s + 発射 3〜4 回） */
@@ -151,6 +152,10 @@ function parseHud(hud) {
     /** 位置合わせに使っている ID の集合（"id=0+5" → {0, 5}） */
     markerIds: new Set((hud.match(/marker=id=([\d+]+)/)?.[1] ?? "").split("+").filter(Boolean).map(Number)),
     spread: Number(hud.match(/spread=([\d.]+)m/)?.[1] ?? 0),
+    /** 水平化（issue #55）前の傾き [deg]（マーカーごと。"tilt=3,8°" → [3, 8]） */
+    tilts: (hud.match(/tilt=([\d,]+)°/)?.[1] ?? "").split(",").filter(Boolean).map(Number),
+    /** 直近の観測がアンカーを動かした距離 [m]（"Δ=0.02m"。補正量） */
+    correction: Number(hud.match(/Δ=([\d.]+)m/)?.[1] ?? NaN),
     tracking: /marker=id=/.test(hud) && !/holding last pose/.test(hud),
     layout: hud.match(/layout=(\S+)/)?.[1] ?? "",
     self: self && self.length === 3 && self.every(Number.isFinite) ? self : null,
@@ -510,6 +515,9 @@ try {
   const self4err = h4.self ? Math.hypot(h4.self[0] - 0.15, h4.self[1] + 0.5, h4.self[2] - 0.75) : Infinity;
   check("床のマーカーから出した自分の位置がフェイクカメラの位置 (0.15,-0.5,0.75) に 8cm 以内で一致", self4err < 0.08, `self=${JSON.stringify(h4.self)} err=${self4err.toFixed(3)}m`);
   check("床のマーカーだけの端末も入室して連射が受理される", h4.me.startsWith("p") && h4.accepted >= 2 && h4.phase === "practice", `${h4.sent}/${h4.accepted}`);
+  // 水平化（issue #55）: 見下ろすフェイクカメラでも「映像の中の上」をワールドに直して渡しているので、傾きはほぼ 0 で棄却されない
+  check("床のマーカーの観測の傾き（tilt=）が 5° 未満で、補正量（Δ=）が HUD に出ている", h4.tilts.length === 1 && h4.tilts[0] < 5 && Number.isFinite(h4.correction), `tilts=${JSON.stringify(h4.tilts)} Δ=${h4.correction}`);
+  check("2 枚同時のウィンドウ 1 も両方の傾きが 5° 未満", mk1.tilts.length === 2 && mk1.tilts.every((t) => t < 5), `tilts=${JSON.stringify(mk1.tilts)}`);
   const ov4 = await readOverview();
   check("俯瞰画面でも 4 つ目の端末は床のマーカー（1）で位置合わせしていると見える", ov4.peerMarkers[h4.me] === "1", JSON.stringify(ov4.peerMarkers));
 

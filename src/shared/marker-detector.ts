@@ -27,6 +27,12 @@ export type MarkerObservation = {
   error: number;
   /** 検出画像上のマーカーの平均辺長 [px]（大きいほど近く、姿勢の精度が良い。複数マーカーの重み付けに使う） */
   sidePx: number;
+  /**
+   * 平面 POSIT のもう 1 つの解（表裏の曖昧さ。誤差が大きい方）。両方が有効なときだけ付く。
+   * マーカーが小さく映るとき 2 解の再投影誤差はほぼ同じで、matrix の方が正しい保証は無い（面の傾きの取り違え）。
+   * 呼び出し側が別の知識（重力の向き等。marker-anchor.ts の level）で選び直すために残す
+   */
+  alternative?: { matrix: THREE.Matrix4; error: number };
 };
 
 export interface MarkerDetector {
@@ -99,6 +105,33 @@ function pickValidPose(
 }
 
 /**
+ * POSIT の回転・並進を three.js のカメラ座標系での姿勢（マーカー → カメラ）に直す。
+ * POSIT のカメラ座標系は +Z が前方（奥）、three.js は -Z が前方。
+ * F=diag(1,1,-1) で M = F・[R|t]・F と挟んで変換する（行3・列3の符号反転。
+ * 右手系のまま保たれ、マーカー面の +Z が視点側を向くローカル系になる）
+ */
+function positToMatrix(r: number[][], t: number[]): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    r[0][0],
+    r[0][1],
+    -r[0][2],
+    t[0],
+    r[1][0],
+    r[1][1],
+    -r[1][2],
+    t[1],
+    -r[2][0],
+    -r[2][1],
+    r[2][2],
+    -t[2],
+    0,
+    0,
+    0,
+    1,
+  );
+}
+
+/**
  * マーカー検出器を作る。返り値の detect() に画像を渡すと、検出した各マーカーの
  * ID・角座標・カメラ座標系での姿勢（検証済みのもののみ）を返す
  * @param markerSizeM マーカー（黒い正方形）の一辺の実寸 [m]。姿勢の並進のスケールを決める
@@ -129,42 +162,13 @@ export function createMarkerDetector(markerSizeM: number): MarkerDetector {
           y: image.height / 2 - c.y,
         }));
         const pose = posit.pose(centered);
-        // best が無効なら alternative を試し、両方無効ならこの観測は返さない
-        // （pickValidPose のコメント参照）
-        const valid =
-          pickValidPose(
-            pose.bestError,
-            pose.bestRotation,
-            pose.bestTranslation,
-          ) ??
-          pickValidPose(
-            pose.alternativeError,
-            pose.alternativeRotation,
-            pose.alternativeTranslation,
-          );
-        if (!valid) continue;
-        const { r, t } = valid;
-        // POSIT のカメラ座標系は +Z が前方（奥）、three.js は -Z が前方。
-        // F=diag(1,1,-1) で M = F・[R|t]・F と挟んで変換する（行3・列3の符号反転。
-        // 右手系のまま保たれ、マーカー面の +Z が視点側を向くローカル系になる）
-        const matrix = new THREE.Matrix4().set(
-          r[0][0],
-          r[0][1],
-          -r[0][2],
-          t[0],
-          r[1][0],
-          r[1][1],
-          -r[1][2],
-          t[1],
-          -r[2][0],
-          -r[2][1],
-          r[2][2],
-          -t[2],
-          0,
-          0,
-          0,
-          1,
-        );
+        // 有効な解を best → alternative の順に集める。両方無効ならこの観測は返さない
+        // （pickValidPose のコメント参照）。2 つ目は alternative として添える（issue #55）
+        const valids = [
+          pickValidPose(pose.bestError, pose.bestRotation, pose.bestTranslation),
+          pickValidPose(pose.alternativeError, pose.alternativeRotation, pose.alternativeTranslation),
+        ].filter((v): v is NonNullable<typeof v> => v !== null);
+        if (valids.length === 0) continue;
         // 正規化誤差: ピクセル和 ÷ マーカーの画面上の平均辺長（型コメント参照）
         let perimeter = 0;
         for (let i = 0; i < 4; i++) {
@@ -173,12 +177,15 @@ export function createMarkerDetector(markerSizeM: number): MarkerDetector {
           perimeter += Math.hypot(b.x - a.x, b.y - a.y);
         }
         const sidePx = perimeter / 4;
+        const normalized = (error: number) => (sidePx > 0 ? error / sidePx : Infinity);
+        const [primary, secondary] = valids;
         observations.push({
           id: marker.id,
           corners: marker.corners,
-          matrix,
-          error: sidePx > 0 ? valid.error / sidePx : Infinity,
+          matrix: positToMatrix(primary.r, primary.t),
+          error: normalized(primary.error),
           sidePx,
+          ...(secondary ? { alternative: { matrix: positToMatrix(secondary.r, secondary.t), error: normalized(secondary.error) } } : {}),
         });
       }
       return observations;

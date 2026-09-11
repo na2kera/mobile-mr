@@ -217,3 +217,62 @@ export function fusePoseCandidates(candidates: readonly PoseCandidate[]): { pos:
     spread,
   };
 }
+
+// ---- 重力による水平化（issue #55。marker-anchor.ts から使う） ----
+
+/** 回転 + 並進の 4x4（列優先）で方向ベクトルを変換する（並進は掛けない） */
+export function transformDirection(m: number[], d: V3): V3 {
+  return [m[0] * d[0] + m[4] * d[1] + m[8] * d[2], m[1] * d[0] + m[5] * d[1] + m[9] * d[2], m[2] * d[0] + m[6] * d[1] + m[10] * d[2]];
+}
+
+/**
+ * 観測した姿勢（anchor → world の 4x4、列優先）の「アンカー座標系で鉛直上を向くはずの軸（anchorUp）」を、
+ * ワールドの鉛直上（worldUp。DeviceOrientation 由来のカメラ姿勢ではワールドの +Y）に最短の回転で合わせる。
+ * 回転はマーカーの中心 pivot（ワールド）のまわりに掛ける = マーカーの位置は信用し、傾きだけ直す。
+ *
+ * 背景: 平面マーカーの POSIT は表裏 2 解の取り違え（面の傾きの誤り）が起きやすい。原点マーカーではマーカー自身が
+ * 原点なので位置にほとんど効かないが、追加マーカーでは「マーカー → 原点」の腕の長さ（1〜2m）で増幅されて原点が
+ * 1〜2m 飛ぶ（Node の実験: 100mm の床マーカーを立って見る幾何で p90 1.9m → 水平化で 0.05m）。
+ * 「マーカーは水平 / 鉛直に貼ってある」前提が使える場では、傾きは IMU の重力の方が POSIT より信用できる。
+ *
+ * @returns matrix 直した姿勢、tiltDeg 直す前の傾き [deg]（2 解の選択と、大きすぎる観測の棄却に使う）
+ */
+export function levelPose(anchorWorld: number[], pivot: V3, anchorUp: V3, worldUp: V3): { matrix: number[]; tiltDeg: number } {
+  const a = normalize(transformDirection(anchorWorld, anchorUp));
+  const b = normalize(worldUp);
+  const c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const tiltDeg = (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI;
+  let r: number[]; // 3x3 行優先 [r00, r01, r02, r10, ...]
+  let v = cross(a, b);
+  const s2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+  if (s2 < 1e-18) {
+    if (c > 0) return { matrix: anchorWorld.slice(), tiltDeg };
+    // 真逆（180°）: a に直交する任意の軸で 180° 回す（棄却される傾きだが、有限の行列は返す）
+    const axis = normalize(Math.abs(a[0]) < 0.9 ? cross(a, [1, 0, 0]) : cross(a, [0, 1, 0]));
+    const [x, y, z] = axis;
+    r = [2 * x * x - 1, 2 * x * y, 2 * x * z, 2 * x * y, 2 * y * y - 1, 2 * y * z, 2 * x * z, 2 * y * z, 2 * z * z - 1];
+  } else {
+    // Rodrigues: R = I + [v]x + [v]x^2 (1 - c) / |v|^2
+    const k = (1 - c) / s2;
+    const [x, y, z] = v;
+    r = [
+      1 + k * (-y * y - z * z), -z + k * x * y, y + k * x * z,
+      z + k * x * y, 1 + k * (-x * x - z * z), -x + k * y * z,
+      -y + k * x * z, x + k * y * z, 1 + k * (-x * x - y * y),
+    ];
+  }
+  // 回転 R をワールドで左から掛け（R × M）、並進は pivot のまわりに回す: t' = R (t - pivot) + pivot
+  const rot4 = [r[0], r[3], r[6], 0, r[1], r[4], r[7], 0, r[2], r[5], r[8], 0, 0, 0, 0, 1];
+  const out = mulMat4(rot4, anchorWorld);
+  const d: V3 = [anchorWorld[12] - pivot[0], anchorWorld[13] - pivot[1], anchorWorld[14] - pivot[2]];
+  const rd = transformDirection(rot4, d);
+  out[12] = rd[0] + pivot[0];
+  out[13] = rd[1] + pivot[1];
+  out[14] = rd[2] + pivot[2];
+  return { matrix: out, tiltDeg };
+}
+
+function normalize(v: V3): V3 {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
+}
