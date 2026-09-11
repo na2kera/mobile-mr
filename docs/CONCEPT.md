@@ -88,7 +88,7 @@ React / Next.jsなどは最初は使用しない。
 - **カメラ**: MediaDevices API / getUserMedia()
 - **スマホセンサー**: DeviceOrientation API / DeviceMotion API
 - **Computer Vision**: MediaPipe Tasks Vision（Hand Tracking / Pose・Body Tracking）
-- **空間認識**: 初期は QR / AR Marker、将来は WebXR Anchors / WebXR Hit Test / SLAM系技術の検討
+- **空間認識**: 初期は QR / AR Marker、将来は WebXR Anchors / WebXR Hit Test / SLAM系技術の検討（iPhone の計測アプリ相当のことがブラウザでできるかの調査は [browser-measure-notes.md](./browser-measure-notes.md)。2026-09-11 時点: iOS Safari では不可、Android Chrome は WebXR hit-test で可、当面はマーカーを定規に使う）
 - **Multiplayer**: 初期は WebSocket、将来は WebRTC DataChannel
 
 通信の使い分けイメージ：
