@@ -49,10 +49,12 @@ import {
   describeMarkers,
   fusePoseCandidates,
   invertRigid,
+  levelRotation,
   markerAxes,
   markerToFieldMatrix,
   mulMat4,
   suggestedMarkerPos,
+  tiltDegOf,
   transformPoint,
   validateMarkerLayout,
   withFloorDrop,
@@ -299,6 +301,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ]);
   check("fusePoseCandidates: 0° と 90°（Y）の等重み → 45°", rot && near(rot.quat[1], Math.sin(Math.PI / 8), 1e-9) && near(rot.quat[3], Math.cos(Math.PI / 8), 1e-9));
   check("fusePoseCandidates: 空なら null、重み 0 だけでも null", fusePoseCandidates([]) === null && fusePoseCandidates([{ pos: [0, 0, 0], quat: [0, 0, 0, 1], weight: 0 }]) === null);
+  // 重力での水平化（issue #54）: X 軸まわりに 25° 傾いた壁マーカーの姿勢（POSIT の傾き誤差 or 傾いて貼った）を
+  // Y = 上に直し、ヨー（Y まわり）は保つ
+  const rotX = (deg) => {
+    const t = (deg * Math.PI) / 180;
+    return [1, 0, 0, 0, 0, Math.cos(t), Math.sin(t), 0, 0, -Math.sin(t), Math.cos(t), 0, 0, 0, 0, 1];
+  };
+  const rotY = (deg) => {
+    const t = (deg * Math.PI) / 180;
+    return [Math.cos(t), 0, -Math.sin(t), 0, 0, 1, 0, 0, Math.sin(t), 0, Math.cos(t), 0, 0, 0, 0, 1];
+  };
+  const tilted = mulMat4(rotY(30), rotX(25));
+  check("tiltDegOf: X 軸まわりに 25° 傾けた回転の Y 軸は上から 25°、水平なら 0", near(tiltDegOf(tilted, [0, 1, 0]), 25, 1e-9) && near(tiltDegOf(rotY(30), [0, 1, 0]), 0, 1e-9));
+  const leveled = levelRotation(tilted, [0, 1, 0]);
+  const yaw30 = rotY(30);
+  check("levelRotation: Y 軸が (0,1,0) になり、ヨー 30° は保たれる（= rotY(30)）", leveled.every((v, i) => near(v, yaw30[i], 1e-9)));
+  check("levelRotation: 並進は 0（位置は呼び出し側が決める）", leveled[12] === 0 && leveled[13] === 0 && leveled[14] === 0 && leveled[15] === 1);
+  // 上が (0,1,0) でない（フェイクカメラで合成カメラが傾いている）場合も、その up に Y を揃える
+  const upTilt = [0, Math.cos(0.3), Math.sin(0.3)];
+  const leveled2 = levelRotation(rotX(40), upTilt);
+  check("levelRotation: 任意の up に Y を揃え、X・Y・Z が右手系の単位直交ベクトル", near(tiltDegOf(leveled2, upTilt), 0, 1e-9) && near(Math.hypot(leveled2[0], leveled2[1], leveled2[2]), 1, 1e-9) && near(leveled2[0] * leveled2[8] + leveled2[1] * leveled2[9] + leveled2[2] * leveled2[10], 0, 1e-9));
+  // Z が up と平行（傾き 90° の異常値）でも壊れず、X 軸から向きを作る
+  const degenerate = levelRotation(rotX(90), [0, 1, 0]);
+  check("levelRotation: Z が up と平行でも直交系を返す（X 軸で代用）", degenerate.every(Number.isFinite) && near(tiltDegOf(degenerate, [0, 1, 0]), 0, 1e-9) && near(Math.hypot(degenerate[8], degenerate[9], degenerate[10]), 1, 1e-9));
+  // 床マーカーから原点を出す: 床マーカーの姿勢に傾き誤差があっても、水平化した回転で「マーカー中心 − R・pos」を取れば原点が合う
+  const floorPlacement = { id: 1, face: "floor", pos: [0.2, -1, 0.6] };
+  const floorToField = markerToFieldMatrix(floorPlacement);
+  // 床マーカーの推定姿勢: 回転だけ X 軸まわりに 20° ずれ、中心の位置は正しい（画像位置と大きさで決まるので傾きに依らない）
+  const floorEst = mulMat4(rotX(20), floorToField);
+  floorEst[12] = floorPlacement.pos[0];
+  floorEst[13] = floorPlacement.pos[1];
+  floorEst[14] = floorPlacement.pos[2];
+  const anchorEst = mulMat4(floorEst, invertRigid(floorToField)); // 従来の「マーカー → アンカー」の逆を掛けるだけ
+  check("床マーカーの傾きが 20° ずれると、従来の変換では原点が 0.3m 以上ずれる（issue #54 の機序）", Math.hypot(anchorEst[12], anchorEst[13], anchorEst[14]) > 0.3 && near(tiltDegOf(anchorEst, [0, 1, 0]), 20, 1e-9));
+  const lvl = levelRotation(anchorEst, [0, 1, 0]);
+  const offset = transformPoint(lvl, floorPlacement.pos);
+  const originFixed = [floorPlacement.pos[0] - offset[0], floorPlacement.pos[1] - offset[1], floorPlacement.pos[2] - offset[2]];
+  check("水平化した回転で「マーカー中心 − R_level・pos」を取ると原点が合う（marker-anchor.ts の位置の式）", nearV(originFixed, [0, 0, 0]) && near(tiltDegOf(lvl, [0, 1, 0]), 0, 1e-9));
   // 検証
   const ok = [
     { id: 1, face: "floor", pos: [0, -1, 0.75] },

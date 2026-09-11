@@ -8,7 +8,7 @@
     <style>
       :root {
         color-scheme: light dark;
-        /* 黒い正方形の一辺 [mm]。?mm= で変更できる（markers.ts 参照） */
+        /* 黒い正方形の一辺 [mm]。既定は markers.ts が DEFAULT_MARKER_MM で上書きする。?mm= で変更できる */
         --marker-mm: 150;
       }
       body {
@@ -96,8 +96,8 @@
   <body>
     <h1 class="no-print" style="font-size: 1.1rem; margin: 0">08 用マーカー一式（ARUCO_MIP_36h12）</h1>
     <p class="note no-print" id="size-note">
-      1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が 150mm になります
-      （?mm= で変更。全員のデモ URL に ?markerMm=実測値 を付けます。追加マーカーも同じ大きさで印刷してください）。
+      1 枚 1 ページで印刷します（倍率 100%「実際のサイズ」）。黒い正方形の一辺が 150mm（デモの ?markerMm= の既定と同じ）になります
+      （?mm= で変えたときは全員のデモ URL に ?markerMm=実測値 を付けます。追加マーカーも同じ大きさで印刷してください）。
     </p>
     <p class="note no-print">
       貼り方: 壁のマーカーは<strong>「上」を天井に向けて</strong>貼ります。床のマーカーは<strong>「上」を正面の壁に向けて</strong>置きます。

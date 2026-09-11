@@ -8,10 +8,16 @@
 // 分かっている追加マーカー）を渡すと、どれが見えてもアンカー（= 原点マーカーの姿勢）に直して採用する。
 // アンカーは 1 つのままなので、呼び出し側（field = anchor）は枚数を意識しない。
 // 同じフレームで複数見えたときは画面上の大きさで重み付き平均し、候補のばらつき（spread）を診断用に返す
+//
+// 重力での水平化（issue #54）: worldUp を渡すと、各観測から出したアンカーの姿勢の Y 軸を重力の上に固定し、
+// マーカーからは位置とヨーだけを採る。単一マーカーの傾き推定はほぼ正面で 10〜30° ずれ（POSIT の 2 解の
+// 鏡像が選ばれることもある）、床が浮く・壁が手前に来る原因になっていた（marker-layout.ts の levelRotation 参照）。
+// POSIT の 2 解を重力で選び直すことは試したが、横から見たマーカーでは 2 解の差がヨー（重力では決まらない）なので
+// 傾きの僅差で鏡像のヨーを拾ってしまい（ヘッドレスで原点が 0.47m ずれた）、水平化だけにした
 import * as THREE from "three";
 import { createMarkerDetector } from "./marker-detector";
 import type { MarkerObservation } from "./marker-detector";
-import { fusePoseCandidates } from "./marker-layout";
+import { fusePoseCandidates, levelRotation, tiltDegOf } from "./marker-layout";
 import type { PoseCandidate } from "./marker-layout";
 
 export type ExtraMarker = {
@@ -55,6 +61,13 @@ export type MarkerAnchorOptions = {
    * 目の前のボールごとコートが飛ぶのを避ける（当たり判定が壊れる）
    */
   canSnap?: () => boolean;
+  /**
+   * ワールド座標系での「上」（重力の逆向き。単位ベクトル）。ジャイロ（DeviceOrientationControls）なら (0,1,0)、
+   * PC のフェイクカメラなら合成カメラの姿勢から出せる。返すとアンカーの Y 軸をこれに固定して傾きの誤差を消す
+   * （壁のマーカーは天地を合わせて貼る前提）。null / 省略なら従来どおりマーカーの姿勢をそのまま使う
+   * （OrbitControls + 実カメラのように重力とワールドが対応しない環境）
+   */
+  worldUp?: () => THREE.Vector3 | null;
 };
 
 export type MarkerAnchor = {
@@ -72,6 +85,11 @@ export type MarkerAnchor = {
   readonly usedIds: readonly number[];
   /** 直近の採用で複数マーカーが見えたときの、原点の位置の候補のばらつき [m]（1 枚なら 0）。貼りズレの診断用 */
   readonly spreadM: number;
+  /**
+   * 直近の採用で、水平化する前のアンカーの Y 軸が worldUp からずれていた角度 [deg]（複数なら最大）。
+   * worldUp が無ければ 0。大きいほど「POSIT の傾き推定がずれていた（水平化で救った）」か「マーカーが傾いて貼ってある」
+   */
+  readonly tiltDeg: number;
   /** lostMs 以内に観測を採用していれば true */
   isTracking(now: number, lostMs: number): boolean;
 };
@@ -89,6 +107,9 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
   const targetQuat = new THREE.Quaternion();
   const targetScale = new THREE.Vector3();
   const markerWorld = new THREE.Matrix4();
+  const levelWorld = new THREE.Matrix4();
+  const markerCenter = new THREE.Vector3();
+  const anchorOffset = new THREE.Vector3();
   const identity = new THREE.Matrix4();
   /** toAnchor の逆行列（アンカー → マーカー）。検出のたびに invert しないようキャッシュ */
   const inverseCache = new WeakMap<THREE.Matrix4, THREE.Matrix4>();
@@ -108,6 +129,7 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     everDetected: false,
     usedIds: [] as number[],
     spreadM: 0,
+    tiltDeg: 0,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
     },
@@ -155,6 +177,9 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     // 姿勢が信用できる観測のうち、配置が分かっているマーカーだけを候補にする（同じ ID が複数見えたら最初の 1 つ）
     const candidates: PoseCandidate[] = [];
     const used: { id: number; error: number }[] = [];
+    const up = opts.worldUp?.() ?? null;
+    const upArr: [number, number, number] | null = up ? [up.x, up.y, up.z] : null;
+    let maxTilt = 0;
     camera.updateMatrixWorld();
     for (const o of observations) {
       if (!Number.isFinite(o.error) || o.error > opts.maxPoseError) continue;
@@ -165,7 +190,19 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
       // 追加マーカーなら、さらに（マーカー → アンカー）の逆を掛けてアンカー座標系 → ワールドに直す
       markerWorld.multiplyMatrices(camera.matrixWorld, o.matrix);
       if (toAnchor !== identity) markerWorld.multiply(inverseOf(toAnchor));
-      markerWorld.decompose(targetPos, targetQuat, targetScale);
+      if (upArr) {
+        maxTilt = Math.max(maxTilt, tiltDegOf(markerWorld.elements, upArr));
+        // 水平化: 回転は Y = up（ヨーは推定の法線から）、位置は「マーカーの中心 − R・(アンカー座標系でのマーカーの位置)」。
+        // マーカーの中心は傾きの推定に依らずほぼ正しい（画像位置と大きさで決まる）ので、
+        // 追加マーカーから原点までのオフセットだけ水平化した回転で戻す
+        levelWorld.fromArray(levelRotation(markerWorld.elements, upArr));
+        markerCenter.setFromMatrixPosition(o.matrix).applyMatrix4(camera.matrixWorld);
+        anchorOffset.setFromMatrixPosition(toAnchor).applyMatrix4(levelWorld);
+        targetPos.copy(markerCenter).sub(anchorOffset);
+        targetQuat.setFromRotationMatrix(levelWorld);
+      } else {
+        markerWorld.decompose(targetPos, targetQuat, targetScale);
+      }
       candidates.push({
         pos: [targetPos.x, targetPos.y, targetPos.z],
         quat: [targetQuat.x, targetQuat.y, targetQuat.z, targetQuat.w],
@@ -204,7 +241,8 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     self.lastAcceptedMs = now;
     self.usedIds = used.map((u) => u.id);
     self.spreadM = fused.spread;
-    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""} ${self.detMs.toFixed(0)}ms`;
+    self.tiltDeg = maxTilt;
+    self.info = `id=${used.map((u) => u.id).join("+")} err=${used.map((u) => u.error.toFixed(2)).join(",")}${used.length > 1 ? ` spread=${fused.spread.toFixed(2)}m` : ""}${upArr ? ` tilt=${maxTilt.toFixed(0)}deg` : ""} ${self.detMs.toFixed(0)}ms`;
   }
 
   return self;
