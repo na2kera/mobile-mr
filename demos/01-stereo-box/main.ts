@@ -2,11 +2,17 @@ import * as THREE from "three";
 import { StereoEffect } from "three/examples/jsm/effects/StereoEffect.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { DeviceOrientationControls } from "three-stdlib";
+import { createSession, readNumber, type SessionState } from "mobile-mr-sdk/core";
+
+// 段階 3 の先取り（mobile-mr-sdk/docs/core.md）: 開始フロー（センサー許可 → 全画面 → 横向き固定 → Wake Lock）・
+// 全画面の再入・フレームループを SDK の core に置き換えた。2 眼（StereoEffect）と頭追従
+// （DeviceOrientationControls）は暫定採用のまま（stereo / tracking で置き換える）。
+// 置き換え前の形は git 履歴（feature/sdk-core-01 の親）を参照
 
 // ---- ゴーグル調整パラメータ（URL クエリで実機合わせ込み） ----
 const params = new URLSearchParams(location.search);
-const FOV = Number(params.get("fov") ?? 70);
-const EYE_SEP = Number(params.get("eyeSep") ?? 0.064); // 人間の平均瞳孔間距離 ≈ 64mm
+const FOV = readNumber(params, "fov", 70, { max: 179 });
+const EYE_SEP = readNumber(params, "eyeSep", 0.064, { min: 0 }); // 人間の平均瞳孔間距離 ≈ 64mm
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -76,19 +82,21 @@ function resize() {
 resize();
 addEventListener("resize", resize);
 
+// ---- Session（開始フロー・全画面・ライフサイクル・ループ。mobile-mr-sdk/core） ----
+const session = createSession();
+const isTouchDevice = session.touch;
+
 // ---- 頭追従 ----
 // スマホ: three-stdlib の DeviceOrientationControls
 // PC(センサーなし): OrbitControls にフォールバック（デバッグ用）
 type HeadControls = { update: () => void };
 let controls: HeadControls | null = null;
 
-const isTouchDevice = matchMedia("(pointer: coarse)").matches;
-
 function startControls() {
   if (isTouchDevice) {
     // DeviceOrientationControls はコンストラクタ内でも requestPermission() を呼ぶが、
-    // 開始フロー側で先に許可を取ってから生成するため、ここではダイアログなしで即解決する
-    // （許可結果の Promise はライブラリ内で握りつぶされるため、成否は開始フロー側で自前管理する）
+    // Session が先に許可を取ってから生成するため、ここではダイアログなしで即解決する
+    // （許可結果の Promise はライブラリ内で握りつぶされるため、成否は Session の状態で見る）
     controls = new DeviceOrientationControls(camera);
   } else {
     const orbit = new OrbitControls(camera, renderer.domElement);
@@ -100,115 +108,91 @@ function startControls() {
   }
 }
 
-// ---- 全画面化 ----
-// iPhone Safari は iOS 17.2+ で任意要素の requestFullscreen() に対応
-// （それ未満は旧プレフィックス版も含め未定義なので、フォールバック分岐は持たない）。
-// センサー許可と同様にユーザージェスチャー内で呼ぶ必要がある。
-// 非対応・拒否時は従来どおり 100dvh の全画面風表示のまま続行する。
-function enterFullscreen(onStatus: (status: string) => void) {
-  const el = document.documentElement;
-  if (!el.requestFullscreen) {
-    onStatus("unsupported");
-    return;
-  }
-  el.requestFullscreen().then(
-    () => onStatus("ok"),
-    (e) => onStatus(e instanceof Error ? `${e.name}: ${e.message}` : String(e)),
-  );
-}
+// 許可フローが決着したら頭追従を始める（PC は許可不要。拒否されたら頭追従なしで続ける）
+session.on("sensor", (sensor) => {
+  const usable =
+    !isTouchDevice || sensor.permission === "granted" || sensor.permission === "no-api";
+  if (usable) startControls();
+});
 
 // ---- デバッグ用 HUD（実機では console が見えないため状態をここに出す） ----
-// 追記ではなく毎回描き直すことで、イベントの繰り返しで行が増え続けないようにする
+// 追記ではなく毎回描き直すことで、イベントの繰り返しで行が増え続けないようにする。
+// 語彙（sensor= / events-ok / no-events / no-permission-api / fs= / lock= / wake=）は 06 以降の
+// start-flow.ts と同じにし、headless スクリプトがそのまま解析できるようにする
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
-const hudState = { base: "", sensor: "", fsResult: "", fsChange: "" };
-function renderHud() {
+let hudBase = "";
+let fsChanged = false;
+let loopError = "";
+
+function text(v: string | { error: string }): string {
+  return typeof v === "string" ? v : v.error;
+}
+
+function renderHud(s: SessionState = session.state) {
+  const sensor =
+    s.sensor.permission === "pending" || s.sensor.permission === "skipped"
+      ? ""
+      : `sensor=${s.sensor.permission === "no-api" ? "no-permission-api" : text(s.sensor.permission)}${s.sensor.events === "ok" ? " events-ok" : s.sensor.events === "none" ? " no-events" : ""}`;
+  const fs =
+    s.fullscreen === "pending" || s.fullscreen === "skipped"
+      ? ""
+      : `fs=${s.fullscreen === "needs-tap" ? (s.fullscreenError ?? "needs-tap") : s.fullscreen}${s.orientation === "pending" || s.orientation === "skipped" ? "" : ` lock=${text(s.orientation)}`}`;
+  const wake = s.wakeLock === "pending" || s.wakeLock === "skipped" ? "" : `wake=${text(s.wakeLock)}`;
   hud.textContent = [
-    hudState.base,
-    hudState.sensor && `sensor=${hudState.sensor}`,
-    hudState.fsResult && `fs=${hudState.fsResult}`,
-    hudState.fsChange && `fs-change: ${hudState.fsChange}`,
+    hudBase,
+    sensor,
+    fs,
+    fsChanged && `fs-change: ${s.inFullscreen ? "enter" : "exit"}`,
+    wake,
+    loopError && `loop-error: ${loopError}`,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
 // ---- 開始フロー ----
-// iOS の制約（実機で確認済み）: センサー許可と全画面化はどちらもタップ起点が
-// 必須だが、全画面遷移中は許可ダイアログが表示されず、全画面解除まで繰り延べ
-// られる。同一タップで両方を撃つと初回訪問では頭追従が死んだままになるため、
-// 「先に許可を要求 → 結果を待ってから全画面化」の順に直列化する。
-// 許可ダイアログの操作でタップの効力（transient activation）が切れて全画面化
-// が拒否された場合は、#fs-button を出して再タップしてもらう。
+// iOS の制約（実機で確認済み）: センサー許可と全画面化はどちらもタップ起点が必須だが、
+// 全画面遷移中は許可ダイアログが表示されない。Session が「先に許可 → 結果を待ってから全画面化」に
+// 直列化し、許可ダイアログの操作でタップの効力が切れて全画面化が拒否されたときは
+// fullscreen = "needs-tap" になるので、#fs-button を出して再タップしてもらう。
+// 上端スワイプで全画面が解除されたときも同じ "needs-tap" になる
 const fsButton = document.querySelector<HTMLButtonElement>("#fs-button")!;
+fsButton.addEventListener("click", () => void session.enterFullscreen());
 
-function tryEnterFullscreen() {
-  fsButton.hidden = true;
-  enterFullscreen((status) => {
-    hudState.fsResult = status;
-    renderHud();
-    if (status !== "ok" && status !== "unsupported") fsButton.hidden = false;
-  });
-}
-
-fsButton.addEventListener("click", tryEnterFullscreen);
+session.on("change", (s) => {
+  fsButton.hidden = s.fullscreen !== "needs-tap";
+  renderHud(s);
+});
+session.on("error", (e) => {
+  loopError = `${e.name}: ${e.text}`;
+  renderHud();
+});
+// fs-change は全画面の開始・解除が実際に起きた後だけ表示する（置き換え前の HUD と同じ）
+let lastInFullscreen = session.state.inFullscreen;
+session.on("change", (s) => {
+  if (s.inFullscreen !== lastInFullscreen) {
+    lastInFullscreen = s.inFullscreen;
+    fsChanged = true;
+    renderHud(s);
+  }
+});
 
 document
   .querySelector<HTMLButtonElement>("#start-button")!
   .addEventListener("click", () => {
     document.body.classList.add("started");
-    hudState.base = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"}`;
+    hudBase = `fov=${FOV} eyeSep=${EYE_SEP} mode=${isTouchDevice ? "gyro" : "orbit"}`;
     renderHud();
-
-    // PC はデバッグ用途なので全画面にせず OrbitControls のみ
-    if (!isTouchDevice) {
-      startControls();
-      return;
-    }
-
-    const doe = DeviceOrientationEvent as unknown as {
-      requestPermission?: () => Promise<"granted" | "denied">;
-    };
-    if (!doe.requestPermission) {
-      // Android 等、許可ダイアログが無い環境は同一タップで両方いける
-      startControls();
-      tryEnterFullscreen();
-      return;
-    }
-
-    // iOS: このタップ起点で許可を要求し、結果を待ってから全画面化する
-    doe
-      .requestPermission()
-      .then((state) => {
-        hudState.sensor = state;
-        renderHud();
-        if (state !== "granted") return; // 拒否: 頭追従が無いので全画面にもしない
-        startControls();
-        // 既に許可済みならタップの効力が残っていて 1 タップで全画面まで行ける。
-        // いまダイアログが出た場合は効力切れで拒否され、fs-button 経由の再タップに落ちる
-        tryEnterFullscreen();
-      })
-      .catch((e: unknown) => {
-        hudState.sensor =
-          e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-        renderHud();
-      });
+    // PC はデバッグ用途なので Session が許可・全画面を飛ばし OrbitControls のみになる
+    void session.start();
   });
 
-// 全画面の開始・解除（上端スワイプ等）を HUD で観測し、解除時は再入ボタンを出す
-document.addEventListener("fullscreenchange", () => {
-  const inFullscreen = Boolean(document.fullscreenElement);
-  hudState.fsChange = inFullscreen ? "enter" : "exit";
-  renderHud();
-  if (isTouchDevice && document.body.classList.contains("started")) {
-    fsButton.hidden = inFullscreen;
-  }
-});
-
-// ---- ループ ----
-renderer.setAnimationLoop((time) => {
+// ---- ループ（例外は隔離されて "error" イベントになり、描画は止まらない） ----
+session.loop.add("render", (_dt, time) => {
   for (const [i, box] of boxes.entries()) {
     box.rotation.y = time / 2000 + i;
   }
   controls?.update();
   effect.render(scene, camera);
 });
+session.loop.start();
