@@ -67,7 +67,8 @@ import { DEFAULT_TRUST_LIMITS } from "./fixed-anchor-math";
 //   - URL パラメータ（08 に無いもの）: ?alignN=10（確定に必要な連続観測数）&alignDist=1.6（マーカーまでの距離の上限 [m]）
 //     &alignOff=20（画面中央からの角度の上限 [deg]）&alignFace=25（正対からの角度の上限 [deg]）&alignTilt=15（水平化前の傾きの上限 [deg]）
 //     &alignErr=0.15（再投影誤差の上限）&alignSpread=0.05（窓の中の位置のばらつきの上限 [m]）&alignAngle=3（回転のばらつきの上限 [deg]）
-//     &refine=0.02（確定後の補正の強さ。0 で完全固定）&refineMax=0.5（これ以上離れた観測は補正に使わない [m]）&realignHoldMs=2000（0 で無効）
+//     &refine=0.02（確定後の補正の強さ。0 で完全固定。08 の ?smooth= も同じ意味で受け付ける）&refineMax=0.5（これ以上離れた観測は補正に使わない [m]）
+//     &refineMaxDeg=20（回転がこれ以上ずれた観測は補正に使わない [deg]）&realignHoldMs=2000（0 で無効）
 //   - HUD: 08 の marker= の行の代わりに align=（locked / aligning n/N、直近の観測の質と信頼できなかった理由、
 //     obsΔ= 直近の観測とアンカーの差 = 08 ならこのぶん動いていた量、drift= 確定時からの累積の補正量）を同じ位置に出す。
 //     生の観測は obs= に 08 の marker= と同じ内容
@@ -108,7 +109,7 @@ const MARKER_SIZE_M = MARKER_MM / 1000;
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
 const MARKER_DET_W = numParam("detW", 960, { min: 64, max: 4096 });
-// 08 の ?smooth=（観測を anchor に馴染ませる係数）は 08-2 では使わない（生の観測が要るので平滑化なし。確定後の寄せは ?refine=）
+// 08 の ?smooth=（観測を anchor に馴染ませる係数）は、08-2 では ?refine= の別名として下で読む（観測用 Object3D は平滑化なし）
 const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000 });
 const MARKER_LOST_MS = numParam("lostMs", 500, { min: 50, max: 10000 });
 
@@ -124,10 +125,18 @@ const ALIGN_TRUST = {
 };
 const ALIGN_SPREAD_M = numParam("alignSpread", 0.05, { min: 0, max: 2 });
 const ALIGN_ANGLE_DEG = numParam("alignAngle", 3, { min: 0, max: 90 });
-/** 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定 */
-const REFINE = numParam("refine", 0.02, { min: 0, max: 1 });
+/**
+ * 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定。
+ * 08 の ?smooth=（観測をアンカーに馴染ませる係数。既定 0.5）は同義の値なので、?refine= が無いときは ?smooth= を同じ意味で受け付ける
+ * （08 と同名・同義を保つため）。ただし既定値は 08-2 の方式に合わせて 0.02（08 の 0.5 は「毎回の観測に追従する」係数で、
+ * 「一度合わせて固定」では強すぎる）。確定前の「合わせ中」の観測は窓の中央値 / 平均で丸めるので、そこには平滑化を入れない
+ * （入れると窓の「ばらつき」の判定が鈍る）
+ */
+const REFINE = params.has("refine") ? numParam("refine", 0.02, { min: 0, max: 1 }) : params.has("smooth") ? numParam("smooth", 0.02, { min: 0, max: 1 }) : 0.02;
 /** 確定後、観測がアンカーからこれ以上離れていたら補正に使わない [m]（鏡像解などの疑い） */
 const REFINE_MAX_M = numParam("refineMax", 0.5, { min: 0, max: 20 });
+/** 確定後、観測の回転がアンカーからこれ以上ずれていたら補正に使わない [deg]（位置は近いが回転だけ誤った鏡像解） */
+const REFINE_MAX_DEG = numParam("refineMaxDeg", 20, { min: 0, max: 180 });
 /** 合わせ直しに必要な押し続けの時間 [ms]（0 で無効） */
 const REALIGN_HOLD_MS = numParam("realignHoldMs", 2000, { min: 0, max: 10000 });
 
@@ -620,7 +629,7 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
   );
   const pt = passthrough;
   // 08-2: 出力先は observed（平滑化なし・常にスナップ = 生の観測）。field のアンカーは fixedAnchor だけが書く。
-  // ?smooth= は 08 と同名だが、ここでは使わない（生の観測が要る）
+  // ?smooth= はここには渡さず（生の観測が要る）、REFINE の別名として確定後の寄せに使う
   markerAnchor = createMarkerAnchor({
     video: pt.video,
     camera,
@@ -650,7 +659,10 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     maxAngleDeg: ALIGN_ANGLE_DEG,
     refine: REFINE,
     refineMaxM: REFINE_MAX_M,
+    refineMaxDeg: REFINE_MAX_DEG,
     lostMs: MARKER_LOST_MS,
+    // 合わせ直しの確定は練習中（または入室前）だけ。長押しの計時中に対戦が始まっていたら確定を捨てる（updateRealign の判定の補強）
+    canReplace: () => auth === null || auth.state.phase === "practice",
   });
   (window as unknown as { __fixedDebug: unknown }).__fixedDebug = {
     anchorPos: () => [anchor.position.x, anchor.position.y, anchor.position.z],
@@ -1083,6 +1095,7 @@ function updateRealign(now: number) {
     flash = { text: "合わせ直しは練習中だけです", untilMs: now + 2000 };
     return;
   }
+  // 確定の瞬間にも phase を見る（createFixedAnchor の canReplace）: 押している間に対戦が始まっていたら確定を捨てる
   if (fixedAnchor?.realign()) {
     realignRequests++;
     flash = { text: "合わせ直します\nマーカーの正面 1m に立ってください", untilMs: now + 2500 };
@@ -1230,7 +1243,7 @@ function alignMessage(fa: FixedAnchor | null, head: string): string {
             ? "マーカーの正面に回ってください"
             : fa.lastReason === "tilt"
               ? "端末を水平に構えてください"
-              : fa.lastReason === "err"
+              : fa.lastReason === "err" || fa.lastReason === "nan"
                 ? "止まってマーカーをはっきり映してください"
                 : "（マーカーが画面の中央に大きく映るように）";
     return `${head}\nマーカーの正面 1m に立ってください\n${hint}`;

@@ -11,7 +11,7 @@
 //   - 合わせ直し（realign）: locked のまま窓を集め直し、確定したらその時点で置き換える（集めている間もいまの位置で遊べる）
 import * as THREE from "three";
 import type { MarkerAnchor } from "../../src/shared/marker-anchor";
-import { AlignWindow, markerQuality, untrustedReason } from "./fixed-anchor-math";
+import { AlignWindow, markerQuality, refineStep, untrustedReason } from "./fixed-anchor-math";
 import type { Pose, Quality, TrustLimits, UntrustedReason, V3 } from "./fixed-anchor-math";
 
 export type FixedAnchorOptions = {
@@ -32,8 +32,15 @@ export type FixedAnchorOptions = {
   refine: number;
   /** 観測がアンカーからこの距離 [m] 以上離れていれば補正しない */
   refineMaxM: number;
+  /** 観測の回転がアンカーからこの角度 [deg] 以上ずれていれば補正しない（位置は近いが回転だけ誤った鏡像解を除く） */
+  refineMaxDeg: number;
   /** 位置合わせ中、この時間 [ms] 観測が無ければ窓を捨てる */
   lostMs: number;
+  /**
+   * 合わせ直しの確定（いまのアンカーの置き換え）を許すか。確定の瞬間に呼ぶ。false なら集めた観測を捨てて合わせ直しを取り消す
+   * （長押しの計時中に対戦が始まった等。最初の確定には効かない）。省略時は常に許す
+   */
+  canReplace?: () => boolean;
 };
 
 export type FixedAnchor = {
@@ -63,6 +70,8 @@ export type FixedAnchor = {
   readonly lockedAtMs: number;
   /** 確定後に補正を適用した回数 */
   readonly refined: number;
+  /** 確定の瞬間に canReplace で取り消した合わせ直しの回数 */
+  readonly cancelled: number;
   /** HUD 用の 1 行 */
   readonly info: string;
 };
@@ -74,8 +83,6 @@ export function createFixedAnchor(opts: FixedAnchorOptions): FixedAnchor {
   const markerWorld = new THREE.Matrix4();
   const markerCam = new THREE.Matrix4();
   const lockedPos = new THREE.Vector3();
-  const targetPos = new THREE.Vector3();
-  const targetQuat = new THREE.Quaternion();
   let seenAcceptedMs = -Infinity;
   let lastObsMs = -Infinity;
 
@@ -93,6 +100,7 @@ export function createFixedAnchor(opts: FixedAnchorOptions): FixedAnchor {
     locks: 0,
     lockedAtMs: -Infinity,
     refined: 0,
+    cancelled: 0,
     info: "aligning n=0",
     realign(): boolean {
       if (!self.locked) return false;
@@ -158,6 +166,15 @@ export function createFixedAnchor(opts: FixedAnchorOptions): FixedAnchor {
       self.count = window.count;
       self.stable = window.stable;
       if (window.ready) {
+        if (self.realigning && opts.canReplace && !opts.canReplace()) {
+          // 集めている間に対戦が始まった等: いまのアンカーを守り、合わせ直しを取り消す
+          window.reset();
+          self.count = 0;
+          self.realigning = false;
+          self.cancelled++;
+          console.log(`[fixed-anchor] realign cancelled at lock time (#${self.cancelled})`);
+          return;
+        }
         const pose = window.result()!;
         setAnchor(pose);
         lockedPos.copy(anchor.position);
@@ -171,12 +188,15 @@ export function createFixedAnchor(opts: FixedAnchorOptions): FixedAnchor {
       }
       return;
     }
-    // 確定後: 信頼できる観測のときだけ緩やかに寄せる（遠すぎる観測は鏡像解などの疑いがあるので無視）
-    if (reason === null && opts.refine > 0 && self.obsDeltaM <= opts.refineMaxM) {
-      targetPos.set(sample.pos[0], sample.pos[1], sample.pos[2]);
-      targetQuat.set(sample.quat[0], sample.quat[1], sample.quat[2], sample.quat[3]);
-      anchor.position.lerp(targetPos, opts.refine);
-      anchor.quaternion.slerp(targetQuat, opts.refine);
+    // 確定後: 信頼できる観測のときだけ緩やかに寄せる（位置・回転のどちらかが遠すぎる観測は鏡像解などの疑いがあるので無視）
+    if (reason !== null) return;
+    const current: Pose = {
+      pos: [anchor.position.x, anchor.position.y, anchor.position.z],
+      quat: [anchor.quaternion.x, anchor.quaternion.y, anchor.quaternion.z, anchor.quaternion.w],
+    };
+    const next = refineStep(current, sample, opts.refine, opts.refineMaxM, opts.refineMaxDeg);
+    if (next) {
+      setAnchor(next);
       self.refined++;
     }
   }
@@ -194,7 +214,7 @@ export function createFixedAnchor(opts: FixedAnchorOptions): FixedAnchor {
       : "";
     if (!self.locked) return `aligning n=${self.count}/${opts.samples}${self.stable ? "" : " unstable"}${quality}`;
     const head = self.realigning ? `realigning n=${self.count}/${opts.samples}${self.stable ? "" : " unstable"}` : `locked (${((now - self.lockedAtMs) / 1000).toFixed(1)}s)`;
-    return `${head} locks=${self.locks} refine=${opts.refine} refined=${self.refined} drift=${self.driftM.toFixed(3)}m obsΔ=${self.obsDeltaM.toFixed(2)}m/${self.obsRotDeg.toFixed(0)}deg${quality}`;
+    return `${head} locks=${self.locks} refine=${opts.refine} refined=${self.refined}${self.cancelled ? ` cancelled=${self.cancelled}` : ""} drift=${self.driftM.toFixed(3)}m obsΔ=${self.obsDeltaM.toFixed(2)}m/${self.obsRotDeg.toFixed(0)}deg${quality}`;
   }
 
   return self;

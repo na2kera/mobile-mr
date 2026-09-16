@@ -13,6 +13,7 @@ import {
   markerQuality,
   medianPose,
   quatAngleDeg,
+  refineStep,
   slerp,
   untrustedReason,
 } from "../demos/08-2-splatoon-fixed/fixed-anchor-math.ts";
@@ -91,6 +92,16 @@ test("untrustedReason: 遠い / 画面の端 / 斜め / 傾き / 再投影誤差
   assert.equal(untrustedReason({ ...good, err: NaN }), "err");
   assert.equal(untrustedReason({ ...good, err: Infinity }), "err", "info に err= が無い（Infinity）ときは信頼しない");
 });
+test("untrustedReason: 距離・角度・傾きが NaN / Infinity の観測は信頼しない（reason は nan。err の NaN は err）", () => {
+  assert.equal(untrustedReason({ ...good, distM: NaN }), "nan");
+  assert.equal(untrustedReason({ ...good, offAxisDeg: NaN }), "nan");
+  assert.equal(untrustedReason({ ...good, facingDeg: Infinity }), "nan");
+  assert.equal(untrustedReason({ ...good, tiltDeg: NaN }), "nan");
+  assert.equal(untrustedReason({ ...good, err: NaN }), "err");
+  // markerQuality に壊れた行列を渡しても null（信頼）にはならない
+  const broken = markerQuality([NaN, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, NaN, 0, -1, 1], 0, 0);
+  assert.notEqual(untrustedReason(broken), null);
+});
 test("untrustedReason: 閾値は上書きできる（緩めれば通る・きつくすれば落ちる）", () => {
   assert.equal(untrustedReason({ ...good, distM: 2.5 }, { ...DEFAULT_TRUST_LIMITS, maxDistM: 3 }), null);
   assert.equal(untrustedReason(good, { ...DEFAULT_TRUST_LIMITS, maxOffAxisDeg: 2 }), "off");
@@ -136,6 +147,20 @@ test("emaPose: alpha=0 で動かず、alpha=1 で観測に一致し、0.02 な�
   let p = cur;
   for (let i = 0; i < 100; i++) p = emaPose(p, obs, 0.02);
   near(p.pos[0], 1 - 0.98 ** 100, 1e-9);
+});
+
+test("refineStep: 位置は近くても回転だけ大きくずれた観測（鏡像解）は無視し、位置・回転とも近ければ EMA、alpha=0 なら null", () => {
+  const cur = { pos: [0, 1.6, -0.75], quat: yawQuat(0) };
+  const mirror = { pos: [0.05, 1.6, -0.75], quat: yawQuat(40) }; // 位置差 5cm・回転差 40°
+  assert.equal(refineStep(cur, mirror, 0.02, 0.5, 20), null, "回転 40° > 20° は無視");
+  const far = { pos: [0.8, 1.6, -0.75], quat: yawQuat(1) };
+  assert.equal(refineStep(cur, far, 0.02, 0.5, 20), null, "位置 0.8m > 0.5m は無視");
+  const close = { pos: [0.05, 1.6, -0.75], quat: yawQuat(5) };
+  const r = refineStep(cur, close, 0.02, 0.5, 20);
+  assert.ok(r);
+  near(r.pos[0], 0.001, 1e-9);
+  near(quatAngleDeg(r.quat, yawQuat(0.1)), 0, 1e-3);
+  assert.equal(refineStep(cur, close, 0, 0.5, 20), null, "alpha=0（完全固定）は null");
 });
 
 // ---- 位置合わせの窓 ----

@@ -45,10 +45,11 @@ export const DEFAULT_TRUST_LIMITS: TrustLimits = {
   maxErr: 0.15,
 };
 
-export type UntrustedReason = "far" | "off" | "face" | "tilt" | "err";
+export type UntrustedReason = "far" | "off" | "face" | "tilt" | "err" | "nan";
 
-/** 観測が信頼できなければ最初に引っかかった理由を、信頼できれば null を返す */
+/** 観測が信頼できなければ最初に引っかかった理由を、信頼できれば null を返す。数値が壊れている（NaN / Infinity）観測は "nan" */
 export function untrustedReason(q: Quality, limits: TrustLimits = DEFAULT_TRUST_LIMITS): UntrustedReason | null {
+  if (!Number.isFinite(q.distM) || !Number.isFinite(q.offAxisDeg) || !Number.isFinite(q.facingDeg) || !Number.isFinite(q.tiltDeg)) return "nan";
   if (!Number.isFinite(q.err) || q.err > limits.maxErr) return "err";
   if (q.distM > limits.maxDistM) return "far";
   if (q.offAxisDeg > limits.maxOffAxisDeg) return "off";
@@ -110,6 +111,17 @@ export function emaPose(current: Pose, target: Pose, alpha: number): Pose {
     ],
     quat: slerp(current.quat, target.quat, a),
   };
+}
+
+/**
+ * 確定後の緩やかな補正 1 回ぶん（observation を anchor に alpha で馴染ませる）。観測が anchor から位置で maxM・回転で maxDeg 以上
+ * 離れていれば（POSIT の鏡像解などの疑い。回転だけ大きく誤る解も含む）null を返して補正しない
+ */
+export function refineStep(anchor: Pose, observation: Pose, alpha: number, maxM: number, maxDeg: number): Pose | null {
+  if (!(alpha > 0)) return null;
+  if (distance3(anchor.pos, observation.pos) > maxM) return null;
+  if (quatAngleDeg(anchor.quat, observation.quat) > maxDeg) return null;
+  return emaPose(anchor, observation, alpha);
 }
 
 export function slerp(a: Quat, b: Quat, t: number): Quat {

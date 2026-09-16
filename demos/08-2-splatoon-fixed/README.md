@@ -10,7 +10,7 @@
 
 1. **位置合わせ**: 開始後、練習に入る前に「マーカーの正面 1m に立ってください」と誘導し、**信頼できる観測**（下表）が **N 回連続**（既定 10）し、その間の位置のばらつきが 5cm・回転のばらつきが 3° 以内のときだけアンカーを確定する。位置は成分ごとの**中央値**、回転は四元数の**平均**。視界内メッセージに「合わせ中 3/10」→「確定！」
 2. **確定後はアンカーを更新しない**。ロスト・再検出・別マーカーへの切り替えでも動かさない。回転はジャイロ（DeviceOrientationControls）のまま
-3. ただし確定時と同じ条件を満たす観測のときだけ、**ごく緩やかに補正**する（`?refine=` = 観測 1 回ごとの EMA 係数。既定 0.02、0 で完全固定）。観測がアンカーから `?refineMax=`（既定 0.5m）以上離れていれば（POSIT の鏡像解などの疑い）補正に使わない
+3. ただし確定時と同じ条件を満たす観測のときだけ、**ごく緩やかに補正**する（`?refine=` = 観測 1 回ごとの EMA 係数。既定 0.02、0 で完全固定。08 の `?smooth=` も同義として受け付ける）。観測がアンカーから位置で `?refineMax=`（既定 0.5m）、回転で `?refineMaxDeg=`（既定 20°）以上離れていれば（POSIT の鏡像解などの疑い）補正に使わない
 4. **合わせ直し**: 練習中に画面（PC は Space）を `?realignHoldMs=`（既定 2 秒）押し続ける。集め直している間もいまの位置で遊べ（コートは消えない）、確定した時点で置き換わる。対戦中・カウントダウン中・結果表示中は押し続けても合わせ直さない（コートが跳ぶと対戦が壊れる）
 5. 追加マーカー（俯瞰画面の配置）も位置合わせの候補になる（見えているマーカーのうち条件の良い 1 枚で信頼度を評価）。確定後は切り替えでアンカーを飛ばさない（3 の緩やかな補正だけ）
 
@@ -32,7 +32,7 @@
 
 | ファイル | 差分 |
 | --- | --- |
-| `main.ts` | 冒頭のコメント（方式と URL パラメータ）。`// ---- アンカー` の節に `observed` と `fixedAnchor`。`startCameraAndMarker` で `createMarkerAnchor` の出力先を `observed` に（`smooth: 1`、`resnapAfterMs: 0`、`snapDistanceM: 0`、`canSnap` 無し）し、`createFixedAnchor` を作る。`sendPoseIfDue` は確定（`fixedAnchor.locked`）まで送らない。`updateRealign` / `pressHold`（長押しの計時）。`updateMessages` に位置合わせの案内（`alignMessage`）と合わせ直し中の表示。HUD の `marker=` 行を `align=`（+ `obs=` に生の観測）に。ループで `fixedAnchor.update` と確定時の「確定！」。フェイクカメラの姿勢を毎フレーム `window.__fakeCam` から作る（実行中に動かせる）。`?smooth=` は使わない |
+| `main.ts` | 冒頭のコメント（方式と URL パラメータ）。`?smooth=` を `refine` の別名として読む。`// ---- アンカー` の節に `observed` と `fixedAnchor`。`startCameraAndMarker` で `createMarkerAnchor` の出力先を `observed` に（`smooth: 1`、`resnapAfterMs: 0`、`snapDistanceM: 0`、`canSnap` 無し）し、`createFixedAnchor` を作る。`sendPoseIfDue` は確定（`fixedAnchor.locked`）まで送らない。`updateRealign` / `pressHold`（長押しの計時）。`updateMessages` に位置合わせの案内（`alignMessage`）と合わせ直し中の表示。HUD の `marker=` 行を `align=`（+ `obs=` に生の観測）に。ループで `fixedAnchor.update` と確定時の「確定！」。フェイクカメラの姿勢を毎フレーム `window.__fakeCam` から作る（実行中に動かせる）。確定の瞬間の `canReplace` で対戦中の合わせ直しを取り消す |
 | `fixed-anchor.ts` | 新規。three 側の薄い層（観測の質の計算・窓・確定・補正・合わせ直し・HUD 文字列） |
 | `fixed-anchor-math.ts` | 新規。純粋な数学（`untrustedReason` / `markerQuality` / `AlignWindow` / `medianPose` / `averageQuat` / `emaPose`） |
 | `index.html` | タイトル・見出しと方式の説明、08-2 固有の URL パラメータの案内。レイアウト・スタイルは 08 のまま |
@@ -52,8 +52,9 @@
 | `alignDist` / `alignOff` / `alignFace` / `alignTilt` / `alignErr` | 1.6 / 20 / 25 / 15 / 0.15 | 信頼できる観測の条件（上の表） |
 | `alignSpread` | 0.05 | 窓の中の位置のばらつき（中央値からの最大距離）の上限 [m] |
 | `alignAngle` | 3 | 窓の中の回転のばらつき（平均からの最大角度）の上限 [deg] |
-| `refine` | 0.02 | 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定 |
+| `refine` | 0.02 | 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定。**08 の `smooth`（観測をアンカーに馴染ませる係数）と同義**なので、`refine` が無ければ `?smooth=` を同じ意味で受け付ける。既定値だけ 08 の 0.5 ではなく 0.02（0.5 は「毎回の観測に追従する」強さで、一度合わせて固定する方式には強すぎる）。確定前の「合わせ中」の観測は窓の中央値 / 平均で丸めるので、そこには平滑化を入れない（入れると窓のばらつきの判定が鈍る） |
 | `refineMax` | 0.5 | 観測がアンカーからこれ以上離れていれば補正に使わない [m] |
+| `refineMaxDeg` | 20 | 観測の回転がアンカーからこれ以上ずれていれば補正に使わない [deg]（位置は近いが回転だけ誤った鏡像解を除く） |
 | `realignHoldMs` | 2000 | 合わせ直しに必要な押し続けの時間 [ms]。0 で無効 |
 
 HUD（08 の `marker=` 行と同じ位置）: `align=locked (12.3s) locks=1 refine=0.02 refined=57 drift=0.012m obsΔ=0.03m/39deg dist=0.74m off=3deg face=39deg tilt=1deg err=0.02 trusted=no(face) realigns=0 obs=id=0 err=0.02 ... layout=- self=(x,y,z)`
@@ -94,5 +95,6 @@ iPhone 実機ではまだ確認していない。見るべきこと:
 - 3DoF のまま: 確定後に歩くと位置がずれる（方式の割り切り。docs/space-stability-options.md §2 の D）
 - 確定時の 1 回の観測誤差（正面 1m でも位置 数 cm・ヨー数°。issue #54 の計測では正面付近のヨーは ±8°）はそのまま残る。`refine` で正面に戻るたびに少しずつ寄るが、斜めの観測では補正しない
 - 合わせ直しは長押し 2 秒なので、視線連射（画面を押している間）を 2 秒以上続けると練習中は合わせ直しが始まる（集め直している間もコートはそのままなので実害は小さい）。俯瞰画面からの指示はプロトコルを変えないと作れないので今回は入れていない
+- 合わせ直しの「練習中だけ」の判定は端末が受け取った状態（`auth.state.phase`）で行う。長押しの計時中に俯瞰画面が対戦を始めると、開始通知が届く前の 2 秒経過で集め直しが始まり得る。確定の瞬間にも phase を見て、練習中でなければ確定を捨てて合わせ直しを取り消す（HUD に `cancelled=`）が、通知の遅れが確定まで続く（数秒）場合は防げない
 - 再投影誤差は `marker-anchor.ts` の `info` 文字列（`err=`）から読んでいる（公開 API に数値が無い。PAIN_POINTS 参照）
 - 08 と同じサーバー・同じ room 名空間。既定 room は 08 と同じ `demo`
