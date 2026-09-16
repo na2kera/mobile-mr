@@ -18,6 +18,7 @@
     "test:splatoon": "node scripts/test-splatoon.mjs",
     "check:splatoon": "node scripts/headless-splatoon.mjs",
     "test:outside-in": "node scripts/test-08-3-outside-in.mjs",
+    "check:outside-in": "node scripts/headless-08-3-outside-in.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
