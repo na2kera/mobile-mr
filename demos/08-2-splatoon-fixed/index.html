@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>08-2. MR Splatoon（一度合わせて固定） — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜06 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label {
+        color: #e8eaed;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #player-name[aria-invalid="true"] {
+        border-color: #f28b82;
+      }
+      #name-hint {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #name-error {
+        color: #f28b82;
+      }
+      #name-error[hidden] {
+        display: none;
+      }
+      #start-button {
+        width: 100%;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) and (pointer: coarse) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜05 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・手・通信・試合の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>08-2. MR Splatoon（一度合わせて固定）</h1>
+      <p>
+        <strong>08 の「位置の取り方」だけを変えた比較用デモ</strong>（<a href="../08-splatoon/">08</a> と同じ仕様・同じサーバー。
+        docs/space-stability-options.md の候補 5b。比較の基準線）。08 はマーカーが見えるたびにコートを観測へ寄せるので、
+        斜めから見た観測の誤差がそのままコートの揺れになります。08-2 は開始後に<strong>「位置合わせ」</strong>の段階があり、
+        <strong>マーカーの正面 1m に立って</strong>（画面の中央に大きく映るように）安定した観測が 10 回続いたときだけコートを確定し（視界に「合わせ中 3/10」→「確定」）、
+        <strong>確定後はコートを動かしません</strong>（マーカーを見失っても・別のマーカーに切り替わっても動かない。回転はジャイロのまま）。
+        確定時と同じ条件（正面・近距離）の観測のときだけ、ごく緩やかに寄せます（?refine=0.02。0 で完全固定）。
+        <strong>合わせ直し</strong>は練習中に画面（PC は Space）を 2 秒押し続ける（?realignHoldMs=。集め直している間もいまの位置で遊べ、確定した時点で置き換わります。対戦中は合わせ直しません）。
+        歩くと位置がずれるのは 08 と同じ（3DoF）。HUD の marker= の行は align=（確定の状態・直近の観測の質・obsΔ= 観測とコートの差 = 08 ならこのぶん動いていた量）になっています。
+      </p>
+      <p>
+        <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
+        >して<strong>壁に天地を合わせて貼る</strong>と、床（既定 3.0m × 2.5m）を四方の壁（既定の高さ 2.4m）で囲んだ
+        箱型のコートができます（正面 = マーカーの壁。左右と背面は現実に壁が無くても立つ仮想の壁。
+        壁の下端は常に床に接続します）。塗れる空間の大きさ（幅・高さ・奥行き）と床からマーカー中心までの高さ（実測。既定 1.2m）は
+        <a href="./overview.html">PC の俯瞰画面</a>で開始前に変えられ、全員に配られます（URL では指定しません）。
+        コートの中に立って、四方どこでも塗れます。
+        <strong>マーカーは何枚でも</strong>（issue #30）: <a href="./markers.html">マーカー一式を印刷</a>して床・左右・背面の壁にも貼り、
+        原点（正面のマーカー）からの位置を俯瞰画面の「追加マーカーの配置」で配ると、どれか 1 枚でも見えていれば位置合わせが続きます
+        （見上げる・振り向く・床を見るでロストしにくくなります。壁のマーカーは天地を合わせ、床のマーカーは「上」を正面の壁へ向けます。
+        各マーカーの枠と ID を配置どおりに描くので、実物と重ならなければ貼りズレか入力ミスです）。
+        <strong>パーを開いている間、手からインクを連射</strong>します（目 → 手の向きへ。満タンで 50 発）。
+        満タンで 50 発ぶんで、空になると撃てません。<strong>撃つのをやめると回復</strong>します
+        （撃った直後 1 秒は回復せず、約 5 秒で満タン）。
+        残量は<strong>グーで補充している間だけ、手元のインクタンク</strong>（グーの手の横、親指側に浮かぶ筒。水位が残量）に出ます（パーで撃っている間は消えます）。
+        ただし<strong>空になると</strong>パーのままでも出て（枠が黄色く脈打つ）、1/4 ほど回復するまで出続けます。
+      </p>
+      <p>
+        <strong>入室したら練習</strong>（時間無制限に自由に塗れます。<strong>パーで塗る ／ グーで補充</strong>: グーにしている間はインクが約 2 秒で満タン）。
+        対戦は <a href="./overview.html">PC の俯瞰画面</a>の「対戦開始」で始まり（カウントダウン ?waitSec= 既定 5 秒）、
+        <strong>1 分</strong>（?matchSec=）で塗った面積が最多の人の勝ち（俯瞰画面の「対戦を終了」で途中でも結果に進めます）。
+        対戦中は視界の上に自分の順位と塗り率が大きく出ます。結果のあと練習に戻ります。
+        <strong>全員が自分の色で塗り合う個人戦</strong>（参加順に 8 色を割り当て）。
+        何台でも同じ URL を開くだけで同じ room に入ります（既定 room: demo。分けたいときは ?room=名前）。表示名は下の入力欄で設定します（?name= での事前指定も可能）。
+        手が取れないときは<strong>画面を押している間、視界の中央へ連射</strong>
+        （PC は Space キー）。05 で較正した手の実寸（例: ?handScale=1.9）は毎回付けてください。
+      </p>
+      <p id="room-error" hidden></p>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
+      <p>
+        確認の見方: 開始後、まず壁のマーカーを見ます（壁と床の枠、上にスコアボードが出ます）。
+        骨格が背景の手に重なったらパーを開くと連射が始まり、自分の色の玉が壁か床に着弾して塗られれば OK。
+        グーにするとその横（親指側）に自分の色のインクタンクが浮かび、水位が上がっていくのが見えます（パーに戻すと消えます）。
+        撃ち続けて空になると、パーのままでも枠が黄色く脈打つ空のタンクが手の横に出ます。グーにすると水位が上がり、1/4 ほどで消えます。
+        マーカーから目を離してもフィールドはその場に残ります。追加マーカーを配ると HUD の marker= に使っている ID（例 id=0+1）と、
+        2 枚同時に見えたときのばらつき spread=（貼りズレの目安）、self=（自分の位置）が出ます。俯瞰画面で「対戦開始」を押すと視界に「まもなく対戦開始」と出て、
+        格子が消えて 1 分の対戦になります（視界の上に「1位 12.3%」のように自分の順位と塗り率）。俯瞰画面の「対戦を終了」で途中でも結果になります。
+      </p>
+      <p>
+        調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
+        マーカーは ?markerMm=150（印刷ページ markers.html の既定と同じ。変えたら全員と俯瞰画面で揃える）&amp;detW=960&amp;smooth=0.5&amp;markerIntervalMs=100（手用は handDetW / handSmooth / handLostMs）。
+        重力でフィールドを水平に直す ?gravityAlign=1（実機は既定 on。0 で従来どおりマーカーの傾きをそのまま使う）。
+        飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
+        （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。
+        手元のインクタンクは ?tankPlace=thumb（親指側。pinky = 小指側、arm = 手首の先）&amp;tankH=0.12（板の高さ [m]）&amp;tankOffset=0.09（手からずらす距離 [m]）&amp;tankHoldMs=800（グーの手を見失ってから消すまでの猶予 [ms]）。
+        空で出したタンクを下ろす残量は ?tankLowUntil=0.25（0〜1）。
+        従来どおり見えている手のそばに常に出す（手が見えない間は視界の下）なら ?tankShow=always。手が見えないときに視界の下に出さないなら &amp;tankFallback=0。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC&amp;fakehands=1 で、合成の手がパー → グーを繰り返して撃ち続け
+        （パー 2.5s → グー 2s → 休み 0.5s。&amp;fakeOpenSec=9 でタンクが空になるまで撃つ）、
+        別ウィンドウで同じ URL を開くと別の色の相手として同じフィールドを塗り合います（裏タブは描画が止まるので別ウィンドウで）。
+        フェイクカメラは field 座標系に置いたマーカーを投影するので、?fakeMarkers=1:floor:0,-1.2,1.25;5:wall:0.25,0,0（ID:面:x,y,z）で追加マーカーも映せます
+        （カメラは ?fakeCamPos=x,y,z&amp;fakeYaw=&amp;fakePitch=（+ で下向き）。?fakeHideOrigin=1 で原点を描かない。俯瞰画面の配置と一致させること）。
+        俯瞰画面（overview.html）も同じ room 名で開くと、全体が見えて対戦を開始できます。
+        08-2 固有: 位置合わせは ?alignN=10（確定に必要な連続観測数）&amp;alignDist=1.6（マーカーまでの距離の上限 [m]）&amp;alignOff=20（画面中央からの角度の上限 [deg]）&amp;alignFace=25（正対からの角度の上限 [deg]）&amp;alignTilt=15（水平化前の傾きの上限 [deg]）&amp;alignErr=0.15（再投影誤差の上限）&amp;alignSpread=0.05（位置のばらつきの上限 [m]）&amp;alignAngle=3（回転のばらつきの上限 [deg]）。
+        確定後の補正は ?refine=0.02（観測 1 回ごとの EMA 係数。0 で完全固定）&amp;refineMax=0.5（これ以上離れた観測は補正に使わない [m]）。合わせ直しの押し続けは ?realignHoldMs=2000（0 で無効）。
+        PC のフェイクカメラは実行中に window.__fakeCam = { pos, yaw, pitch } を書き換えると動かせます（確定後にカメラを斜めにしてもコートが動かないことの確認用）
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

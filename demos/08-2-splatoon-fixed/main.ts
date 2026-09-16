@@ -1,0 +1,1602 @@
+import * as THREE from "three";
+import { StereoEffect } from "three/examples/jsm/effects/StereoEffect.js";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { DeviceOrientationControls } from "three-stdlib";
+import { numParam, params, resolutionParam } from "../../src/shared/url-params";
+import {
+  CAM_FOV_WIDE,
+  createFakeCameraStream,
+  drawCheckerboard,
+  startPassthrough,
+} from "../../src/shared/passthrough-camera";
+import type { Passthrough } from "../../src/shared/passthrough-camera";
+import { isTouchDevice, runStartFlow, setupFullscreen } from "../../src/shared/start-flow";
+import { setupPlayerNameField } from "../../src/shared/player-name";
+import { createMarkerAnchor } from "../../src/shared/marker-anchor";
+import type { ExtraMarker, MarkerAnchor } from "../../src/shared/marker-anchor";
+import { markerBits } from "../../src/shared/marker-detector";
+import { DEFAULT_MARKER_MM, FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, mulMat4, transformPoint } from "../../src/shared/marker-layout";
+import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
+import { drawProjectedMarkers, fakeCameraToField, parseFakeMarkersParam, projectFakeMarkers } from "../../src/shared/fake-markers";
+import type { FakeMarker } from "../../src/shared/fake-markers";
+import { createHandTracker } from "../../src/shared/hand-tracker";
+import type { HandTracker } from "../../src/shared/hand-tracker";
+import { HandView } from "../../src/shared/hand-view";
+import { INDEX_MCP, LANDMARK_COUNT, MIDDLE_MCP, PINKY_MCP, WRIST } from "../../src/shared/hand-math";
+import type { Vec3, ViewMapping } from "../../src/shared/hand-math";
+import { HandSlots, PALM_CONTACT } from "../../src/shared/hand-slots";
+import type { HandResultLike, HandSlot } from "../../src/shared/hand-slots";
+import { TextPanel } from "../../src/shared/text-panel";
+import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
+import {
+  DEFAULT_FIELD,
+  fieldSurfaces,
+  inkAt,
+  inkPerShot,
+  simulateInk,
+} from "../../src/shared/splatoon-sim";
+import type { FieldConfig, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
+import { inkRegenPerSec } from "../../src/shared/splatoon-game";
+import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
+import { NAME_MAX_LENGTH } from "../../src/shared/splatoon-protocol";
+import type { PlayerPose } from "../../src/shared/splatoon-protocol";
+import { connectGame } from "./game-client";
+import type { GameClient } from "./game-client";
+import { InkView, inkColorHex, inkColorName } from "./ink-view";
+import { InkTankView } from "./ink-tank";
+import { FAKE_FIST_SEC, FAKE_OPEN_SEC, FAKE_REST_SEC, scriptedSplatHand } from "./fake-splat-hand";
+import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
+import { createSplatSound } from "./splat-sound";
+import { createFixedAnchor } from "./fixed-anchor";
+import type { FixedAnchor } from "./fixed-anchor";
+import { DEFAULT_TRUST_LIMITS } from "./fixed-anchor-math";
+
+// Phase 8-2: 08 スプラトゥーンの「位置の取り方」だけを変えた比較用デモ（docs/space-stability-options.md §4 の 5b
+// 「一度合わせて固定」。比較実験の基準線）。ゲームの仕様・UI・サーバー・プロトコルは 08 と同じ（demos/08-splatoon からのコピー）。
+//   - 08 はマーカーが見えるたびにアンカー（field 座標系 → ワールド）を観測へ寄せる（lerp / スナップ）ので、
+//     斜めから見た観測の誤差がそのままコートの揺れになる。
+//   - 08-2 は開始後に「位置合わせ」段階を設け、原点マーカーの正面・近距離（画面の中央に大きく映り、傾きと再投影誤差が
+//     小さい）で N 回連続して安定した観測が取れたときだけアンカーを確定する（位置は中央値、回転は平均）。
+//     確定後はアンカーを更新しない（ロスト・再検出・別マーカーへの切り替えでも動かさない）。回転はジャイロのまま。
+//     ただし確定時と同じ条件を満たす「信頼できる観測」のときだけ ?refine=（EMA 係数。既定 0.02、0 で完全固定）で緩やかに寄せる
+//   - 合わせ直し: 練習中に画面（PC は Space）を ?realignHoldMs=（既定 2000ms）押し続ける。集め直している間もいまの位置で遊べ、
+//     確定した時点で置き換わる（対戦中・カウントダウン中・結果表示中は押し続けても合わせ直さない）
+//   - 追加マーカー（俯瞰画面の配置）も位置合わせの候補になる（見えているマーカーのうち条件の良い 1 枚で信頼度を評価）が、
+//     確定後は切り替えでアンカーを飛ばさない（上の緩やかな補正だけ）
+//   - 実装: src/shared/marker-anchor.ts は変更せず、出力先を観測用の Object3D にして fixed-anchor.ts が本物のアンカーを制御する
+//   - URL パラメータ（08 に無いもの）: ?alignN=10（確定に必要な連続観測数）&alignDist=1.6（マーカーまでの距離の上限 [m]）
+//     &alignOff=20（画面中央からの角度の上限 [deg]）&alignFace=25（正対からの角度の上限 [deg]）&alignTilt=15（水平化前の傾きの上限 [deg]）
+//     &alignErr=0.15（再投影誤差の上限）&alignSpread=0.05（窓の中の位置のばらつきの上限 [m]）&alignAngle=3（回転のばらつきの上限 [deg]）
+//     &refine=0.02（確定後の補正の強さ。0 で完全固定）&refineMax=0.5（これ以上離れた観測は補正に使わない [m]）&realignHoldMs=2000（0 で無効）
+//   - HUD: 08 の marker= の行の代わりに align=（locked / aligning n/N、直近の観測の質と信頼できなかった理由、
+//     obsΔ= 直近の観測とアンカーの差 = 08 ならこのぶん動いていた量、drift= 確定時からの累積の補正量）を同じ位置に出す。
+//     生の観測は obs= に 08 の marker= と同じ内容
+//
+// 以下は 08 の説明のまま。
+// Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
+// 「チームと陣取り」を足した統合ゲーム第 3 弾。
+//   - フィールド: 壁のマーカー 1 枚で壁（Z=0）と床（Y=-floorDrop）の 2 枚の Surface を定義（splatoon-sim.ts）
+//   - 操作: パーの間、手のひらから連射（1 発 = タンクの 1/tankShots。空になると撃てない）。
+//     撃つのをやめると回復し、グーの間は速く回復する（撃った直後 1s は回復しない）。残量はサーバー権威。
+//     向きは「目 → 手のひら」の視線（06-2 で手の速度方向は狙えないと分かったので、07 の指差しと同じ方式）
+//   - インクの残量は手元のタンク（issue #31。ink-tank.ts）: グーで補充している間だけ、そのグーの手のそば（既定は手のひらの親指側）に
+//     水位で出す（パーで撃っている間は消す）。ただし空になったら（1 発ぶんも無い）撃てない理由が分かるように出し、
+//     tankLowUntil まで回復するまで出し続ける。?tankShow=always なら従来どおり見えている手のそば / 手が無いときは視界の下に常に出す
+//   - 進行（issue #18〜#21）: 入室したら練習（時間無制限に自由に塗れる。案内「グーで補充 / パーで塗る」）→
+//     PC の俯瞰画面（overview.html）の「対戦開始」でカウントダウン → 1 分の試合（issue #32。?matchSec=）→ 結果 →
+//     俯瞰画面の「結果を閉じる」で練習に戻る（結果は時間では消えない。issue #45）。
+//     俯瞰画面の「対戦を終了」で途中でも結果へ（カウントダウン中なら中止して練習へ）。
+//     対戦中は視界の上に自分の塗り率と順位を大きく出す（issue #32「パーセント表示がもう少し大きく」）
+//   - マルチマーカー（issue #30）: 正面のマーカー（原点）に加えて床・左右・背面の壁に貼った追加マーカーの配置を
+//     俯瞰画面から配り、どれが見えてもアンカー（原点の姿勢）に直す（marker-anchor.ts の extraMarkers）。
+//     見上げる・振り向く・床を見るでロストしにくくなる。各マーカーの枠を配置どおりに描くので、実物と重ならなければ貼りズレ
+//   - 共有: サーバー権威（server/splatoon.ts）。発射を検証して着弾を決め、塗りの格子と得点を持つ。
+//     クライアントは同じ式（simulateInk）で飛行を描き、着弾時刻にその場所へ塗る
+//   - 手が取れないときの保険: 画面（PC は Space）を押している間、視界の中央へ連射
+
+// ---- パラメータ（06-2 / 07 と同じもの。根拠は 06 の main.ts 参照） ----
+const fovRaw = params.get("fov");
+const FOV_FIXED: number | null =
+  fovRaw === null || fovRaw === "auto" ? null : numParam("fov", 94, { min: 20, max: 170 });
+const EYE_SEP = numParam("eyeSep", 0.064, { min: 0, max: 0.2 });
+const CAM_ZOOM = numParam("camZoom", 0.7, { min: 0.2, max: 5 });
+const CAM_RES = resolutionParam("camRes", [1280, 720]);
+
+/** マーカーの一辺 [mm]。既定は印刷ページ（markers.html）と同じ DEFAULT_MARKER_MM（食い違うと距離が定数倍ずれる。issue #54） */
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
+const MARKER_SIZE_M = MARKER_MM / 1000;
+const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
+const MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 });
+const MARKER_DET_W = numParam("detW", 960, { min: 64, max: 4096 });
+// 08 の ?smooth=（観測を anchor に馴染ませる係数）は 08-2 では使わない（生の観測が要るので平滑化なし。確定後の寄せは ?refine=）
+const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000 });
+const MARKER_LOST_MS = numParam("lostMs", 500, { min: 50, max: 10000 });
+
+// 位置合わせ（08-2 固有。fixed-anchor.ts / fixed-anchor-math.ts）
+/** 確定に必要な「信頼できる観測」の連続数 */
+const ALIGN_SAMPLES = Math.round(numParam("alignN", 10, { min: 1, max: 100 }));
+const ALIGN_TRUST = {
+  maxDistM: numParam("alignDist", DEFAULT_TRUST_LIMITS.maxDistM, { min: 0.1, max: 10 }),
+  maxOffAxisDeg: numParam("alignOff", DEFAULT_TRUST_LIMITS.maxOffAxisDeg, { min: 1, max: 90 }),
+  maxFacingDeg: numParam("alignFace", DEFAULT_TRUST_LIMITS.maxFacingDeg, { min: 1, max: 90 }),
+  maxTiltDeg: numParam("alignTilt", DEFAULT_TRUST_LIMITS.maxTiltDeg, { min: 0, max: 90 }),
+  maxErr: numParam("alignErr", DEFAULT_TRUST_LIMITS.maxErr, { min: 0, max: 100 }),
+};
+const ALIGN_SPREAD_M = numParam("alignSpread", 0.05, { min: 0, max: 2 });
+const ALIGN_ANGLE_DEG = numParam("alignAngle", 3, { min: 0, max: 90 });
+/** 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定 */
+const REFINE = numParam("refine", 0.02, { min: 0, max: 1 });
+/** 確定後、観測がアンカーからこれ以上離れていたら補正に使わない [m]（鏡像解などの疑い） */
+const REFINE_MAX_M = numParam("refineMax", 0.5, { min: 0, max: 20 });
+/** 合わせ直しに必要な押し続けの時間 [ms]（0 で無効） */
+const REALIGN_HOLD_MS = numParam("realignHoldMs", 2000, { min: 0, max: 10000 });
+
+const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));
+const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
+const DELEGATE = delegateRaw === "gpu" ? "GPU" : delegateRaw === "cpu" ? "CPU" : "auto";
+const HAND_SMOOTH = numParam("handSmooth", 0.5, { min: 0.05, max: 1 });
+const HAND_DET_W = numParam("handDetW", 0, { min: 0, max: 4096 });
+const HAND_LOST_MS = numParam("handLostMs", 300, { min: 50, max: 5000 });
+const MAX_DEPTH_M = numParam("maxDepth", 1.5, { min: 0.2, max: 10 });
+const HAND_SCALE = numParam("handScale", 1, { min: 0.2, max: 5 });
+const MATCH_DIST_M = numParam("matchDist", 0.15, { min: 0.02, max: 2 });
+const MATCH_SPEED_MPS = numParam("matchSpeed", 2, { min: 0, max: 20 });
+const SWAP_HANDS = params.get("swapHands") === "1";
+const OFFICIAL_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const MODEL_URLS = params.get("model")
+  ? [params.get("model")!]
+  : [`${import.meta.env.BASE_URL}models/hand_landmarker.task`, OFFICIAL_MODEL_URL];
+
+// Room / 通信
+const roomRaw = params.get("room");
+const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
+const SEND_INTERVAL_MS = 1000 / numParam("sendHz", 15, { min: 1, max: 60 });
+const PEER_STALE_MS = numParam("peerStaleMs", 2000, { min: 200, max: 30000 });
+const PEER_SMOOTH = numParam("peerSmooth", 0.3, { min: 0.01, max: 1 });
+
+// 飛行・時間（room 内で一致が必要。サーバーが検証）。
+// フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL ではなくサーバーの状態で、俯瞰画面から変える（welcome / field で届く）
+const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
+const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
+/** 俯瞰画面で「対戦開始」を押してから試合が始まるまでのカウントダウン [s] */
+const WAIT_SEC = numParam("waitSec", DEFAULT_FIELD.waitSec, { min: 0, max: 120 });
+/** ペイント層の解像度 [px/m]（07 と同じ理由で控えめ） */
+const SURFACE_PX_PER_M = numParam("surfacePx", 384, { min: 64, max: 2048 });
+/** 発射後、サーバーの確認が来るまで予測を出す上限 [ms] */
+const PREDICT_MAX_MS = 1500;
+
+/** 着弾の音（?sound=0 で無効） */
+const SOUND = params.get("sound") !== "0";
+
+// 手元のインクタンク（issue #31）
+/** タンクの板の高さ [m]（幅はその 0.4 倍）。実機で手の大きさと見比べて決める */
+const TANK_H = numParam("tankH", 0.12, { min: 0.03, max: 0.5 });
+/** タンクの中心を手からずらす距離 [m]（thumb / pinky は手のひらの中心から、arm は手首から） */
+const TANK_OFFSET = numParam("tankOffset", 0.09, { min: 0, max: 0.5 });
+/** タンクの置き場所: thumb = 手のひらの親指側（既定）、pinky = 小指側、arm = 手首の先（前腕側）。手が低いと arm は視界の下で切れやすい */
+const tankPlaceRaw = params.get("tankPlace") ?? "thumb";
+const TANK_PLACE: "thumb" | "pinky" | "arm" = tankPlaceRaw === "pinky" || tankPlaceRaw === "arm" ? tankPlaceRaw : "thumb";
+/**
+ * タンクを出す条件: fist = グーで補充している間だけ、そのグーの手のそばに出す（既定）。
+ * always = 見えている手（パー優先）のそばに常に出す（手が無いときは視界の下）
+ */
+const TANK_SHOW: "fist" | "always" = params.get("tankShow") === "always" ? "always" : "fist";
+/**
+ * tankShow=fist のとき: 空になった（1 発ぶんも無い）ら出し、残量がここまで回復するまで出し続ける（0..1）。
+ * 1 発ぶん回復 → 撃つ → また空、の繰り返しで点滅しないためのヒステリシス
+ */
+const TANK_LOW_UNTIL = numParam("tankLowUntil", 0.25, { min: 0, max: 1 });
+/** 手が見えないとき、視界の下にタンクを出すか（?tankFallback=0 で出さない。tankShow=always のときだけ意味がある） */
+const TANK_FALLBACK = params.get("tankFallback") !== "0";
+/**
+ * 手が消えてから最後の手の位置に留める時間 [ms]（MediaPipe の一瞬の取りこぼしで往復しないように）。
+ * fist のときはこの時間を過ぎたら消える。always のときは視界の下へ落ちる
+ */
+const TANK_HOLD_MS = numParam("tankHoldMs", 800, { min: 0, max: 5000 });
+
+// デバッグ
+const FAKE_CAM = params.has("fakecam");
+const FAKE_SHIFT = numParam("fakeShift", 0, { min: -200, max: 200 });
+const FAKE_SHIFT_Y = numParam("fakeShiftY", 0, { min: -240, max: 240 });
+const FAKE_MARKER_PX = numParam("fakeMarkerPx", 80, { min: 30, max: 400 });
+const FAKE_HANDS = params.has("fakehands");
+// フェイクカメラのマルチマーカー（fake-markers.ts）: 追加マーカーを field 座標系に置き、フェイクカメラの姿勢から投影する。
+// ?fakeMarkers=1:floor:0,-1.2,0.6;5:wall:0.25,0,0（ID:面:x,y,z）。カメラは ?fakeCamPos=x,y,z（未指定なら
+// fakeMarkerPx / fakeShift / fakeShiftY から「原点マーカーがその大きさ・位置に映る」正面の位置）+ ?fakeYaw=（+ で左）&fakePitch=（+ で下）。
+// ?fakeHideOrigin=1 で原点マーカーを描かない（追加マーカーだけで位置合わせできるかの確認）
+const FAKE_MARKERS = parseFakeMarkersParam(params.get("fakeMarkers"));
+const FAKE_CAM_POS = (params.get("fakeCamPos") ?? "").split(",").map(Number);
+const FAKE_YAW = numParam("fakeYaw", 0, { min: -180, max: 180 });
+const FAKE_PITCH = numParam("fakePitch", 0, { min: -90, max: 90 });
+const FAKE_HIDE_ORIGIN = params.get("fakeHideOrigin") === "1";
+/** 合成の手の パー → グー → 休み の時間 [s]（?fakeOpenSec=9 でタンクが空になるまで撃ち続ける） */
+const FAKE_TIMING = {
+  openSec: numParam("fakeOpenSec", FAKE_OPEN_SEC, { min: 0, max: 60 }),
+  fistSec: numParam("fakeFistSec", FAKE_FIST_SEC, { min: 0, max: 60 }),
+  restSec: numParam("fakeRestSec", FAKE_REST_SEC, { min: 0, max: 60 }),
+};
+
+/** フェイクカメラの原点マーカーを X 軸まわりに傾けて描く角度 [deg]（+ で上端が視点側へ）。重力での水平化の確認用（issue #54） */
+const FAKE_TILT_DEG = numParam("fakeTilt", 0, { min: -80, max: 80 });
+
+/** タッチ端末（実機）か。PC は OrbitControls + キーボード */
+const touch = isTouchDevice();
+/**
+ * 重力でアンカーを水平に直す（issue #54。marker-anchor.ts の worldUp）。ジャイロ（実機）とフェイクカメラでは既定 on、
+ * PC + 実カメラ（OrbitControls）ではワールドと重力が対応しないので off。?gravityAlign=0/1 で上書き
+ */
+const GRAVITY_ALIGN = params.has("gravityAlign") ? params.get("gravityAlign") !== "0" : touch || FAKE_CAM;
+
+// ---- シーン ----
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a2233);
+
+const camera = new THREE.PerspectiveCamera(FOV_FIXED ?? 94, innerWidth / innerHeight, 0.05, 100);
+camera.position.set(0, 1.6, 0);
+scene.add(camera);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.2));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+dirLight.position.set(3, 10, 2);
+scene.add(dirLight);
+
+// ---- アンカー（マーカー座標系 = field 座標系）。壁のマーカーなので回さない ----
+// 08-2: anchor に書くのは fixed-anchor.ts だけ。createMarkerAnchor の出力先は observed（生の観測。scene に入れない）
+const anchor = new THREE.Group();
+anchor.visible = false;
+scene.add(anchor);
+const field = anchor;
+const observed = new THREE.Group();
+let fixedAnchor: FixedAnchor | null = null;
+
+// マーカーの枠（原点 + 追加マーカー。配置どおりの位置に描く。見えているものは青、それ以外は灰、ロスト中は赤）。
+// 追加マーカーを別のマーカー越しに見たとき、枠が実物のマーカーに重ならなければ「貼りズレ か 配置の入力ミス」と分かる
+type MarkerFrame = { id: number; mesh: THREE.Mesh; material: THREE.MeshBasicMaterial; label: TextPanel | null };
+const markerFrameGeometry = new THREE.PlaneGeometry(MARKER_SIZE_M, MARKER_SIZE_M);
+function createMarkerFrame(id: number, labelText: string | null): MarkerFrame {
+  const material = new THREE.MeshBasicMaterial({ color: 0x8ab4f8, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(markerFrameGeometry, material);
+  let label: TextPanel | null = null;
+  if (labelText !== null) {
+    label = new TextPanel(MARKER_SIZE_M * 1.6, MARKER_SIZE_M * 0.5, 256, 6);
+    label.mesh.position.set(0, MARKER_SIZE_M * 0.85, 0.005);
+    label.set(labelText, "#e8eaed");
+    mesh.add(label.mesh);
+  }
+  return { id, mesh, material, label };
+}
+const originFrame = createMarkerFrame(MARKER_ID, null);
+anchor.add(originFrame.mesh);
+/** 追加マーカーの枠（配置が変わるたび作り直す） */
+let extraFrames: MarkerFrame[] = [];
+/** 追加マーカー（marker-anchor.ts に渡す。配置が変わるたび差し替える） */
+let extraMarkers: ExtraMarker[] = [];
+let markerLayoutKey = "";
+
+/** サーバーの配置（config.markers）を取り込む。変わっていれば枠とアンカーの候補を作り直す */
+function applyMarkerLayout(markers: MarkerPlacement[]): boolean {
+  const key = JSON.stringify(markers);
+  if (key === markerLayoutKey) return false;
+  markerLayoutKey = key;
+  for (const f of extraFrames) {
+    f.mesh.removeFromParent();
+    f.material.dispose();
+    f.label?.mesh.material.map?.dispose();
+    f.label?.mesh.material.dispose();
+    f.label?.mesh.geometry.dispose();
+  }
+  extraFrames = [];
+  extraMarkers = [];
+  for (const m of markers) {
+    const toAnchor = new THREE.Matrix4().fromArray(markerToFieldMatrix(m));
+    extraMarkers.push({ id: m.id, toAnchor });
+    const frame = createMarkerFrame(m.id, `${FACE_LABELS[m.face]} ${m.id}`);
+    frame.mesh.matrixAutoUpdate = false;
+    frame.mesh.matrix.copy(toAnchor);
+    anchor.add(frame.mesh);
+    extraFrames.push(frame);
+  }
+  return true;
+}
+
+// ---- フィールド（壁 + 床）----
+// 寸法はサーバーが権威（welcome / field で届く）。届くまでは既定の寸法で枠だけ出しておく
+let fieldCfg: FieldConfig = {
+  ...DEFAULT_FIELD,
+  gravity: GRAVITY,
+  matchSec: MATCH_SEC,
+  waitSec: WAIT_SEC,
+};
+let surfaces: SurfaceFrame[] = [];
+const inkViews = new Map<string, InkView>();
+
+// スコアボード: 壁の上端（issue #32 で 1.0×0.22 → 1.5×0.33 に拡大。壁から 2〜3m 離れると読めなかった）。視界内メッセージ: カメラの子
+const scorePanel = new TextPanel(1.5, 0.33);
+field.add(scorePanel.mesh);
+
+/** 壁と床（5 枚）と塗りの層を config から作り直す（起動時と、寸法が変わったとき） */
+function buildField() {
+  for (const v of inkViews.values()) v.dispose();
+  inkViews.clear();
+  surfaces = fieldSurfaces(fieldCfg);
+  for (const s of surfaces) {
+    const view = new InkView(s, SURFACE_PX_PER_M, fieldCfg.cellM);
+    field.add(view.group);
+    inkViews.set(s.id, view);
+  }
+  // 壁の下端は床（-floorDrop）に接続し、上端は床から wallH
+  scorePanel.mesh.position.set(0, -fieldCfg.floorDrop + fieldCfg.wallH + 0.22, 0.01);
+}
+buildField();
+
+/** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（塗りは直後の state の格子で描き直される）。追加マーカーの配置も反映する */
+function applyFieldConfig(cfg: FieldConfig): boolean {
+  const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
+  fieldCfg = cfg;
+  if (changed) buildField();
+  applyMarkerLayout(cfg.markers ?? []);
+  return changed;
+}
+const message = new TextPanel(0.9, 0.24);
+message.mesh.position.set(0, -0.28, -1.2);
+camera.add(message.mesh);
+// 手元のインクタンク（issue #31）。置き場所と残量は updateInkTank で毎フレーム決める
+const inkTank = new InkTankView(TANK_H);
+camera.add(inkTank.mesh);
+// 自分の塗り率と順位（視界の上・対戦中だけ。issue #32「対戦中のパーセント表示がもう少し大きく見えると良い」。
+// 壁のスコアボードは離れると小さいので、視界に固定して minCols=8 で文字を大きく出す）
+const percentPanel = new TextPanel(0.6, 0.16, 512, 8);
+percentPanel.mesh.position.set(0, 0.34, -1.2);
+camera.add(percentPanel.mesh);
+
+// ---- インクの玉（飛行中）----
+const inkGeometry = new THREE.SphereGeometry(1, 16, 12);
+const inkMaterials = new Map<number, THREE.MeshStandardMaterial>();
+function inkMaterialOf(color: InkColor): THREE.MeshStandardMaterial {
+  let m = inkMaterials.get(color);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({ color: inkColorHex(color), roughness: 0.4 });
+    inkMaterials.set(color, m);
+  }
+  return m;
+}
+function createInkMesh(color: InkColor, radius: number): THREE.Mesh {
+  const m = new THREE.Mesh(inkGeometry, inkMaterialOf(color));
+  m.scale.setScalar(radius * 0.45);
+  field.add(m);
+  return m;
+}
+const splatSound = createSplatSound(SOUND);
+// iOS はバックグラウンド移行や音声割り込みで AudioContext が suspended に戻るので、タッチのたびと復帰時に resume を試す
+addEventListener("pointerdown", () => splatSound.unlock());
+addEventListener("pageshow", () => splatSound.unlock());
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") splatSound.unlock();
+});
+
+// ---- ピア（他のプレイヤー）: 頭 + 手（06-2 と同じ）。チーム色 ----
+type Peer = {
+  group: THREE.Group;
+  materials: THREE.MeshStandardMaterial[];
+  targetPos: THREE.Vector3;
+  targetQuat: THREE.Quaternion;
+  lastPoseMs: number;
+  tracking: boolean;
+  hands: HandView[];
+  handTargets: (Vec3[] | null)[];
+  handCurrent: (Vec3[] | null)[];
+};
+const peers = new Map<string, Peer>();
+const peerHeadGeometry = new THREE.SphereGeometry(0.09, 24, 16);
+const peerNoseGeometry = new THREE.ConeGeometry(0.035, 0.09, 16);
+
+function createPeer(id: string): Peer {
+  removePeer(id);
+  const group = new THREE.Group();
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xe8eaed, transparent: true });
+  const noseMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, transparent: true });
+  group.add(new THREE.Mesh(peerHeadGeometry, headMat));
+  const nose = new THREE.Mesh(peerNoseGeometry, noseMat);
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.z = -0.1;
+  group.add(nose);
+  group.visible = false;
+  field.add(group);
+  const hands = [new HandView(0xe8eaed, 0.01), new HandView(0xe8eaed, 0.01)];
+  for (const h of hands) field.add(h.group);
+  const peer: Peer = {
+    group,
+    materials: [headMat, noseMat],
+    targetPos: new THREE.Vector3(),
+    targetQuat: new THREE.Quaternion(),
+    lastPoseMs: -Infinity,
+    tracking: false,
+    hands,
+    handTargets: [null, null],
+    handCurrent: [null, null],
+  };
+  peers.set(id, peer);
+  return peer;
+}
+
+function removePeer(id: string) {
+  const peer = peers.get(id);
+  if (!peer) return;
+  peer.group.removeFromParent();
+  peer.materials.forEach((m) => m.dispose());
+  for (const h of peer.hands) h.dispose();
+  peers.delete(id);
+}
+
+function onPeerPose(id: string, pose: PlayerPose) {
+  const peer = peers.get(id) ?? createPeer(id);
+  peer.targetPos.set(...pose.pos);
+  peer.targetQuat.set(...pose.quat);
+  peer.tracking = pose.tracking;
+  const now = performance.now();
+  if (now - peer.lastPoseMs > PEER_STALE_MS) {
+    peer.group.position.copy(peer.targetPos);
+    peer.group.quaternion.copy(peer.targetQuat);
+    peer.handCurrent = [null, null];
+  }
+  peer.lastPoseMs = now;
+  for (let i = 0; i < 2; i++) {
+    const flat = pose.hands?.[i];
+    if (!flat) {
+      peer.handTargets[i] = null;
+      continue;
+    }
+    const pts: Vec3[] = [];
+    for (let k = 0; k < LANDMARK_COUNT; k++) pts.push({ x: flat[k * 3], y: flat[k * 3 + 1], z: flat[k * 3 + 2] });
+    peer.handTargets[i] = pts;
+  }
+}
+
+let lastPeerUpdateMs = performance.now();
+function updatePeers(now: number) {
+  const dtFrames = Math.min((now - lastPeerUpdateMs) / (1000 / 60), 4);
+  lastPeerUpdateMs = now;
+  const alpha = 1 - Math.pow(1 - PEER_SMOOTH, dtFrames);
+  for (const [id, peer] of peers) {
+    if (peer.lastPoseMs === -Infinity) continue;
+    const stale = now - peer.lastPoseMs > PEER_STALE_MS;
+    peer.group.visible = !stale;
+    if (stale) {
+      for (const h of peer.hands) h.hide();
+      continue;
+    }
+    peer.group.position.lerp(peer.targetPos, alpha);
+    peer.group.quaternion.slerp(peer.targetQuat, alpha);
+    const opacity = peer.tracking ? 1 : 0.3;
+    for (const m of peer.materials) m.opacity = opacity;
+    const color = colorHexOf(id);
+    peer.materials[0].color.setHex(color);
+    for (const [i, view] of peer.hands.entries()) {
+      const target = peer.handTargets[i];
+      if (!target) {
+        view.hide();
+        peer.handCurrent[i] = null;
+        continue;
+      }
+      let cur = peer.handCurrent[i];
+      if (!cur) {
+        cur = target.map((p) => ({ ...p }));
+        peer.handCurrent[i] = cur;
+      } else {
+        for (let k = 0; k < LANDMARK_COUNT; k++) {
+          cur[k].x += (target[k].x - cur[k].x) * alpha;
+          cur[k].y += (target[k].y - cur[k].y) * alpha;
+          cur[k].z += (target[k].z - cur[k].z) * alpha;
+        }
+      }
+      view.setColor(color);
+      view.update(cur);
+    }
+  }
+}
+
+// ---- 自分の手（src/shared/hand-slots.ts） ----
+const handSlots = new HandSlots({
+  camera,
+  numHands: NUM_HANDS,
+  smooth: HAND_SMOOTH,
+  lostMs: HAND_LOST_MS,
+  maxDepthM: MAX_DEPTH_M,
+  handScale: HAND_SCALE,
+  matchDistM: MATCH_DIST_M,
+  matchSpeedMps: MATCH_SPEED_MPS,
+  swapHands: SWAP_HANDS,
+});
+
+// ---- レンダラー + 2眼 ----
+let passthrough: Passthrough | null = null;
+let markerAnchor: MarkerAnchor | null = null;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.querySelector<HTMLDivElement>("#app")!.appendChild(renderer.domElement);
+const effect = new StereoEffect(renderer);
+effect.setEyeSeparation(EYE_SEP);
+
+function resize() {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  effect.setSize(innerWidth, innerHeight);
+  passthrough?.updateCover();
+}
+resize();
+addEventListener("resize", resize);
+
+// ---- パススルー（PC デバッグ用フェイクカメラ） ----
+// 06-2 / 07 は「マーカー画像を画面の決まった位置に貼る」だけだったが、マルチマーカーは全マーカーを同じ視点で
+// 投影しないと位置合わせが検証できないので、field 座標系に置いたマーカーをピンホールで投影する（fake-markers.ts）。
+// 原点マーカーだけなら従来と同じ見え方（余白込みが fakeMarkerPx の大きさで、fakeShift / fakeShiftY の位置）になる
+const FAKE_CAM_W = 640;
+const FAKE_CAM_H = 480;
+/** フェイクカメラの焦点距離 [px]。検出側（marker-anchor.ts）と同じ換算（長辺 / 2 / tan(水平 FOV / 2)。FOV はラベル無し = 標準カメラ扱い） */
+const FAKE_FOCAL_PX = FAKE_CAM_W / 2 / Math.tan(THREE.MathUtils.degToRad(params.has("camFov") ? numParam("camFov", CAM_FOV_WIDE, { min: 10, max: 170 }) : CAM_FOV_WIDE) / 2);
+/** 描かないマーカーの ID（ヘッドレス確認から window.__fakeMarkers.hidden で切り替えて、ロスト → 別マーカーへの切り替えを見る） */
+const fakeHidden = new Set<number>(FAKE_HIDE_ORIGIN ? [MARKER_ID] : []);
+if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = { hidden: fakeHidden };
+/** 直近に作ったフェイクカメラの姿勢（カメラ → field。fakeWorldUp 用） */
+let fakeCamToField: number[] | null = null;
+/**
+ * 08-2: フェイクカメラの姿勢を実行中に変えられるようにする（ヘッドレス確認で「確定 → カメラを斜めにする / 少し動かす」を再現する）。
+ * window.__fakeCam = { pos, yaw, pitch } を書き換えると次のフレームから反映される（pos が null なら URL の既定位置）
+ */
+const fakeCamState: { pos: [number, number, number] | null; yaw: number; pitch: number } = {
+  pos: FAKE_CAM_POS.length === 3 && FAKE_CAM_POS.every(Number.isFinite) ? [FAKE_CAM_POS[0], FAKE_CAM_POS[1], FAKE_CAM_POS[2]] : null,
+  yaw: FAKE_YAW,
+  pitch: FAKE_PITCH,
+};
+if (FAKE_CAM) (window as unknown as { __fakeCam: unknown }).__fakeCam = fakeCamState;
+/** フェイクカメラの姿勢（カメラ → field）をいまの fakeCamState から作る */
+function fakeCamPose(): number[] {
+  let pos: [number, number, number];
+  if (fakeCamState.pos) {
+    pos = fakeCamState.pos;
+  } else {
+    // 原点マーカーが fakeMarkerPx の大きさで、中央から (fakeShift, fakeShiftY) px ずれて映る正面の位置。
+    // 従来は余白込みの SVG（10 セル）を fakeMarkerPx で描いていたので黒い正方形は 0.8 倍。同じ見え方にするため 0.8 を掛ける
+    const d = (MARKER_SIZE_M * FAKE_FOCAL_PX) / (0.8 * FAKE_MARKER_PX);
+    pos = [(-FAKE_SHIFT * d) / FAKE_FOCAL_PX, (FAKE_SHIFT_Y * d) / FAKE_FOCAL_PX, d];
+  }
+  const camToField = fakeCameraToField(pos, fakeCamState.yaw, fakeCamState.pitch);
+  fakeCamToField = camToField;
+  return camToField;
+}
+function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
+  // 原点マーカー。?fakeTilt= があれば X 軸まわりに傾けて描く（重力は field の上のまま → 水平化が効くかを見る）
+  const t = THREE.MathUtils.degToRad(FAKE_TILT_DEG);
+  const tiltX = [1, 0, 0, 0, 0, Math.cos(t), Math.sin(t), 0, 0, -Math.sin(t), Math.cos(t), 0, 0, 0, 0, 1];
+  const originToField = mulMat4(markerToFieldMatrix({ id: MARKER_ID, face: "wall", pos: [0, 0, 0] }), tiltX);
+  const markers: FakeMarker[] = [{ id: MARKER_ID, bits: markerBits(MARKER_ID), toField: originToField }];
+  for (const m of FAKE_MARKERS) {
+    if (m.id === MARKER_ID || !(MARKER_FACES as readonly string[]).includes(m.face)) continue;
+    markers.push({ id: m.id, bits: markerBits(m.id), toField: markerToFieldMatrix({ id: m.id, face: m.face as MarkerFace, pos: m.pos }) });
+  }
+  return { markers, camToField: fakeCamPose() };
+}
+/**
+ * ワールド座標系での「上」（marker-anchor.ts の worldUp）。ジャイロならワールドの Y がそのまま重力の上。
+ * フェイクカメラなら「合成カメラから見た field の上」を仮想カメラの姿勢でワールドへ回す（実機でジャイロが返す値の代わり）
+ */
+const worldUpVec = new THREE.Vector3();
+function worldUp(): THREE.Vector3 | null {
+  if (!GRAVITY_ALIGN) return null;
+  if (!FAKE_CAM) return worldUpVec.set(0, 1, 0);
+  if (!fakeCamToField) return null;
+  const fieldToCam = invertRigid(fakeCamToField);
+  const o = transformPoint(fieldToCam, [0, 0, 0]);
+  const u = transformPoint(fieldToCam, [0, 1, 0]);
+  return worldUpVec.set(u[0] - o[0], u[1] - o[1], u[2] - o[2]).transformDirection(camera.matrixWorld);
+}
+function fakeStream(): MediaStream {
+  const world = fakeWorld();
+  return createFakeCameraStream(
+    (ctx, canvas, frame) => {
+      drawCheckerboard(ctx, canvas, frame);
+      const visible = world.markers.filter((m) => !fakeHidden.has(m.id));
+      // 08-2: カメラの姿勢は毎フレーム fakeCamState から作る（実行中に動かせる）
+      drawProjectedMarkers(ctx, projectFakeMarkers(visible, fakeCamPose(), FAKE_FOCAL_PX, canvas.width, canvas.height, MARKER_SIZE_M));
+    },
+    { width: FAKE_CAM_W, height: FAKE_CAM_H },
+  );
+}
+
+async function startCameraAndMarker(onProgress: (step: string) => void) {
+  passthrough = await startPassthrough(
+    scene,
+    {
+      fakeStream: FAKE_CAM ? fakeStream : undefined,
+      camRes: CAM_RES,
+      preferUltraWide: params.get("lens") !== "wide",
+      camFovOverride: params.has("camFov") ? numParam("camFov", 68, { min: 10, max: 170 }) : undefined,
+      eyeAspect: () => innerWidth / 2 / innerHeight,
+      zoom: CAM_ZOOM,
+    },
+    onProgress,
+  );
+  const pt = passthrough;
+  // 08-2: 出力先は observed（平滑化なし・常にスナップ = 生の観測）。field のアンカーは fixedAnchor だけが書く。
+  // ?smooth= は 08 と同名だが、ここでは使わない（生の観測が要る）
+  markerAnchor = createMarkerAnchor({
+    video: pt.video,
+    camera,
+    anchor: observed,
+    markerSizeM: MARKER_SIZE_M,
+    markerId: MARKER_ID,
+    extraMarkers: () => extraMarkers,
+    maxPoseError: MAX_POSE_ERROR,
+    detW: MARKER_DET_W,
+    smooth: 1,
+    minIntervalMs: MARKER_INTERVAL_MS,
+    camHFovDeg: () => pt.camHFovDeg,
+    resnapAfterMs: 0,
+    snapDistanceM: 0,
+    worldUp,
+  });
+  const identity = new THREE.Matrix4();
+  fixedAnchor = createFixedAnchor({
+    camera,
+    anchor,
+    observed,
+    markerAnchor: () => markerAnchor,
+    toAnchorOf: (id) => (id === MARKER_ID ? identity : (extraMarkers.find((m) => m.id === id)?.toAnchor ?? null)),
+    samples: ALIGN_SAMPLES,
+    trust: ALIGN_TRUST,
+    maxSpreadM: ALIGN_SPREAD_M,
+    maxAngleDeg: ALIGN_ANGLE_DEG,
+    refine: REFINE,
+    refineMaxM: REFINE_MAX_M,
+    lostMs: MARKER_LOST_MS,
+  });
+  (window as unknown as { __fixedDebug: unknown }).__fixedDebug = {
+    anchorPos: () => [anchor.position.x, anchor.position.y, anchor.position.z],
+    anchorQuat: () => [anchor.quaternion.x, anchor.quaternion.y, anchor.quaternion.z, anchor.quaternion.w],
+    observedPos: () => [observed.position.x, observed.position.y, observed.position.z],
+    state: () => ({ locked: fixedAnchor?.locked, realigning: fixedAnchor?.realigning, locks: fixedAnchor?.locks, refined: fixedAnchor?.refined, count: fixedAnchor?.count, reason: fixedAnchor?.lastReason, obsDeltaM: fixedAnchor?.obsDeltaM, obsRotDeg: fixedAnchor?.obsRotDeg, driftM: fixedAnchor?.driftM }),
+  };
+}
+
+// ---- 手トラッキング（06 と同じ初期化・失敗時の CPU 再試行） ----
+let tracker: HandTracker | null = null;
+let trackerStatus = "idle";
+let lastTrackerError = "";
+let retriedWithCpu = false;
+let lastDetectAt = -Infinity;
+let detIntervalEma = 0;
+let lastResultHands = 0;
+
+async function initTracker(delegate: typeof DELEGATE = DELEGATE, modelBuffer?: ArrayBuffer) {
+  trackerStatus = "loading";
+  try {
+    tracker = await createHandTracker(
+      {
+        numHands: NUM_HANDS,
+        delegate,
+        modelBuffer,
+        modelUrls: MODEL_URLS,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+        inputMaxSide: HAND_DET_W,
+        inputMaxSideCpu: 640,
+      },
+      (step) => {
+        trackerStatus = `loading: ${step}`;
+      },
+    );
+    const modelSource = modelBuffer ? "reused" : tracker.modelUrl.startsWith("http") ? "remote" : "local";
+    trackerStatus = `ready ${tracker.delegate} model=${modelSource}`;
+  } catch (e: unknown) {
+    trackerStatus = `error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+function onTrackerFailure(e: unknown) {
+  console.error("[hand-tracker] 推論に失敗:", e);
+  const msg = e instanceof Error ? e.message : String(e);
+  lastTrackerError = `${tracker?.delegate ?? "?"}: ${msg}`;
+  const failed = tracker;
+  tracker = null;
+  try {
+    failed?.close();
+  } catch {
+    // close 自体の失敗は無視
+  }
+  if (failed?.delegate === "GPU" && DELEGATE === "auto" && !retriedWithCpu) {
+    retriedWithCpu = true;
+    trackerStatus = "GPU で推論失敗 → CPU で再初期化";
+    void initTracker("CPU", failed.modelBuffer);
+  } else {
+    trackerStatus = `error: 推論失敗 ${msg}`;
+  }
+}
+
+const tmpVec = new THREE.Vector3();
+const tmpVec2 = new THREE.Vector3();
+const tmpQuat = new THREE.Quaternion();
+let fakeStartMs = -1;
+
+function updateFakeHands(now: number) {
+  if (now - lastDetectAt < 33 || !passthrough) return;
+  const mapping = passthrough.displayViewMapping(camera.fov);
+  if (fakeStartMs < 0) fakeStartMs = now;
+  lastDetectAt = now;
+  const r = scriptedSplatHand((now - fakeStartMs) / 1000, mapping, FAKE_TIMING);
+  if (r) applyHandResult(r, now);
+}
+
+function updateHands(now: number) {
+  if (FAKE_HANDS) updateFakeHands(now);
+  if (tracker && passthrough) {
+    let result: ReturnType<HandTracker["detect"]> = null;
+    try {
+      result = tracker.detect(passthrough.video);
+    } catch (e: unknown) {
+      onTrackerFailure(e);
+      return;
+    }
+    if (result) {
+      if (lastDetectAt > 0) {
+        detIntervalEma = detIntervalEma ? detIntervalEma * 0.9 + (now - lastDetectAt) * 0.1 : now - lastDetectAt;
+      }
+      lastDetectAt = now;
+      applyHandResult(result, now);
+    }
+  }
+  handSlots.update(now);
+  // 自分の手はチーム色
+  for (const slot of handSlots.slots) {
+    if (!slot.view.visible) continue;
+    slot.view.setColor(myColor ? inkColorHex(myColor) : 0xe8eaed);
+  }
+}
+
+function applyHandResult(result: HandResultLike, now: number) {
+  if (!passthrough) return;
+  const mapping = passthrough.displayViewMapping(camera.fov);
+  const depthMapping: ViewMapping = FAKE_HANDS ? mapping : (passthrough.metricViewMapping() ?? mapping);
+  lastResultHands = result.landmarks.length;
+  handSlots.apply(result, now, mapping, depthMapping);
+}
+
+// ---- 試合の状態（サーバー権威） ----
+let selfId = "";
+let netStatus = "idle";
+let client: GameClient | null = null;
+let joined = false;
+let auth: { state: GameSnapshot; recvMs: number } | null = null;
+let myColor: InkColor | null = null;
+let cameraError = "";
+let shotsSent = 0;
+let shotsAccepted = 0;
+let lastRejectReason = "";
+let flash: { text: string; untilMs: number } | null = null;
+let lastEventKey = "";
+
+function colorOf(id: string): InkColor | null {
+  return auth?.state.players.find((p) => p.id === id)?.color ?? null;
+}
+function colorHexOf(id: string): number {
+  const c = colorOf(id);
+  return c ? inkColorHex(c) : 0xe8eaed;
+}
+
+/** 権威時刻 → 受信時刻基準のローカル時刻 [ms] */
+function localTimeOf(serverT: number, refServerT: number, refLocalMs: number): number {
+  return refLocalMs + (serverT - refServerT);
+}
+
+function onState(state: GameSnapshot) {
+  const now = performance.now();
+  auth = { state, recvMs: now };
+  myColor = colorOf(selfId);
+  // インク残量はサーバーが権威。受信のたびローカルの予測を上書きする（間はローカルで進める）
+  const serverInk = state.ink?.[selfId];
+  if (serverInk !== undefined) inkLocal = serverInk;
+  const ev = state.event;
+  if (ev?.kind === "reset") {
+    // リセット前に飛んでいたローカルの玉が、空の格子を受け取った後で再着弾しないよう捨てる
+    clearPredicted();
+    for (const s of shots.values()) s.mesh.removeFromParent();
+    shots.clear();
+    splatted.clear();
+  }
+  const key = ev ? `${state.seq}:${ev.kind}` : "";
+  if (key && key !== lastEventKey) {
+    lastEventKey = key;
+    if (ev?.kind === "start") flash = { text: "スタート！ 塗れ！", untilMs: now + 2500 };
+    else if (ev?.kind === "countdown") flash = { text: "まもなく対戦開始！\n構えてください", untilMs: now + 2500 };
+    else if (ev?.kind === "practice") flash = { text: "練習に戻りました\n（開始は俯瞰画面から）", untilMs: now + 3000 };
+    else if (ev?.kind === "cancel") flash = { text: "対戦開始は中止されました\n練習を続けてください", untilMs: now + 3000 };
+    else if (ev?.kind === "field") flash = { text: `フィールドが変わりました\n幅 ${fieldCfg.wallW}m × 高さ ${fieldCfg.wallH}m × 奥行き ${fieldCfg.floorDepth}m\nマーカーの高さ ${fieldCfg.floorDrop}m`, untilMs: now + 3000 };
+    else if (ev?.kind === "result") {
+      const text =
+        ev.winners.length === 0
+          ? "だれも塗れず…"
+          : ev.winners.includes(selfId)
+            ? "あなたの勝ち！"
+            : `${ev.winnerNames.join("・")} の勝ち！`;
+      flash = { text: ev.stopped ? `そこまで！\n${text}` : text, untilMs: now + 4000 };
+    }
+    console.log(`[game] event ${ev?.kind} phase=${state.phase} scores=${JSON.stringify(state.scores)} players=${state.players.length}`);
+  }
+  if (state.grids) {
+    for (const [id, enc] of Object.entries(state.grids)) {
+      inkViews.get(id)?.redrawFromGrid(enc, fieldCfg.cellM);
+    }
+    // 格子で描き直したので、着弾済みの玉の再描画は要らない
+    for (const s of state.shots) if (s.landing?.hit) splatted.add(s.seq);
+  }
+  // 発射一覧の同期（再接続直後の取りこぼし用。既知の seq は無視）
+  for (const s of state.shots) {
+    if (!shots.has(s.seq)) addShot(s, state.t, now);
+  }
+}
+
+function connect(name: string) {
+  if (ROOM === null) return;
+  client = connectGame(
+    ROOM,
+    name,
+    {
+      markerId: MARKER_ID,
+      markerMm: MARKER_MM,
+      gravity: GRAVITY,
+      matchSec: MATCH_SEC,
+      waitSec: WAIT_SEC,
+    },
+    {
+      onStatus: (status) => {
+        netStatus = status;
+        if (status !== "open") joined = false;
+      },
+      onError: (reason) => {
+        netStatus = `error: ${reason}`;
+        console.warn(`[game] rejected: ${reason}`);
+      },
+      onWelcome: (id, _role, peerIds, cfg, state) => {
+        selfId = id;
+        netStatus = "open";
+        joined = true;
+        posesSent = 0;
+        applyFieldConfig(cfg);
+        [...peers.keys()].forEach(removePeer);
+        peerIds.forEach(createPeer);
+        clearPredicted();
+        lastEventKey = "";
+        // 既知の発射は捨てて snapshot から作り直す
+        for (const s of shots.values()) s.mesh.removeFromParent();
+        shots.clear();
+        splatted.clear();
+        onState(state);
+        console.log(`[game] joined "${ROOM}" as ${id} color=${myColor} (peers: ${peerIds.join(", ") || "none"})`);
+      },
+      onPeerJoin: (id) => {
+        createPeer(id);
+        console.log(`[game] peer ${id} joined`);
+      },
+      onPeerLeave: (id) => {
+        removePeer(id);
+        console.log(`[game] peer ${id} left`);
+      },
+      onPeerPose,
+      onShot: (shot, serverT) => {
+        const now = performance.now();
+        let launchLocalMs: number | undefined;
+        if (shot.by === selfId) {
+          shotsAccepted++;
+          // 自分の玉は予測の発射時刻を引き継ぐ（RTT ぶん後退しないように）
+          launchLocalMs = predicted?.sinceMs;
+          clearPredicted();
+        }
+        addShot(shot, serverT, now, launchLocalMs);
+      },
+      onRejected: (reason) => {
+        lastRejectReason = reason;
+        clearPredicted();
+        console.log(`[game] shot rejected by server: ${reason}`);
+      },
+      onState,
+      onField: (cfg, state) => {
+        // 寸法が変わった: 壁と床を作り直し、飛んでいる玉と予測は捨てる（古い面への着弾なので）
+        applyFieldConfig(cfg);
+        clearPredicted();
+        for (const s of shots.values()) s.mesh.removeFromParent();
+        shots.clear();
+        splatted.clear();
+        onState(state);
+        console.log(`[game] field ${cfg.wallW}x${cfg.wallH}x${cfg.floorDepth}/${cfg.floorDrop}`);
+      },
+      onMarkers: (cfg) => {
+        // 追加マーカーの配置が変わった（issue #30）: アンカーの候補と枠を作り直す。塗りはそのまま
+        applyFieldConfig(cfg);
+        const names = cfg.markers.map((m) => `${FACE_LABELS[m.face]} ${m.id}`).join("・");
+        flash = { text: cfg.markers.length === 0 ? "追加マーカーが無くなりました\n正面のマーカーだけで位置合わせします" : `マーカーの配置が変わりました\n${names}`, untilMs: performance.now() + 3000 };
+        console.log(`[game] markers ${describeMarkers(cfg.markers)}`);
+      },
+    },
+  );
+}
+
+// 自分の姿勢（field 座標系）+ 手の 21 点 + チャージ量を送る
+const fieldInv = new THREE.Matrix4();
+const poseMatrix = new THREE.Matrix4();
+const posePos = new THREE.Vector3();
+const poseQuat = new THREE.Quaternion();
+const poseScale = new THREE.Vector3();
+let lastSendMs = -Infinity;
+/** 入室後に pose を送った回数。サーバーは pose が届く前の発射を拒否するので、最初の pose まで撃たない */
+let posesSent = 0;
+/** 直近に送った自分の位置（field 座標系。HUD の self= 用。実機でマーカーからどこに居ると推定されているかを見る） */
+let lastSelfPos: V3 | null = null;
+
+function sendPoseIfDue(now: number) {
+  // 08-2: アンカーが確定するまで自分の位置に意味が無いので送らない（サーバーは pose が来るまで発射を拒否する）
+  if (!client || !markerAnchor || !fixedAnchor?.locked) return;
+  if (now - lastSendMs < SEND_INTERVAL_MS) return;
+  lastSendMs = now;
+  fieldInv.copy(field.matrixWorld).invert();
+  poseMatrix.multiplyMatrices(fieldInv, camera.matrixWorld);
+  poseMatrix.decompose(posePos, poseQuat, poseScale);
+  const hands: number[][] = [];
+  for (const slot of handSlots.visible()) {
+    if (!slot.ema) continue;
+    const flat: number[] = [];
+    for (const p of slot.ema) {
+      tmpVec.set(p.x, p.y, p.z);
+      camera.localToWorld(tmpVec);
+      field.worldToLocal(tmpVec);
+      flat.push(round3(tmpVec.x), round3(tmpVec.y), round3(tmpVec.z));
+    }
+    hands.push(flat);
+  }
+  const tracking = markerAnchor.isTracking(now, MARKER_LOST_MS);
+  const pose: PlayerPose = {
+    pos: [round3(posePos.x), round3(posePos.y), round3(posePos.z)],
+    quat: [poseQuat.x, poseQuat.y, poseQuat.z, poseQuat.w],
+    tracking,
+  };
+  lastSelfPos = pose.pos;
+  if (hands.length > 0) pose.hands = hands;
+  if (isFist()) pose.fist = true;
+  // いまどのマーカーで位置合わせしているか（俯瞰画面の診断表示。ロスト中は付けない）
+  if (tracking && markerAnchor.usedIds.length > 0) pose.markerIds = [...markerAnchor.usedIds];
+  if (client.sendPose(pose)) posesSent++;
+}
+
+/** 見えている手のどれかがグーか（インクの回復が速くなる。サーバーにも送る） */
+function isFist(): boolean {
+  return handSlots.slots.some((s) => s.view.visible && s.ema && s.shape === "fist");
+}
+
+function round3(v: number): number {
+  return Math.round(v * 1000) / 1000;
+}
+
+// ---- 連射とインクタンク ----
+// パー（"open"）の間、手のひらから fireRatePerSec で連射。1 発 = タンクの 1/tankShots。
+// 撃つのをやめると回復し、グー（"fist"）の間は速く回復する（撃った直後 inkRegenDelaySec は回復しない。
+// 場所には依存しない — 3DoF では頭の位置がマーカーを見ている間しか更新できないため、位置ベースの回復はやめた）。
+// 残量の権威はサーバー（state.ink）。ローカルは同じ式（inkRegenPerSec）で予測し、state が来るたび上書きされる。
+// 手が取れないときは画面 / Space の長押しで視界の中央へ連射
+let lastShotMs = -Infinity;
+let holdPressed = false;
+/** 08-2: 押し始めの時刻 [ms]（REALIGN_HOLD_MS 押し続けたら合わせ直し）。離すと -Infinity */
+let holdStartMs = -Infinity;
+/** この押し続けで合わせ直しを起動済みか（離すまで 1 回だけ） */
+let realignFired = false;
+let realignRequests = 0;
+let lastShapeInfo = "";
+/** インク残量 0..1 のローカル予測（表示用。権威は state.ink） */
+let inkLocal = 1;
+let lastInkUpdateMs = performance.now();
+let lastNoInkFlashMs = -Infinity;
+
+/** いまの残量で 1 発撃てるか（発射と、タンクの「空」表示で同じ判定。減算の丸め誤差ぶんの余裕を持つ） */
+function hasInkForShot(): boolean {
+  return inkLocal + 1e-9 >= inkPerShot(fieldCfg);
+}
+
+/** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
+function canShoot(): boolean {
+  const phase = auth?.state.phase;
+  return joined && (phase === "play" || phase === "practice") && anchor.visible && myColor !== null && posesSent > 0;
+}
+
+const camWorldPos = new THREE.Vector3();
+const shotOrigin = new THREE.Vector3();
+const shotDir = new THREE.Vector3();
+
+/** 発射: origin（ワールド）から、目（カメラ）→ origin の向きへ 1 発 */
+function fire(originWorld: THREE.Vector3, now: number, how: string) {
+  if (!client || !canShoot()) return;
+  camera.getWorldPosition(camWorldPos);
+  shotDir.subVectors(originWorld, camWorldPos);
+  if (shotDir.lengthSq() < 1e-6) shotDir.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(tmpQuat));
+  shotDir.normalize();
+  // ワールド → field 座標系（位置は変換、向きは回転だけ）
+  shotOrigin.copy(originWorld);
+  field.worldToLocal(shotOrigin);
+  field.getWorldQuaternion(tmpQuat).invert();
+  shotDir.applyQuaternion(tmpQuat);
+  const speed = fieldCfg.shotSpeed;
+  const radius = fieldCfg.shotRadius;
+  const pos: V3 = [round3(shotOrigin.x), round3(shotOrigin.y), round3(shotOrigin.z)];
+  const vel: V3 = [round3(shotDir.x * speed), round3(shotDir.y * speed), round3(shotDir.z * speed)];
+  if (!client.sendShot(pos, vel, radius)) return;
+  lastShotMs = now;
+  shotsSent++;
+  inkLocal = Math.max(0, inkLocal - inkPerShot(fieldCfg));
+  clearPredicted();
+  predicted = { pos, vel, radius, sinceMs: now, landing: simulateInk(pos, vel, surfaces, fieldCfg), mesh: null };
+  console.log(`[game] shot sent (${how}) ink=${inkLocal.toFixed(2)} pos=(${pos.join(",")}) vel=(${vel.join(",")}) land=${predicted.landing?.hit ? `${predicted.landing.surfaceId} ${predicted.landing.uv.map((v) => v.toFixed(2)).join(",")}` : "miss"}`);
+}
+
+function updateFire(now: number) {
+  // ローカルのインク予測（サーバーと同じ式。state が来たら上書きされる）。撃った直後は回復しない
+  const regenFrom = Math.max(lastInkUpdateMs, lastShotMs + fieldCfg.inkRegenDelaySec * 1000);
+  const dt = Math.min(1, Math.max(0, (now - regenFrom) / 1000));
+  lastInkUpdateMs = now;
+  if (dt > 0) {
+    inkLocal = Math.min(1, inkLocal + dt * inkRegenPerSec(fieldCfg, isFist()));
+  }
+
+  const openSlot = handSlots.slots.find((s) => s.view.visible && s.ema && s.shape === "open");
+
+  const interval = 1000 / fieldCfg.fireRatePerSec;
+  const wantHand = openSlot && canShoot();
+  const wantGaze = !openSlot && holdPressed && canShoot();
+  if ((wantHand || wantGaze) && now - lastShotMs >= interval) {
+    if (!hasInkForShot()) {
+      if (now - lastNoInkFlashMs > 2000) {
+        lastNoInkFlashMs = now;
+        flash = { text: "インク切れ！\n少し待つと回復します", untilMs: now + 2000 };
+      }
+    } else if (wantHand) {
+      fire(openSlot!.contactsWorld[PALM_CONTACT], now, "hand");
+    } else {
+      // 視界の中央、目の 30cm 先から
+      tmpVec2.set(0, 0, -0.3);
+      camera.localToWorld(tmpVec2);
+      fire(tmpVec2, now, "gaze");
+    }
+  }
+  const shapes = handSlots.slots.filter((s) => s.view.visible).map((s) => s.shape);
+  lastShapeInfo = shapes.join(",") || "-";
+}
+
+/**
+ * 08-2: 合わせ直し。画面（PC は Space）を REALIGN_HOLD_MS 押し続けたら、練習中（または入室前）に限って位置合わせをやり直す。
+ * 08 の「押している間は視界の中央へ連射」はそのまま（2 秒を超えると練習中は合わせ直しも始まる。集め直している間も
+ * いまの位置で遊べるので、連射が途切れることはない）。対戦中・カウントダウン中・結果表示中は合わせ直さない（コートが跳ぶと対戦が壊れる）
+ */
+function updateRealign(now: number) {
+  if (!holdPressed || REALIGN_HOLD_MS <= 0 || realignFired) return;
+  if (now - holdStartMs < REALIGN_HOLD_MS) return;
+  realignFired = true;
+  const phase = auth?.state.phase;
+  if (phase !== undefined && phase !== "practice") {
+    flash = { text: "合わせ直しは練習中だけです", untilMs: now + 2000 };
+    return;
+  }
+  if (fixedAnchor?.realign()) {
+    realignRequests++;
+    flash = { text: "合わせ直します\nマーカーの正面 1m に立ってください", untilMs: now + 2500 };
+    console.log(`[fixed-anchor] realign requested (#${realignRequests})`);
+  }
+}
+
+function pressHold(now: number) {
+  if (!holdPressed) {
+    holdStartMs = now;
+    realignFired = false;
+  }
+  holdPressed = true;
+}
+
+if (touch) {
+  const appEl = document.querySelector<HTMLDivElement>("#app")!;
+  // Android Chrome は長押しで contextmenu が出て押し続けが切れるので抑止する
+  appEl.addEventListener("contextmenu", (e) => e.preventDefault());
+  appEl.addEventListener("pointerdown", () => {
+    if (document.body.classList.contains("started")) pressHold(performance.now());
+  });
+  addEventListener("pointerup", releaseHold);
+  addEventListener("pointercancel", releaseHold);
+} else {
+  addEventListener("keydown", (e) => {
+    if (e.key === " " && document.body.classList.contains("started")) {
+      e.preventDefault();
+      pressHold(performance.now());
+    }
+  });
+  addEventListener("keyup", (e) => {
+    if (e.key === " ") releaseHold();
+  });
+}
+function releaseHold() {
+  holdPressed = false;
+  holdStartMs = -Infinity;
+  realignFired = false;
+}
+addEventListener("blur", releaseHold);
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") releaseHold();
+});
+
+// ---- インクの描画（権威の launch から同じ式で飛行を進め、着弾時刻に塗る） ----
+type LiveShot = { shot: Shot; launchLocalMs: number; mesh: THREE.Mesh };
+const shots = new Map<number, LiveShot>();
+const splatted = new Set<number>();
+type Predicted = { pos: V3; vel: V3; radius: number; sinceMs: number; landing: InkLanding | null; mesh: THREE.Mesh | null };
+/**
+ * 未確認の予測は 1 発ぶんだけ持つ（連射中は次の発射で前の予測を消す）。
+ * RTT が発射間隔（167ms）を超えると自分の玉の見た目が一瞬跳び得るが、LAN の RTT（10〜30ms）では
+ * 起きないので発射 ID の導入は見送っている（外部レビュー指摘・既知の制約）
+ */
+let predicted: Predicted | null = null;
+
+function clearPredicted() {
+  predicted?.mesh?.removeFromParent();
+  predicted = null;
+}
+
+function addShot(shot: Shot, serverT: number, recvMs: number, launchLocalMs?: number) {
+  const mesh = createInkMesh(shot.color, shot.radius);
+  shots.set(shot.seq, { shot, launchLocalMs: launchLocalMs ?? localTimeOf(shot.launchedAt, serverT, recvMs), mesh });
+}
+
+const inkLookAt = new THREE.Vector3();
+/** 飛んでいる玉を進行方向に少し伸ばす（スクワッシュ）。玉は field の子なので lookAt の目標はワールドに直す */
+function placeInk(mesh: THREE.Mesh, pos: V3, vel: V3, elapsed: number, landing: InkLanding | null, radius: number): boolean {
+  const hitT = landing?.hitT ?? fieldCfg.maxFlightSec;
+  if (elapsed >= hitT) {
+    mesh.visible = false;
+    return true;
+  }
+  const t = Math.max(0, elapsed);
+  const p = inkAt(pos, vel, t, fieldCfg.gravity);
+  mesh.position.set(p[0], p[1], p[2]);
+  inkLookAt.set(p[0] + vel[0], p[1] + vel[1] - fieldCfg.gravity * t, p[2] + vel[2]);
+  field.localToWorld(inkLookAt);
+  mesh.lookAt(inkLookAt);
+  const base = radius * 0.45;
+  mesh.scale.set(base * 0.85, base * 0.85, base * 1.35);
+  mesh.visible = true;
+  return false;
+}
+
+/** 着弾を飛沫の形で塗る（形はサーバーと同じ seq 由来。見た目 = 得点）。音も鳴らす */
+function splatLanding(shot: Shot, now: number) {
+  const landing = shot.landing;
+  if (!landing?.hit) return;
+  const surface = surfaces.find((s) => s.id === landing.surfaceId);
+  const view = inkViews.get(landing.surfaceId);
+  if (!surface || !view) return;
+  const shape = splatShape(shot.seq, shot.radius, impactDirUv(landing, shot.vel, surface, fieldCfg.gravity), isWallSurface(surface));
+  const overwrote = view.splat(shot.seq, landing.uv, shape, shot.color, now);
+  splatSound.play(shot.by === selfId ? 0.5 : 0.3, overwrote);
+}
+
+function updateShots(now: number) {
+  for (const [seq, live] of shots) {
+    const { shot } = live;
+    const elapsed = (now - live.launchLocalMs) / 1000;
+    const landed = placeInk(live.mesh, shot.pos, shot.vel, elapsed, shot.landing, shot.radius);
+    if (landed && shot.landing?.hit && !splatted.has(seq)) {
+      splatted.add(seq);
+      splatLanding(shot, now);
+    }
+    if (elapsed > fieldCfg.maxFlightSec + 1) {
+      live.mesh.removeFromParent();
+      shots.delete(seq);
+      splatted.delete(seq);
+    }
+  }
+  if (predicted) {
+    if (now - predicted.sinceMs > PREDICT_MAX_MS) {
+      clearPredicted();
+    } else {
+      if (!predicted.mesh) predicted.mesh = createInkMesh(myColor ?? 1, predicted.radius);
+      placeInk(predicted.mesh, predicted.pos, predicted.vel, (now - predicted.sinceMs) / 1000, predicted.landing, predicted.radius);
+    }
+  }
+}
+
+// ---- 視界内メッセージとスコアボード ----
+function remainingSec(now: number): number {
+  if (!auth || auth.state.phaseEndsAt === null) return 0;
+  return Math.max(0, (auth.state.phaseEndsAt - auth.state.t) / 1000 - (now - auth.recvMs) / 1000);
+}
+
+/**
+ * 08-2: 位置合わせの案内（視界内メッセージ）。信頼できない理由に応じて「近づいて / 中央に / 正面に」を出し、
+ * 集まっている間は「合わせ中 n/N」、ばらついていれば「止まってください」
+ */
+function alignMessage(fa: FixedAnchor | null, head: string): string {
+  if (!fa) return `${head}\nマーカーの正面 1m に立ってください`;
+  const n = fa.count;
+  if (n === 0) {
+    const hint =
+      fa.lastReason === "far"
+        ? "もっとマーカーに近づいてください"
+        : fa.lastReason === "off"
+          ? "マーカーを画面の中央に"
+          : fa.lastReason === "face"
+            ? "マーカーの正面に回ってください"
+            : fa.lastReason === "tilt"
+              ? "端末を水平に構えてください"
+              : fa.lastReason === "err"
+                ? "止まってマーカーをはっきり映してください"
+                : "（マーカーが画面の中央に大きく映るように）";
+    return `${head}\nマーカーの正面 1m に立ってください\n${hint}`;
+  }
+  const progress = `合わせ中 ${n}/${fa.samplesNeeded}`;
+  return fa.stable ? `${head}\n${progress}\nそのまま動かないでください` : `${head}\n${progress}\nぶれています。止まってください`;
+}
+
+function updateMessages(now: number) {
+  const s = auth?.state;
+  if (s) {
+    const total = Math.max(1, s.totalCells);
+    const left = Math.ceil(remainingSec(now));
+    const head =
+      s.phase === "result" ? "結果" : s.phase === "waiting" ? `開始まで ${left} 秒` : s.phase === "practice" ? "練習中（開始は俯瞰画面から）" : `残り ${left} 秒`;
+    const sorted = [...s.players].sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0));
+    const ranking = sorted.map((p, i) => {
+      const pct = (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1);
+      const win = s.winners?.includes(p.id) ? " 🏆" : "";
+      return `${i + 1}. ${inkColorName(p.color)} ${p.name}${p.id === selfId ? "（あなた）" : ""} ${pct}%${win}`;
+    });
+    scorePanel.set([head, ...ranking].join("\n"), "#e8eaed", "left");
+    // 対戦中だけ、自分の塗り率と順位を視界の上に大きく（同点は同じ順位）
+    const myIndex = sorted.findIndex((p) => p.id === selfId);
+    if (s.phase === "play" && myIndex >= 0 && myColor) {
+      const myScore = s.scores[selfId] ?? 0;
+      const rank = sorted.findIndex((p) => (s.scores[p.id] ?? 0) === myScore) + 1;
+      percentPanel.set(`${rank}位 ${((myScore / total) * 100).toFixed(1)}%`, `#${inkColorHex(myColor).toString(16).padStart(6, "0")}`);
+    } else {
+      percentPanel.set("");
+    }
+  } else {
+    percentPanel.set("");
+  }
+  let text = "";
+  let color = "#e8eaed";
+  if (netStatus.startsWith("error")) {
+    text = `接続できません\n${netStatus.slice(7, 60)}`;
+    color = "#f28b82";
+  } else if (cameraError) {
+    text = `カメラを開けません\n${cameraError.slice(0, 40)}`;
+    color = "#f28b82";
+  } else if (!passthrough) {
+    text = "カメラを起動中…";
+  } else if (!fixedAnchor?.locked) {
+    // 08-2: 位置合わせ（確定するまでコートは出ない）
+    text = alignMessage(fixedAnchor, "位置合わせ");
+    color = "#fdd663";
+  } else if (trackerStatus.startsWith("error")) {
+    text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";
+    color = "#f28b82";
+  } else if (!FAKE_HANDS && !tracker) {
+    text = "手の検出を読み込み中…";
+    color = "#fdd663";
+  } else if (netStatus !== "open" && selfId !== "") {
+    text = "接続が切れました（再接続中）";
+    color = "#f28b82";
+  } else if (!joined || !auth) {
+    text = netStatus === "open" ? "入室中…" : `サーバーに接続中… (${netStatus})`;
+    color = "#fdd663";
+  } else if (flash && now < flash.untilMs) {
+    text = flash.text;
+    color = flash.text.startsWith("インク切れ") ? "#fdd663" : "#81c995";
+  } else if (fixedAnchor.realigning) {
+    // 08-2: 合わせ直し中（いまの位置のまま遊べる）
+    text = alignMessage(fixedAnchor, "合わせ直し中（いまの位置は保持）");
+    color = "#fdd663";
+  } else if (auth.state.phase === "result") {
+    const w = auth.state.winners ?? [];
+    const names = auth.state.winnerNames ?? [];
+    text = w.length === 0 ? "だれも塗れず…" : w.includes(selfId) ? "あなたの勝ち！" : `${names.join("・")} の勝ち`;
+    color = w.includes(selfId) ? "#81c995" : "#e8eaed";
+  } else if (auth.state.phase === "waiting") {
+    text = `まもなく開始（${Math.ceil(remainingSec(now))} 秒）\nあなたは ${myColor ? inkColorName(myColor) : "-"}`;
+    color = "#fdd663";
+  } else if (auth.state.phase === "practice") {
+    // チュートリアル（issue #20）: 練習中は操作の案内を出しっぱなしにする
+    text = `練習中（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充\n対戦は俯瞰画面の「開始」から`;
+    color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
+  } else {
+    // 対戦中: 1 分と短いので残り時間も視界に（塗り率は上の percentPanel）
+    text = `残り ${Math.ceil(remainingSec(now))} 秒（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充`;
+    color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
+  }
+  message.set(text, color);
+}
+
+// ---- 手元のインクタンク（issue #31）----
+// 既定（TANK_SHOW = fist）はグーで補充している間だけ、そのグーの手のそばに置く。パーで撃っている間は残量を見ないので消して、
+// 視界を塞がないようにする。ただし空になったら（1 発ぶんも無い）撃てない理由が分かるように、グーでなくても出す
+// （見えている手のそば。手が無ければ視界の下）。空で出したあとは TANK_LOW_UNTIL まで回復するまで出し続ける
+// （パーのままだと 1 発ぶん回復するたびに撃ってまた空になるので、「空か」だけで出し消しすると点滅する）。
+// グーの手を一瞬見失っても TANK_HOLD_MS は最後の位置に留める（MediaPipe の取りこぼし・再検出直後の 3 フレームは形が
+// "other" になるのでちらつかないように）が、パーが見えたら即座に消す。
+// ?tankShow=always は従来どおり: 見えている手（パーを優先）のそばに常に出し、手が見えないとき（視線連射・手を下ろしたとき）は
+// 視界の下に大きめに出す（消えてから TANK_HOLD_MS は最後の位置に留める）。
+// 置き場所は手のひらの中心から親指側（小指の付け根 → 人差し指の付け根の向き）へ TANK_OFFSET ずらした位置
+// （?tankPlace= で小指側・手首の先にもできる。向きは手の 3D 点から取るので手を回しても同じ側に付く）。
+// 板はカメラの子なので常に正面を向き、水位は手の向きによらず鉛直（残量を読むため。手に貼り付ける見た目より読みやすさ）。
+// 置き場所が変わるときは TANK_GLIDE_MS で滑らせる
+/** 視界の下の位置（1.2m 先）。上端が視界内メッセージの下端 -0.40 より下（脈動 ×1.06 ぶんも含めて）になる高さ */
+const TANK_FALLBACK_POS = new THREE.Vector3(0, -0.51, -1.2);
+/** 視界の下に出すときの高さ [m]（1.2m 先なので手元より大きく） */
+const TANK_FALLBACK_H = 0.2;
+const TANK_GLIDE_MS = 250;
+const tankTarget = new THREE.Vector3();
+const tankFrom = new THREE.Vector3();
+let tankFromScale = 1;
+let tankGlideStartMs = -Infinity;
+let tankSlot: HandSlot | null = null;
+/** 最後に手のそばに置いた時刻 [ms]（TANK_HOLD_MS の判定） */
+let tankLastHandMs = -Infinity;
+/** いまの置き場所（HUD 用）: hand = 手元、view = 視界の下、- = 非表示 */
+let tankPlace: "hand" | "view" | "-" = "-";
+/** tankShow=fist で「空になったので出している」最中か（TANK_LOW_UNTIL まで回復したら下ろす） */
+let tankLowShowing = false;
+
+function updateInkTank(now: number) {
+  if (!joined || !myColor) {
+    inkTank.mesh.visible = false;
+    tankPlace = "-";
+    return;
+  }
+  if (!hasInkForShot()) tankLowShowing = true;
+  else if (inkLocal >= TANK_LOW_UNTIL) tankLowShowing = false;
+  const visibleSlots = handSlots.slots.filter((s) => s.view.visible && s.ema);
+  const openOrAny = visibleSlots.find((s) => s.shape === "open") ?? visibleSlots[0] ?? null;
+  const slot =
+    TANK_SHOW === "fist"
+      ? (visibleSlots.find((s) => s.shape === "fist") ?? (tankLowShowing ? openOrAny : null))
+      : openOrAny;
+  /** fist のとき（空でなければ）: パーが見えている（撃っている）ので、猶予を待たずに消す */
+  const hideNow = TANK_SHOW === "fist" && !tankLowShowing && visibleSlots.some((s) => s.shape === "open");
+  /** 手が見えないとき視界の下に出せるか（always は常に。fist は空で出している間だけ） */
+  const canFallback = TANK_FALLBACK && (TANK_SHOW === "always" || tankLowShowing);
+  let place: typeof tankPlace;
+  let targetScale: number;
+  if (slot?.ema) {
+    const wrist = slot.ema[WRIST];
+    const mcp = slot.ema[MIDDLE_MCP];
+    if (TANK_PLACE === "arm") {
+      // 手首から前腕の向き（手首 − 中指の付け根）へ
+      tmpVec.set(wrist.x - mcp.x, wrist.y - mcp.y, wrist.z - mcp.z);
+      tankTarget.set(wrist.x, wrist.y, wrist.z);
+    } else {
+      // 手のひらの中心（手首と中指の付け根の中点）から親指側（小指の付け根 → 人差し指の付け根）か小指側へ
+      const idx = slot.ema[INDEX_MCP];
+      const pky = slot.ema[PINKY_MCP];
+      tmpVec.set(idx.x - pky.x, idx.y - pky.y, idx.z - pky.z);
+      if (TANK_PLACE === "pinky") tmpVec.negate();
+      tankTarget.set((wrist.x + mcp.x) / 2, (wrist.y + mcp.y) / 2, (wrist.z + mcp.z) / 2);
+    }
+    if (tmpVec.lengthSq() < 1e-8) tmpVec.set(0, -1, 0);
+    else tmpVec.normalize();
+    tankTarget.addScaledVector(tmpVec, TANK_OFFSET);
+    tankLastHandMs = now;
+    targetScale = 1;
+    place = "hand";
+  } else if (!hideNow && tankPlace === "hand" && now - tankLastHandMs < TANK_HOLD_MS) {
+    // 手（fist ならグーの手）が消えた直後: 最後の位置（tankTarget のまま）に留める。すぐ再検出されればそこから滑る
+    targetScale = 1;
+    place = "hand";
+  } else if (canFallback) {
+    tankTarget.copy(TANK_FALLBACK_POS);
+    targetScale = TANK_FALLBACK_H / TANK_H;
+    place = "view";
+  } else {
+    inkTank.mesh.visible = false;
+    tankPlace = "-";
+    tankSlot = null;
+    return;
+  }
+  if (place !== tankPlace || slot !== tankSlot) {
+    // 置き場所が変わった: いまの位置から目標へ滑らせる（非表示からは即座に置く）
+    if (tankPlace === "-") {
+      tankGlideStartMs = -Infinity;
+    } else {
+      tankFrom.copy(inkTank.mesh.position);
+      tankFromScale = inkTank.baseScale;
+      tankGlideStartMs = now;
+    }
+    tankPlace = place;
+    tankSlot = slot;
+  }
+  const p = Math.min(1, (now - tankGlideStartMs) / TANK_GLIDE_MS);
+  const k = 1 - (1 - p) * (1 - p);
+  if (k >= 1) {
+    inkTank.mesh.position.copy(tankTarget);
+    inkTank.baseScale = targetScale;
+  } else {
+    inkTank.mesh.position.lerpVectors(tankFrom, tankTarget, k);
+    inkTank.baseScale = tankFromScale + (targetScale - tankFromScale) * k;
+  }
+  inkTank.set(inkLocal, inkColorHex(myColor), !hasInkForShot());
+  inkTank.update(now);
+  inkTank.mesh.visible = true;
+}
+
+// ---- 頭追従（02〜07 と同じ） ----
+type HeadControls = { update: () => void };
+let controls: HeadControls | null = null;
+
+function startControls() {
+  if (touch) {
+    controls = new DeviceOrientationControls(camera);
+  } else {
+    const orbit = new OrbitControls(camera, renderer.domElement);
+    orbit.target.set(0, 1.6, -0.01);
+    orbit.enableZoom = false;
+    orbit.enablePan = false;
+    orbit.rotateSpeed = -0.5;
+    controls = orbit;
+  }
+}
+
+// ---- HUD（デバッグ用） ----
+const hud = document.querySelector<HTMLDivElement>("#hud")!;
+const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "", wake: "" };
+let lastHudText = "";
+function renderHud() {
+  const s = auth?.state;
+  const now = performance.now();
+  const text = [
+    `${hudState.base} (fov now=${camera.fov.toFixed(1)})`,
+    hudState.sensor && `sensor=${hudState.sensor}`,
+    hudState.cam && `cam=${hudState.cam}`,
+    hudState.fsResult && `fs=${hudState.fsResult}`,
+    hudState.fsChange && `fs-change: ${hudState.fsChange}`,
+    hudState.wake && `wake=${hudState.wake}`,
+    // 08-2: 08 の marker= の行の代わりに位置合わせの状態（align=）。生の観測は obs= に 08 の marker= と同じ内容
+    `align=${fixedAnchor?.info ?? "-"} realigns=${realignRequests} obs=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (lost)" : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
+    `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
+    (tracker || FAKE_HANDS) &&
+      `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
+    `room=${ROOM ?? "(不正)"} me=${selfId || "-"} peers=${peers.size} ws=${netStatus} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} ink=${inkLocal.toFixed(2)} tank=${tankPlace} tankLow=${tankLowShowing ? "yes" : "no"} fist=${isFist() ? "yes" : "no"} held=${holdPressed ? "yes" : "no"}`,
+    s &&
+      `game: phase=${s.phase} left=${remainingSec(now).toFixed(0)}s color=${myColor ?? "-"} players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} shots=${shotsSent}/${shotsAccepted} live=${shots.size} seq=${s.seq}${lastRejectReason ? ` lastReject=${lastRejectReason}` : ""}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (text !== lastHudText) {
+    lastHudText = text;
+    hud.textContent = text;
+  }
+}
+
+// ---- 開始フロー（src/shared/start-flow.ts） ----
+const fsButton = document.querySelector<HTMLButtonElement>("#fs-button")!;
+const tryEnterFullscreen = setupFullscreen({
+  button: fsButton,
+  touch,
+  onResult: (status) => {
+    hudState.fsResult = status;
+  },
+  onChange: (change) => {
+    hudState.fsChange = change;
+  },
+  isStarted: () => document.body.classList.contains("started"),
+});
+
+const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
+const nameForm = document.querySelector<HTMLFormElement>("#name-form")!;
+const roomError = document.querySelector<HTMLParagraphElement>("#room-error")!;
+const readPlayerName = setupPlayerNameField({
+  input: document.querySelector<HTMLInputElement>("#player-name")!,
+  error: document.querySelector<HTMLParagraphElement>("#name-error")!,
+  maxLength: NAME_MAX_LENGTH,
+});
+nameForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (ROOM === null) {
+    roomError.hidden = false;
+    roomError.textContent = `room 名「${roomRaw}」は使えません。日本語・英数字・ハイフン・アンダースコアの1〜32文字にしてください（記号・空白は不可）`;
+    return;
+  }
+  const name = readPlayerName();
+  if (name === null) return;
+  document.body.classList.add("started");
+  splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} alignN=${ALIGN_SAMPLES} refine=${REFINE} realignHoldMs=${REALIGN_HOLD_MS} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  connect(name);
+  if (FAKE_HANDS) {
+    trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
+  } else {
+    void initTracker();
+  }
+  runStartFlow(touch, {
+    onSensor: (state) => {
+      hudState.sensor = state;
+    },
+    startControls,
+    startCamera: async () => {
+      hudState.cam = "requesting";
+      try {
+        await startCameraAndMarker((step) => {
+          hudState.cam = step;
+        });
+        hudState.cam = passthrough!.summary;
+        hudState.base += ` camFov=${passthrough!.camHFovDeg}`;
+      } catch (e: unknown) {
+        hudState.cam = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        cameraError = hudState.cam;
+      }
+    },
+    tryEnterFullscreen,
+    onWakeLock: (status) => {
+      hudState.wake = status;
+    },
+  });
+});
+
+addEventListener("pagehide", () => {
+  releaseHold();
+  client?.dispose();
+  joined = false;
+  netStatus = "closed (pagehide)";
+});
+addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  if (!document.body.classList.contains("started")) return;
+  const name = readPlayerName();
+  if (name !== null) connect(name);
+  if (hudState.cam && !hudState.cam.includes("bfcache")) {
+    hudState.cam += " (bfcache: カメラ停止の可能性)";
+  }
+});
+
+if (params.has("autostart")) startButton.click();
+
+// ---- ループ ----
+renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  controls?.update();
+  if (FOV_FIXED === null && passthrough) {
+    const fov = passthrough.backgroundFovDeg();
+    if (fov !== null && Math.abs(fov - camera.fov) > 0.01) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+  }
+  camera.updateMatrixWorld();
+  markerAnchor?.update(now);
+  // 08-2: 生の観測（observed）を読んで、確定前は窓に溜め、確定後は動かさない（refine の緩やかな補正だけ）
+  const locksBefore = fixedAnchor?.locks ?? 0;
+  fixedAnchor?.update(now);
+  if (fixedAnchor && fixedAnchor.locks > locksBefore) {
+    flash = { text: locksBefore === 0 ? "確定！\nコートを固定しました" : "確定！\nコートを合わせ直しました", untilMs: now + 2000 };
+  }
+  if (fixedAnchor?.locked && !anchor.visible) anchor.visible = true;
+  const tracking = markerAnchor?.isTracking(now, MARKER_LOST_MS) ?? false;
+  // 枠の色: 追跡中に使っているマーカーは青、使っていないマーカーは灰、ロスト中は全部赤
+  const usedIds = markerAnchor?.usedIds ?? [];
+  for (const f of [originFrame, ...extraFrames]) {
+    f.material.color.setHex(!tracking ? 0xf28b82 : usedIds.includes(f.id) ? 0x8ab4f8 : 0x9aa0a6);
+  }
+  for (const v of inkViews.values()) v.setFrameColor(tracking ? 0x8ab4f8 : 0xf28b82);
+  anchor.updateMatrixWorld(true);
+  updateHands(now);
+  updateRealign(now);
+  updateFire(now);
+  updatePeers(now);
+  updateShots(now);
+  for (const v of inkViews.values()) v.update(now);
+  sendPoseIfDue(now);
+  updateMessages(now);
+  updateInkTank(now);
+  if (document.body.classList.contains("started")) renderHud();
+  effect.render(scene, camera);
+});
