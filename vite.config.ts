@@ -8,6 +8,7 @@ import { volleyballServer } from "./server/volleyball.ts";
 import { dartsServer } from "./server/darts.ts";
 import { surfaceServer } from "./server/surface.ts";
 import { splatoonServer } from "./server/splatoon.ts";
+import { splatoonOutsideInServer } from "./server/splatoon-outside-in.ts";
 import { personServer } from "./server/person.ts";
 import { golfServer } from "./server/golf.ts";
 import { battingServer } from "./server/batting.ts";
@@ -70,6 +71,7 @@ export default defineConfig({
     dartsServer(),
     surfaceServer(),
     splatoonServer(),
+    splatoonOutsideInServer(),
     personServer(),
     golfServer(),
     battingServer(),
