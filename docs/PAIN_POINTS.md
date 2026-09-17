@@ -520,3 +520,17 @@
 - **SDK ならどう解決するか（案）**: 「1 枚のマーカーの姿勢の誤差がどう伝播するか」（腕の長さ・視角・画面上の大きさ）を SDK が自覚して、追加マーカーごとの信頼度（重み）と、複数マーカー・IMU を使った拘束付きの姿勢推定を提供する。実機でしか出ない幾何を Node で再現する道具（POSIT + 投影 + ノイズ。`scripts/experiment-posit-tilt.mjs` と今回のテスト）は SDK のテスト資産にし、合成カメラも「遠い・斜め・小さい」を再現できるようにする
 - **関連**: `src/shared/marker-anchor.ts` の `correctionM`、`scripts/test-splatoon.mjs` の「issue #55」、PAIN_POINTS「[2026-09-11] 1 枚のマーカーから出した「傾き」は信用できず…（issue #54）」、[issue #55](https://github.com/na2kera/mobile-mr/issues/55)
 
+
+## [2026-09-17] 08-6 / 08-6-splatoon-screen-markers: マーカーの一辺が「room の接続設定」なので、画面で大きさを変えるたびに全員が入り直す
+
+- **何が苦しかったか**: 候補 1d（マーカーをモニタ / プロジェクタに表示）の利点は「距離に応じてマーカーの大きさを変えられる」ことなのに、08 のプロトコルでは一辺（`markerMm`）が `SpaceConfig`（Phase 4 から続く接続クエリ）で、room の最初の参加者の値と一致しないと入室を拒否される。追加マーカーの**配置**は `markers` メッセージで全員に配れる（v9）のに、**大きさ**は配れない。画面マーカーで 150mm → 300mm に変えると、画面のページ自身が入り直して「設定と不一致」で拒否され、スマホ全員と俯瞰画面の URL を書き換えて入り直すしかない。しかも全マーカーが同じ大きさ（`createMarkerAnchor` の `markerSizeM` は 1 つ）なので「中央だけ大きく」もできない
+- **どう対処したか**: プロトコルとサーバーは変えない方針（08 は触らない・比較のため同じプロトコル）なので、画面マーカーのページは一辺の入力が落ち着いたら新しい値で入り直し、拒否されたら理由と「全員の URL に ?markerMm= を付けて入り直す」案内を出すだけにした（`markers-screen.ts` の `connect()`、ヘッドレス確認で拒否の経路も取った）。収まらない一辺を丸めたときも同じ食い違いが起きるので、パネルと HUD（`clamped=1`）で警告する。**未解決**: 遠い / 近いの切り替えを試合中に行うことはできない
+- **SDK ならどう解決するか（案）**: マーカーの実寸は接続設定ではなく `MarkerField`（配置）の一部にして、`markers` と同じ経路で ID ごとの大きさ（`sizeM`）を配る。検出器は ID → 実寸の表を持ち、姿勢の並進スケールをマーカーごとに決める（POSIT のインスタンスをサイズごとに持つか、単位正方形で解いてスケールを掛ける）。「room の最初の参加者の設定に一致」という不変条件は、開始前に master（俯瞰画面）が配る**可変の**状態に置き換える。08 の寸法（v7）で URL → サーバーの状態に移したのと同じ移行が、実寸にも要る
+- **関連**: `demos/08-6-splatoon-screen-markers/markers-screen.ts` の `connect()` / `markerMmInput` の入力処理、`src/shared/shared-room-protocol.ts` の `SpaceConfig`、`server/room-server.ts` の `sameConfig`、`src/shared/marker-anchor.ts` の `markerSizeM`、`demos/08-6-splatoon-screen-markers/README.md`「既知の制約」
+
+## [2026-09-17] 08-6 / 08-6-splatoon-screen-markers: 画面の実寸はブラウザから取れず、CSS の mm は 96dpi 固定なので「実寸で描く」は利用者の入力頼みになる
+
+- **何が苦しかったか**: 印刷なら CSS の `mm` 単位がプリンタでほぼ実寸になる（08 の `markers.html` はこれ）が、画面では `1mm = 3.78 CSS px` 固定で物理サイズとは無関係。`screen.width` / `devicePixelRatio` はあっても物理的な対角は Web API に無い（Screen Details API にも無い）。macOS の「ディスプレイの解像度」（スケーリング）や Chrome のズームで CSS px の数も変わる。結果として「対角のインチ（型番の数字）」か「1mm あたりの px」を入力欄で入れてもらい、`hypot(screen.width, screen.height) / 対角 mm` で換算する以外に無く、入力ミス（インチと mm の取り違え・ズーム 125%）は「原点から 5m 超」の足切りでしか検出できない。ヘッドレス Chrome ではさらに `--window-size` とビューポートが一致しない（1280x720 指定で innerHeight は 577）ので、収まる最大の一辺が変わって配置がずれ、`Emulation.setDeviceMetricsOverride` で固定する必要があった
+- **どう対処したか**: 対角インチ / px 直接指定の 2 つの入力欄 + `localStorage`、パネルに「1mm = X px（画面 W×H mm）」を出して定規で確かめてもらう運用にした。純粋な変換（`screen-layout.ts`）を three 非依存で切り出して Node で検証。**未解決**: 実寸の自動取得
+- **SDK ならどう解決するか（案）**: 「画面 / 投影面にマーカーを出す」を SDK の供給源の 1 つ（`MarkerSource.screen`）として持ち、実寸の較正を UI 込みで提供する: (1) 端末側で「既知の実寸の紙マーカーと画面のマーカーを同時に見る」と画面の px/mm が逆算できる（紙の姿勢から画面のマーカーの実寸を推定）、(2) 入力した対角と `screen` の px から換算して保存、(3) 換算の妥当性（原点から数 m 離れた追加マーカー）を配置の検証で弾く。マーカーの実寸を「配置の一部」として配る前提（上の痛点）と組み合わせると、較正結果をそのまま全員に配れる
+- **関連**: `demos/08-6-splatoon-screen-markers/screen-layout.ts` の `pxPerMmFromDiagonal` / `validateScreenPlacements`、`markers-screen.ts` の `currentPxPerMm`、`scripts/headless-08-6-screen-markers.mjs` の `Emulation.setDeviceMetricsOverride`、PAIN_POINTS「[2026-08-16] カメラの焦点距離（内部パラメータ）がブラウザから取得できず…」（同じ「物理量が Web API に無い」問題）
