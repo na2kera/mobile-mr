@@ -573,6 +573,9 @@ function fakeStream(): MediaStream {
   );
 }
 
+/** AprilTag の検出器（HUD に WASM 単体の処理時間と生の検出数を出すため。読めなかった・?detector=aruco2 なら null） */
+let aprilDetector: ReturnType<typeof createAprilTagDetector> | null = null;
+
 async function startCameraAndMarker(onProgress: (step: string) => void) {
   // AprilTag の WASM を先に読む（フェイクカメラの絵柄とアンカーの検出器がこれで決まる）。読めなければ js-aruco2 に落ちる
   let detector: ReturnType<typeof createMarkerDetector> | null = null;
@@ -581,7 +584,8 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     onProgress("apriltag wasm");
     try {
       const module = await loadAprilTagWasm(APRIL_BASE_URL);
-      detector = createAprilTagDetector(module, MARKER_SIZE_M, { decimate: APRIL_DECIMATE, sigma: APRIL_SIGMA });
+      aprilDetector = createAprilTagDetector(module, MARKER_SIZE_M, { decimate: APRIL_DECIMATE, sigma: APRIL_SIGMA });
+      detector = aprilDetector;
       aprilStatus = `ready decimate=${APRIL_DECIMATE} sigma=${APRIL_SIGMA}`;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1364,7 +1368,8 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = [
-    `${hudState.base} detector=${detectorActive} apriltag=${aprilStatus} (fov now=${camera.fov.toFixed(1)})`,
+    // wasm= は atagjs_detect 単体の時間、raw= は姿勢の検証前の検出数。ロスト中も出る（april= の行の ms は追跡中だけ）
+    `${hudState.base} detector=${detectorActive} apriltag=${aprilStatus} (fov now=${camera.fov.toFixed(1)})${detectorActive === "apriltag" && aprilDetector ? ` wasm=${aprilDetector.lastWasmMs.toFixed(0)}ms raw=${aprilDetector.lastRawCount}` : ""}`,
     hudState.sensor && `sensor=${hudState.sensor}`,
     hudState.cam && `cam=${hudState.cam}`,
     hudState.fsResult && `fs=${hudState.fsResult}`,

@@ -1,6 +1,6 @@
 // AprilTag（tag36h11）の WASM 検出器を public/vendor/apriltag/ に取得する。`npm run fetch:apriltag` で実行する。
 // demos/08-5-splatoon-apriltag（候補 1c。docs/space-stability-options.md §4）が使う。バイナリなので git には入れない（.gitignore 済み）。
-// 取得していなくてもページは開け、HUD に「apriltag: 読み込み失敗」と出て js-aruco2 の経路（?detector=aruco2 と同じ）に落ちる。
+// 取得していなくてもページは開け、HUD に `apriltag=error: …` と出て js-aruco2 の経路（?detector=aruco2 と同じ）に落ちる。
 //
 // 入手元: arenaxr/apriltag-js-standalone（apriltag の C ライブラリを Emscripten でビルドしたもの。ビルド済みが html/ 配下に置かれている）
 //   https://github.com/arenaxr/apriltag-js-standalone

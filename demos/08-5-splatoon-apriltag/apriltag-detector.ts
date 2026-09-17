@@ -21,7 +21,7 @@ type AprilTagModule = {
 };
 type AprilTagFactory = (opts: { locateFile?: (path: string) => string; print?: (s: string) => void; printErr?: (s: string) => void }) => Promise<AprilTagModule>;
 
-/** apriltag_js.c の JSON（return_pose = 1、return_solutions = 0 のとき） */
+/** apriltag_js.c の JSON（return_pose = 1 のとき。return_solutions = 0 でも asol は常に付くが使わない） */
 type RawDetection = {
   id: number;
   corners: { x: number; y: number }[];
@@ -129,6 +129,9 @@ export function createAprilTagDetector(module: AprilTagModule, markerSizeM: numb
       const src = image.data;
       for (let i = 0, j = 0; j < gray.length; i += 4, j++) gray[j] = (src[i] + src[i + 1] + src[i + 2]) / 3;
       const buf = setImgBuffer(w, h, w);
+      // calloc に失敗すると NULL（0）が返る。そのまま HEAPU8.set すると例外にならずヒープ先頭を上書きするので、例外にして
+      // marker-anchor-apriltag.ts の「失敗したフレームはロスト扱い・30 回で js-aruco2」の経路に乗せる（Fable レビューの指摘）
+      if (!buf) throw new Error("atagjs_set_img_buffer が NULL を返した（WASM のメモリ確保に失敗）");
       // ALLOW_MEMORY_GROWTH なので HEAPU8 は毎回取り直す（成長すると別の ArrayBuffer になる）
       module.HEAPU8.set(gray, buf);
       const t0 = performance.now();

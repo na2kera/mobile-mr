@@ -44,7 +44,7 @@
 | `aprilSigma` | `0` | AprilTag の `quad_sigma`（分割前のガウスぼかし [px]）。実カメラでノイズが多いときに 0.8 程度 |
 | `camFov` | ラベルから | 焦点距離の換算に使う水平 FOV（08 と同じ） |
 
-HUD: 1 行目に `detector=apriltag apriltag=ready decimate=2 sigma=0`（WASM が読めなければ `apriltag=error: …` と `detector=aruco2`）。位置合わせの行は `april=id=0 err=0.01 tilt=1deg Δ=0.00m 12ms layout=- self=(…)`（末尾の ms が検出 1 回の処理時間。aruco2 のときは `marker=`）。検出中に WASM が例外を投げたフレームはロスト扱いで、この行に `error(3x)=RuntimeError: …` と出る。連続 30 回で js-aruco2 に切り替わり、1 行目が `detector=aruco2 apriltag=error: detect threw 30x (…)` になる。
+HUD: 1 行目に `detector=apriltag apriltag=ready decimate=2 sigma=0`（WASM が読めなければ `apriltag=error: …` と `detector=aruco2`）。位置合わせの行は `april=id=0 err=0.01 tilt=1deg Δ=0.00m 12ms layout=- self=(…)`（末尾の ms が検出 1 回の処理時間。aruco2 のときは `marker=`）。検出中に WASM が例外を投げたフレームはロスト扱いで、この行に `error(3x)=RuntimeError: …` と出る。連続 30 回で js-aruco2 に切り替わり、1 行目が `detector=aruco2 apriltag=error: detect threw 30x (…)` になる。切り替え後は例外で止まらなくなるだけで、**追跡は戻らない**（印刷した tag36h11 は js-aruco2 では読めない。フェイクカメラの絵柄も tag36h11 のまま）。戻すにはページを再読み込みする。1 行目の末尾の `wasm=NNms raw=N` は `atagjs_detect` 単体の時間と姿勢の検証前の検出数で、ロスト中も出る（iPhone で重さを見るのはこちら。`april=` の行の ms はグレースケール変換と JSON の解析を含み、追跡中だけ出る）。
 
 ## セットアップ
 
