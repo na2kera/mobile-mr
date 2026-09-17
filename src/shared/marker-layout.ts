@@ -21,6 +21,13 @@ export type MarkerPlacement = {
   pos: V3;
 };
 
+/**
+ * マーカー（黒い正方形）の一辺の既定値 [mm]。08 系（08 / 10 / 10-2）のデモ・俯瞰画面の `?markerMm=` と
+ * 印刷ページ（demos/08-splatoon/markers.html の `?mm=`）で共有する。印刷とデモの既定が食い違うと距離が
+ * 定数倍ずれる（150mm を 100mm と思えば壁が 2/3 の距離に来る。issue #54 の調査で判明した罠）ので 1 か所で持つ
+ */
+export const DEFAULT_MARKER_MM = 150;
+
 /** 追加マーカーの枚数の上限（四方 + 床 + 予備） */
 export const MAX_EXTRA_MARKERS = 8;
 /** 辞書 ARUCO_MIP_36h12 の ID の上限 */
@@ -126,6 +133,49 @@ export function transformPoint(m: number[], p: V3): V3 {
 
 function cross(a: V3, b: V3): V3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function normalize(v: V3): V3 {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
+}
+
+function dot(a: V3, b: V3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+// ---- 重力でアンカーの姿勢を水平に直す（issue #54。marker-anchor.ts から使う）----
+// 単一マーカーの POSIT はほぼ正面から見た四角形の「傾き（ピッチ / ロール）」をほとんど決められない
+// （辺長の 1% の誤差で約 8°。2 解の鏡像が選ばれると真値の 2 倍ずれる。scripts/test-splatoon.mjs の
+// 合成実験では 150mm を 1.5m から見て p90 で 30° 超）。傾きが 20° ずれると壁の下端は 0.4m 手前、
+// 足元の床は 0.5m 浮く。一方、ジャイロ（DeviceOrientation）の重力方向は 1〜2° で信用でき、
+// 壁のマーカーは天地を合わせて貼る前提（Y = 鉛直上）なので、アンカーの Y 軸を重力の上に固定し、
+// マーカーからは「上まわりの向き（ヨー）」と位置だけを採る
+
+/** 回転行列（列優先 16 要素）の Y 軸と up の角度 [deg]（0 = 水平に貼れている / 推定が合っている） */
+export function tiltDegOf(m: number[], up: V3): number {
+  const y = normalize([m[4], m[5], m[6]]);
+  const d = Math.max(-1, Math.min(1, dot(y, normalize(up))));
+  return (Math.acos(d) * 180) / Math.PI;
+}
+
+/**
+ * 回転行列 m（列優先 16 要素）の Y 軸を up に一致させ、ヨー（up まわりの向き）は m の Z 軸（マーカーの法線 =
+ * 部屋側）を up に直交する面へ射影して保つ。Z が up とほぼ平行なら（傾きが 90° 近い異常値）X 軸で代用する。
+ * 返り値は列優先 16 要素で並進は 0（呼び出し側が位置を別に決める）
+ */
+export function levelRotation(m: number[], up: V3): number[] {
+  const y = normalize(up);
+  const zRaw: V3 = [m[8], m[9], m[10]];
+  let z: V3 = normalize([zRaw[0] - y[0] * dot(zRaw, y), zRaw[1] - y[1] * dot(zRaw, y), zRaw[2] - y[2] * dot(zRaw, y)]);
+  if (Math.hypot(z[0], z[1], z[2]) < 0.5) {
+    // Z が up に平行: X 軸から直交系を作る（X を射影 → Z = X × Y）
+    const xRaw: V3 = [m[0], m[1], m[2]];
+    const x = normalize([xRaw[0] - y[0] * dot(xRaw, y), xRaw[1] - y[1] * dot(xRaw, y), xRaw[2] - y[2] * dot(xRaw, y)]);
+    z = normalize(cross(x, y));
+  }
+  const x = normalize(cross(y, z));
+  return [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, 0, 0, 0, 1];
 }
 
 /**

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { numParam, params } from "../../src/shared/url-params";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
+import { DEFAULT_MARKER_MM } from "../../src/shared/marker-layout";
 import { TextPanel } from "../../src/shared/text-panel";
 import {
   DEFAULT_BATTING,
@@ -47,7 +48,7 @@ const ROOM =
     : ROOM_ID_PATTERN.test(roomRaw)
       ? roomRaw
       : null;
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_ID = Math.round(
   numParam("markerId", 0, { min: 0, max: 249 }),
 );

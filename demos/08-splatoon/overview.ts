@@ -10,7 +10,7 @@ import { DEFAULT_FIELD, FIELD_SIZE_KEYS, FIELD_SIZE_LIMITS, fieldSurfaces, inkAt
 import type { FieldConfig, FieldSize, InkColor, InkLanding, SurfaceFrame, V3 } from "../../src/shared/splatoon-sim";
 import type { GameSnapshot, Shot } from "../../src/shared/splatoon-game";
 import type { PlayerPose } from "../../src/shared/splatoon-protocol";
-import { FACE_LABELS, MARKER_FACES, MAX_EXTRA_MARKERS, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
+import { DEFAULT_MARKER_MM, FACE_LABELS, MARKER_FACES, MAX_EXTRA_MARKERS, SUGGESTED_MARKERS, describeMarkers, markerToFieldMatrix, suggestedMarkerPos, validateMarkerLayout } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
 import { draggedMarkerPos, faceNormal, rayPlaneHit } from "../../src/shared/marker-drag";
 import { connectGame } from "./game-client";
@@ -31,7 +31,7 @@ import { createSplatSound } from "./splat-sound";
 // フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL ではなくこの画面の入力欄で決め、サーバーに送る（welcome / field で戻ってくる）
 const roomRaw = params.get("room");
 const ROOM = roomRaw === null ? "demo" : ROOM_ID_PATTERN.test(roomRaw) ? roomRaw : null;
-const MARKER_MM = numParam("markerMm", 100, { max: 5000 });
+const MARKER_MM = numParam("markerMm", DEFAULT_MARKER_MM, { max: 5000 });
 const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const GRAVITY = numParam("gravity", DEFAULT_FIELD.gravity, { min: 0, max: 30 });
 const MATCH_SEC = numParam("matchSec", DEFAULT_FIELD.matchSec, { min: 10, max: 600 });
