@@ -7,7 +7,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
-    <title>08. MR Splatoon — Mobile MR</title>
+    <title>08-7. MR Splatoon（AlvaAR SLAM） — Mobile MR</title>
     <style>
       /* 見た目は 04〜06 と同じ（デモごとに index.html を持つ規約のため重複している） */
       :root {
@@ -180,7 +180,17 @@
   <body>
     <div id="app"></div>
     <div id="start-overlay">
-      <h1>08. MR Splatoon</h1>
+      <h1>08-7. MR Splatoon（AlvaAR の単眼 SLAM + マーカー）</h1>
+      <p>
+        <strong>08-7 の違い（位置の取り方だけ）</strong>: 原点・スケール・向きは 08 と同じマーカーで決め、<strong>マーカーを見失っている間の位置の増分を
+        AlvaAR（WebAssembly の単眼 SLAM。GPLv3 のためこのデモ限定）</strong>から取ります。マーカーを見ながら 15cm ほど動く（前後にしゃがむ・近づく）と
+        SLAM とマーカーの対応が決まり、以後はマーカーから目を離して歩いてもコートがずれにくくなります（回転は 08 と同じジャイロ）。
+        HUD の slam= 行: 状態（tracking+drive = SLAM で位置を動かしている）・t=（処理時間）・off=（マーカーとの差）・fix=（対応の推定。calib = まだ）。
+        事前に PC で <code>npm run fetch:alva</code> が要ります（無ければ 08 と同じマーカーのみ）。
+        追加の調整: ?slam=0（使わない）&amp;slamW=360（SLAM の入力の長辺 [px]）&amp;slamIntervalMs=50&amp;slamMaxFail=30&amp;slamLostMs=500
+        &amp;slamMinBaseline=0.15（対応に要る動き [m]）&amp;slamPairs=150&amp;slamPairMs=100&amp;slamPairAgeMs=150&amp;slamPairMaxCorr=0.08&amp;slamSmooth=0.5。
+        PC 確認用: ?fakeslam=1（fakecam と併用。合成カメラから作った SLAM の姿勢を注入）&amp;fakeSlamScale=0.37&amp;fakeSlamYaw=140&amp;fakeSlamNoise=0.002
+      </p>
       <p>
         <a href="../03-marker-anchor/marker.html">マーカーを印刷</a
         >して<strong>壁に天地を合わせて貼る</strong>と、床（既定 3.0m × 2.5m）を四方の壁（既定の高さ 2.4m）で囲んだ

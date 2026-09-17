@@ -47,7 +47,31 @@ import { InkTankView } from "./ink-tank";
 import { FAKE_FIST_SEC, FAKE_OPEN_SEC, FAKE_REST_SEC, scriptedSplatHand } from "./fake-splat-hand";
 import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-shape";
 import { createSplatSound } from "./splat-sound";
+import { createSlamSource } from "./slam-source";
+import type { SlamSource } from "./slam-source";
+import { SlamFusion, applySimilarity, quatMul, quatNormalize, threePoseToAlva, yawPitchRollDeg } from "./slam-fusion";
+import type { Pose, Similarity } from "./slam-fusion";
 
+// 08-7: 08（MR スプラトゥーン）と同じ仕様で「位置の取り方」だけを変えた比較用（docs/space-stability-options.md 候補 3a）。
+// **AlvaAR は GPLv3。このデモ（実験）限定で使い、SDK には入れない**（README 冒頭参照）。
+//   - 原点・スケール・向き（ヨー）は 08 と同じマーカー（createMarkerAnchor。既存ファイルは変更しない）で決める
+//   - マーカーが見えている間: 「field 座標系でのカメラの姿勢（マーカー + ジャイロ）」と「AlvaAR の姿勢」の組を集め、
+//     SLAM → field の相似変換（回転 + スケール + 平行移動）を推定し続ける（slam-fusion.ts）
+//   - マーカーが見えない間: SLAM の位置をその変換で field に写し、アンカーの位置だけを動かす（08 は最後の姿勢のまま止まる）。
+//     回転は 08 と同じジャイロ（DeviceOrientationControls）で、SLAM の回転は HUD の診断にだけ出す
+//   - AlvaAR が無い・初期化に失敗・例外が続いた・?slam=0 のときは 08 と同じ「マーカーのみ」
+//   - 追加の URL パラメータ（他は 08 と同名・同義）:
+//     ?slam=0（SLAM を使わない）&slamW=360（SLAM の入力画像の長辺 [px]。マーカーの detW とは別）&slamIntervalMs=50（間引き）
+//     &slamMaxFail=30（例外がこの回数続いたら止める）&slamLostMs=500（この時間姿勢が出なければロスト）
+//     &slamMinBaseline=0.15（変換の推定に要る基線 [m]。マーカーを見ながらこれだけ動くと SLAM が使えるようになる）
+//     &slamPairs=150（推定に使う組の数）&slamPairMs=100（組を足す間隔）&slamPairAgeMs=150（マーカーの採用からこの時間以内のフレームだけ組にする）
+//     &slamPairMaxCorr=0.08（マーカーの補正量 Δ がこれ以下 = アンカーが追いついているときだけ組にする [m]）
+//     &slamSmooth=0.5（SLAM で動かすアンカーの平滑化）
+//     PC 確認用: ?fakeslam=1（fakecam と併用。AlvaAR を読まず、合成カメラの姿勢に既知の別原点・スケール・回転を掛けてノイズを足した
+//     AlvaAR 形式の姿勢を注入する）&fakeSlamScale=0.37&fakeSlamYaw=140&fakeSlamNoise=0.002（field 換算 [m]）。
+//     ヘッドレス確認からは window.__fakeMarkers.camPos = [x,y,z] で合成カメラを動かし、window.__fakeSlam.throw = true で例外を出せる
+//
+// 以下は 08 の説明（仕様は 08 と同じ）。
 // Phase 8: MR スプラトゥーン。07（Surface + UV + サーバー権威の共有）に「手の形」「インクの飛翔」「床」
 // 「チームと陣取り」を足した統合ゲーム第 3 弾。
 //   - フィールド: 壁のマーカー 1 枚で壁（Z=0）と床（Y=-floorDrop）の 2 枚の Surface を定義（splatoon-sim.ts）
@@ -175,6 +199,27 @@ const FAKE_TIMING = {
 
 /** フェイクカメラの原点マーカーを X 軸まわりに傾けて描く角度 [deg]（+ で上端が視点側へ）。重力での水平化の確認用（issue #54） */
 const FAKE_TILT_DEG = numParam("fakeTilt", 0, { min: -80, max: 80 });
+
+// ---- SLAM（08-7 で追加。上のコメント参照） ----
+const SLAM_ENABLED = params.get("slam") !== "0";
+const FAKE_SLAM = params.get("fakeslam") === "1";
+const SLAM_W = Math.round(numParam("slamW", 360, { min: 64, max: 1920 }));
+const SLAM_INTERVAL_MS = numParam("slamIntervalMs", 50, { min: 0, max: 2000 });
+const SLAM_MAX_FAIL = Math.round(numParam("slamMaxFail", 30, { min: 1, max: 10000 }));
+const SLAM_LOST_MS = numParam("slamLostMs", 500, { min: 50, max: 10000 });
+const SLAM_MIN_BASELINE = numParam("slamMinBaseline", 0.15, { min: 0.01, max: 10 });
+const SLAM_PAIRS = Math.round(numParam("slamPairs", 150, { min: 2, max: 5000 }));
+const SLAM_PAIR_MS = numParam("slamPairMs", 100, { min: 0, max: 5000 });
+const SLAM_PAIR_AGE_MS = numParam("slamPairAgeMs", 150, { min: 0, max: 5000 });
+/**
+ * 組にするのは、直近のマーカーの採用でアンカーがほぼ動かなかった（補正量 Δ がこれ以下の）ときだけ [m]。
+ * アンカーは lerp で遅れて追いつくので、動いている最中の組は「SLAM は新しい位置・マーカーは古い位置」になりスケールが縮む
+ */
+const SLAM_PAIR_MAX_CORR = numParam("slamPairMaxCorr", 0.08, { min: 0, max: 10 });
+const SLAM_SMOOTH = numParam("slamSmooth", 0.5, { min: 0.01, max: 1 });
+const FAKE_SLAM_SCALE = numParam("fakeSlamScale", 0.37, { min: 0.01, max: 100 });
+const FAKE_SLAM_YAW = numParam("fakeSlamYaw", 140, { min: -180, max: 180 });
+const FAKE_SLAM_NOISE = numParam("fakeSlamNoise", 0.002, { min: 0, max: 1 });
 
 /** タッチ端末（実機）か。PC は OrbitControls + キーボード */
 const touch = isTouchDevice();
@@ -491,7 +536,12 @@ const FAKE_CAM_H = 480;
 const FAKE_FOCAL_PX = FAKE_CAM_W / 2 / Math.tan(THREE.MathUtils.degToRad(params.has("camFov") ? numParam("camFov", CAM_FOV_WIDE, { min: 10, max: 170 }) : CAM_FOV_WIDE) / 2);
 /** 描かないマーカーの ID（ヘッドレス確認から window.__fakeMarkers.hidden で切り替えて、ロスト → 別マーカーへの切り替えを見る） */
 const fakeHidden = new Set<number>(FAKE_HIDE_ORIGIN ? [MARKER_ID] : []);
-if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = { hidden: fakeHidden };
+/**
+ * 08-7: 合成カメラを動かす口（ヘッドレス確認から window.__fakeMarkers.camPos = [x,y,z] で field 座標系の位置を変える。
+ * null なら 08 と同じ ?fakeCamPos= / fakeMarkerPx からの位置）。フェイクの SLAM（?fakeslam=1）も同じ姿勢から作る
+ */
+const fakeCamState: { hidden: Set<number>; camPos: [number, number, number] | null } = { hidden: fakeHidden, camPos: null };
+if (FAKE_CAM) (window as unknown as { __fakeMarkers: unknown }).__fakeMarkers = fakeCamState;
 /** 直近に作ったフェイクカメラの姿勢（カメラ → field。fakeWorldUp 用） */
 let fakeCamToField: number[] | null = null;
 function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
@@ -505,7 +555,9 @@ function fakeWorld(): { markers: FakeMarker[]; camToField: number[] } {
     markers.push({ id: m.id, bits: markerBits(m.id), toField: markerToFieldMatrix({ id: m.id, face: m.face as MarkerFace, pos: m.pos }) });
   }
   let pos: [number, number, number];
-  if (FAKE_CAM_POS.length === 3 && FAKE_CAM_POS.every(Number.isFinite)) {
+  if (fakeCamState.camPos && fakeCamState.camPos.length === 3 && fakeCamState.camPos.every(Number.isFinite)) {
+    pos = [fakeCamState.camPos[0], fakeCamState.camPos[1], fakeCamState.camPos[2]];
+  } else if (FAKE_CAM_POS.length === 3 && FAKE_CAM_POS.every(Number.isFinite)) {
     pos = [FAKE_CAM_POS[0], FAKE_CAM_POS[1], FAKE_CAM_POS[2]];
   } else {
     // 原点マーカーが fakeMarkerPx の大きさで、中央から (fakeShift, fakeShiftY) px ずれて映る正面の位置。
@@ -532,15 +584,154 @@ function worldUp(): THREE.Vector3 | null {
   return worldUpVec.set(u[0] - o[0], u[1] - o[1], u[2] - o[2]).transformDirection(camera.matrixWorld);
 }
 function fakeStream(): MediaStream {
-  const world = fakeWorld();
   return createFakeCameraStream(
     (ctx, canvas, frame) => {
+      // 08-7: 合成カメラが動くので毎フレーム姿勢を作り直す（08 は起動時に 1 回）
+      const world = fakeWorld();
       drawCheckerboard(ctx, canvas, frame);
       const visible = world.markers.filter((m) => !fakeHidden.has(m.id));
       drawProjectedMarkers(ctx, projectFakeMarkers(visible, world.camToField, FAKE_FOCAL_PX, canvas.width, canvas.height, MARKER_SIZE_M));
     },
     { width: FAKE_CAM_W, height: FAKE_CAM_H },
   );
+}
+
+// ---- SLAM（08-7。AlvaAR か、?fakeslam=1 の合成） ----
+let slam: SlamSource | null = null;
+let slamOffReason = SLAM_ENABLED ? "未起動" : "?slam=0";
+const fusion = new SlamFusion({ minBaselineM: SLAM_MIN_BASELINE, maxPairs: SLAM_PAIRS, minPairIntervalMs: SLAM_PAIR_MS });
+/** fusion を捨てた時点の slam.resets（SLAM がリセットされたら座標系が変わるので推定を捨てる） */
+let fusionResets = 0;
+let lastSlamResetLogMs = -Infinity;
+/** いまマーカーの代わりに SLAM でアンカーの位置を動かしているか */
+let slamDriving = false;
+/** マーカーが見えている間の「マーカーで出したカメラの位置」と「SLAM を写した位置」の差 [m]（HUD の off=） */
+let slamOffM: number | null = null;
+/** 直近の SLAM の向きを field に写したものと、マーカー + ジャイロのカメラの向きの差 [deg]（診断用。回転は SLAM から採らない） */
+let slamRotErrDeg: number | null = null;
+/** 直近の SLAM の向き（field に写したもの、無ければ SLAM 座標系のまま）のヨー・ピッチ・ロール [deg]（診断用） */
+let slamYpr: [number, number, number] | null = null;
+
+/**
+ * フェイクの SLAM 座標系（field → slam の相似変換）。AlvaAR の座標系は初期化したときのカメラの位置・向きと任意のスケールで決まるので、
+ * 別の原点・スケール・回転（ヨー + X まわり 20° の傾き）にして、推定がそれを打ち消せるかを見る
+ */
+const FAKE_FIELD_TO_SLAM: Similarity = {
+  scale: FAKE_SLAM_SCALE,
+  quat: quatNormalize(
+    quatMul(
+      [0, Math.sin(THREE.MathUtils.degToRad(FAKE_SLAM_YAW) / 2), 0, Math.cos(THREE.MathUtils.degToRad(FAKE_SLAM_YAW) / 2)],
+      [Math.sin(THREE.MathUtils.degToRad(20) / 2), 0, 0, Math.cos(THREE.MathUtils.degToRad(20) / 2)],
+    ),
+  ),
+  trans: [0.7, -0.3, 1.6],
+};
+/** ヘッドレス確認用: throw = true で findCameraPose 相当が例外を投げる、lost = true で姿勢を返さない */
+const fakeSlamState = { throw: false, lost: false };
+if (FAKE_SLAM) (window as unknown as { __fakeSlam: unknown }).__fakeSlam = fakeSlamState;
+if (FAKE_SLAM) (window as unknown as { __slamFusion: unknown }).__slamFusion = fusion;
+const fakeSlamMatrix = new THREE.Matrix4();
+const fakeSlamQuat = new THREE.Quaternion();
+function gaussian(): number {
+  return Math.sqrt(-2 * Math.log(Math.random() + 1e-12)) * Math.cos(2 * Math.PI * Math.random());
+}
+/** 合成カメラの姿勢（fakeCamToField）→ 別の座標系に写してノイズを足し、AlvaAR と同じ形式（OpenCV 流儀の Twc）にする */
+function fakeSlamPose(): number[] | null {
+  if (fakeSlamState.throw) throw new Error("fake SLAM exception (__fakeSlam.throw)");
+  if (fakeSlamState.lost || !fakeCamToField) return null;
+  fakeSlamMatrix.fromArray(fakeCamToField);
+  fakeSlamQuat.setFromRotationMatrix(fakeSlamMatrix);
+  const e = fakeCamToField;
+  const p = applySimilarity(FAKE_FIELD_TO_SLAM, [e[12], e[13], e[14]]);
+  const noise = FAKE_SLAM_NOISE * FAKE_SLAM_SCALE;
+  const pos: [number, number, number] = [p[0] + noise * gaussian(), p[1] + noise * gaussian(), p[2] + noise * gaussian()];
+  const quat = quatMul(FAKE_FIELD_TO_SLAM.quat, [fakeSlamQuat.x, fakeSlamQuat.y, fakeSlamQuat.z, fakeSlamQuat.w]);
+  return threePoseToAlva({ pos, quat });
+}
+
+const slamFieldInv = new THREE.Matrix4();
+const slamCamField = new THREE.Matrix4();
+const slamFieldPos = new THREE.Vector3();
+const slamFieldQuat = new THREE.Quaternion();
+const slamFieldScale = new THREE.Vector3();
+const slamCamWorld = new THREE.Vector3();
+const slamTarget = new THREE.Vector3();
+const slamMappedQuat = new THREE.Quaternion();
+
+/**
+ * 毎フレーム: SLAM を 1 回進め、マーカーが見えていれば対応の組を足し、見えていなければ SLAM の位置でアンカーを動かす。
+ * アンカーの回転は触らない（マーカーで決めた最後の向き。カメラの回転はジャイロ）
+ */
+function updateSlam(now: number, markerTracking: boolean) {
+  if (!slam) {
+    slamDriving = false;
+    return;
+  }
+  const pose = slam.update(now);
+  if (slam.resets !== fusionResets) {
+    fusionResets = slam.resets;
+    fusion.clear();
+    slamOffM = null;
+    if (now - lastSlamResetLogMs > 2000) {
+      lastSlamResetLogMs = now;
+      console.log(`[slam] リセット（${slam.resets} 回目）→ 変換の推定を捨ててマーカーで取り直す`);
+    }
+  }
+  if (slam.state === "failed") {
+    if (fusion.estimate || fusion.pairs.length > 0) fusion.clear();
+    slamDriving = false;
+    return;
+  }
+  if (!markerAnchor?.everDetected) {
+    slamDriving = false;
+    return;
+  }
+  anchor.updateMatrixWorld();
+  if (pose) {
+    // field 座標系でのカメラの姿勢 = アンカー⁻¹ · カメラ（sendPoseIfDue と同じ）
+    slamFieldInv.copy(anchor.matrixWorld).invert();
+    slamCamField.multiplyMatrices(slamFieldInv, camera.matrixWorld);
+    slamCamField.decompose(slamFieldPos, slamFieldQuat, slamFieldScale);
+    const est = fusion.estimate;
+    if (est) {
+      slamMappedQuat.set(...quatMul(est.sim.quat, pose.quat));
+      slamRotErrDeg = THREE.MathUtils.radToDeg(slamMappedQuat.angleTo(slamFieldQuat));
+      slamYpr = yawPitchRollDeg([slamMappedQuat.x, slamMappedQuat.y, slamMappedQuat.z, slamMappedQuat.w]);
+    } else {
+      slamRotErrDeg = null;
+      slamYpr = yawPitchRollDeg(pose.quat);
+    }
+    if (markerTracking && now - markerAnchor.lastAcceptedMs <= SLAM_PAIR_AGE_MS && markerAnchor.correctionM <= SLAM_PAIR_MAX_CORR) {
+      const field: Pose = {
+        pos: [slamFieldPos.x, slamFieldPos.y, slamFieldPos.z],
+        quat: [slamFieldQuat.x, slamFieldQuat.y, slamFieldQuat.z, slamFieldQuat.w],
+      };
+      fusion.add({ slam: pose, field }, now);
+      const mapped = fusion.toField(pose.pos);
+      slamOffM = mapped ? Math.hypot(mapped[0] - field.pos[0], mapped[1] - field.pos[1], mapped[2] - field.pos[2]) : null;
+    }
+  }
+  const est = fusion.estimate;
+  if (markerTracking || !est || !slam.isTracking(now, SLAM_LOST_MS)) {
+    slamDriving = false;
+    return;
+  }
+  if (!pose) return; // 新しい姿勢が無いフレームは位置をそのまま（slamDriving は維持）
+  const f = applySimilarity(est.sim, pose.pos);
+  // カメラのワールド位置 = アンカーの位置 + R_anchor · f なので、アンカーの位置 = カメラのワールド位置 − R_anchor · f
+  camera.getWorldPosition(slamCamWorld);
+  slamTarget.set(f[0], f[1], f[2]).applyQuaternion(anchor.quaternion);
+  slamTarget.subVectors(slamCamWorld, slamTarget);
+  if (slamDriving) anchor.position.lerp(slamTarget, SLAM_SMOOTH);
+  else anchor.position.copy(slamTarget);
+  slamDriving = true;
+}
+
+/** HUD の slam= 行の状態 */
+function slamStateText(): string {
+  if (!slam) return `off(${slamOffReason})`;
+  if (slam.state === "failed") return `failed(${slam.reason.slice(0, 80)})`;
+  return `${slam.state}${slamDriving ? "+drive" : ""}${slam.failures > 0 ? `(exc×${slam.failures})` : ""}`;
 }
 
 async function startCameraAndMarker(onProgress: (step: string) => void) {
@@ -576,6 +767,22 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     canSnap: () => performance.now() - lastShotMs > 300,
     worldUp,
   });
+  // 08-7: SLAM を起動する（失敗しても 08 と同じマーカーのみで動く）
+  if (!SLAM_ENABLED) {
+    slamOffReason = "?slam=0";
+  } else if (FAKE_SLAM && !FAKE_CAM) {
+    slamOffReason = "?fakeslam=1 は ?fakecam=1 と併用";
+  } else {
+    slam = createSlamSource({
+      video: pt.video,
+      widthPx: SLAM_W,
+      intervalMs: SLAM_INTERVAL_MS,
+      maxFailures: SLAM_MAX_FAIL,
+      camHFovDeg: () => pt.camHFovDeg,
+      moduleUrl: `${import.meta.env.BASE_URL}vendor/alva/alva_ar.js`,
+      fakePose: FAKE_SLAM ? fakeSlamPose : undefined,
+    });
+  }
 }
 
 // ---- 手トラッキング（06 と同じ初期化・失敗時の CPU 再試行） ----
@@ -871,7 +1078,9 @@ function sendPoseIfDue(now: number) {
     }
     hands.push(flat);
   }
-  const tracking = markerAnchor.isTracking(now, MARKER_LOST_MS);
+  // 08-7: マーカーを見失っていても SLAM で位置を動かしている間は追跡中として送る（位置が更新されている）
+  const markerTracking = markerAnchor.isTracking(now, MARKER_LOST_MS);
+  const tracking = markerTracking || slamDriving;
   const pose: PlayerPose = {
     pos: [round3(posePos.x), round3(posePos.y), round3(posePos.z)],
     quat: [poseQuat.x, poseQuat.y, poseQuat.z, poseQuat.w],
@@ -881,7 +1090,7 @@ function sendPoseIfDue(now: number) {
   if (hands.length > 0) pose.hands = hands;
   if (isFist()) pose.fist = true;
   // いまどのマーカーで位置合わせしているか（俯瞰画面の診断表示。ロスト中は付けない）
-  if (tracking && markerAnchor.usedIds.length > 0) pose.markerIds = [...markerAnchor.usedIds];
+  if (markerTracking && markerAnchor.usedIds.length > 0) pose.markerIds = [...markerAnchor.usedIds];
   if (client.sendPose(pose)) posesSent++;
 }
 
@@ -1315,7 +1524,9 @@ function renderHud() {
     hudState.fsResult && `fs=${hudState.fsResult}`,
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
     hudState.wake && `wake=${hudState.wake}`,
-    `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (holding last pose)" : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
+    `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? (slamDriving ? " (slam)" : " (holding last pose)") : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
+    // 08-7: SLAM の状態（t=処理時間、off=マーカーで出した位置との差、fix=SLAM → field の変換の推定、rot=SLAM の向き（診断用）、n=呼び出し回数）
+    `slam=${slamStateText()} t=${slam ? slam.lastMs.toFixed(0) : "-"}ms off=${slamOffM === null ? "-" : `${slamOffM.toFixed(2)}m`} fix=${fusion.describe()} rot=${slamYpr ? `(${slamYpr.map((v) => v.toFixed(0)).join(",")})` : "-"}${slamRotErrDeg === null ? "" : ` rotErr=${slamRotErrDeg.toFixed(1)}deg`} n=${slam?.calls ?? 0} resets=${slam?.resets ?? 0}${slam?.focalPx ? ` f=${slam.focalPx.toFixed(0)}px` : ""}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
@@ -1364,7 +1575,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} slam=${SLAM_ENABLED ? (FAKE_SLAM ? "fake" : "alva") : 0} slamW=${SLAM_W}@${SLAM_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
@@ -1429,6 +1640,8 @@ renderer.setAnimationLoop(() => {
   markerAnchor?.update(now);
   if (markerAnchor?.everDetected && !anchor.visible) anchor.visible = true;
   const tracking = markerAnchor?.isTracking(now, MARKER_LOST_MS) ?? false;
+  // 08-7: SLAM を進め、マーカーが見えない間は SLAM の位置でアンカーを動かす（枠の色は 08 と同じくマーカー基準のまま）
+  updateSlam(now, tracking);
   // 枠の色: 追跡中に使っているマーカーは青、使っていないマーカーは灰、ロスト中は全部赤
   const usedIds = markerAnchor?.usedIds ?? [];
   for (const f of [originFrame, ...extraFrames]) {

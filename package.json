@@ -17,6 +17,8 @@
     "check:surface": "node scripts/headless-surface.mjs",
     "test:splatoon": "node scripts/test-splatoon.mjs",
     "check:splatoon": "node scripts/headless-splatoon.mjs",
+    "test:splatoon-alva": "node scripts/test-08-7-alva.mjs",
+    "check:splatoon-alva": "node scripts/headless-08-7-alva.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
@@ -26,7 +28,8 @@
     "test:batting": "node scripts/test-batting.mjs",
     "check:batting": "node scripts/headless-batting.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
-    "fetch:models": "node scripts/fetch-models.mjs"
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:alva": "node scripts/fetch-alva.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
