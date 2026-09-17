@@ -49,24 +49,29 @@ import { impactDirUv, isWallSurface, splatShape } from "../../src/shared/splat-s
 import { createSplatSound } from "./splat-sound";
 import { createFixedAnchor } from "./fixed-anchor";
 import type { FixedAnchor } from "./fixed-anchor";
-import { DEFAULT_TRUST_LIMITS } from "./fixed-anchor-math";
+import { defaultAlignAngleDeg, defaultTrustLimits } from "./fixed-anchor-math";
 
 // Phase 8-2: 08 スプラトゥーンの「位置の取り方」だけを変えた比較用デモ（docs/space-stability-options.md §4 の 5b
 // 「一度合わせて固定」。比較実験の基準線）。ゲームの仕様・UI・サーバー・プロトコルは 08 と同じ（demos/08-splatoon からのコピー）。
 //   - 08 はマーカーが見えるたびにアンカー（field 座標系 → ワールド）を観測へ寄せる（lerp / スナップ）ので、
 //     斜めから見た観測の誤差がそのままコートの揺れになる。
-//   - 08-2 は開始後に「位置合わせ」段階を設け、原点マーカーの正面・近距離（画面の中央に大きく映り、傾きと再投影誤差が
-//     小さい）で N 回連続して安定した観測が取れたときだけアンカーを確定する（位置は中央値、回転は平均）。
+//   - 08-2 は開始後に「位置合わせ」段階を設け、マーカーの正面・近距離（画面の中央に大きく映り、傾きと再投影誤差が
+//     小さい）の信頼できる観測が直近 14 回のうち 10 回あり、そのばらつきが小さいときだけアンカーを確定する（位置は中央値、回転は平均）。
+//     確定は練習中（または結果表示中）だけ（対戦中に正面に来ても確定しない）。
 //     確定後はアンカーを更新しない（ロスト・再検出・別マーカーへの切り替えでも動かさない）。回転はジャイロのまま。
 //     ただし確定時と同じ条件を満たす「信頼できる観測」のときだけ ?refine=（EMA 係数。既定 0.02、0 で完全固定）で緩やかに寄せる
 //   - 合わせ直し: 練習中に画面（PC は Space）を ?realignHoldMs=（既定 2000ms）押し続ける。集め直している間もいまの位置で遊べ、
-//     確定した時点で置き換わる（対戦中・カウントダウン中・結果表示中は押し続けても合わせ直さない）
-//   - 追加マーカー（俯瞰画面の配置）も位置合わせの候補になる（見えているマーカーのうち条件の良い 1 枚で信頼度を評価）が、
-//     確定後は切り替えでアンカーを飛ばさない（上の緩やかな補正だけ）
+//     確定した時点で置き換わる（対戦中・カウントダウン中・結果表示中は押し続けても合わせ直さない。練習以外になったら取り消す）。
+//     合わせ直しが始まったら指を離すまで発射しない（2 秒押すまでの間は 08 と同じ視線連射）。
+//     別ページから戻ったとき（bfcache）と、確定に使ったマーカーの配置・マーカーの高さが変わったときは、練習中なら自動で合わせ直す
+//   - 追加マーカー（俯瞰画面の配置）も位置合わせの候補になる（マーカーが 1 枚だけ映っている観測だけを使う。複数枚が同時に
+//     使われた観測はスキップ）が、確定後は切り替えでアンカーを飛ばさない（上の緩やかな補正だけ）
 //   - 実装: src/shared/marker-anchor.ts は変更せず、出力先を観測用の Object3D にして fixed-anchor.ts が本物のアンカーを制御する
-//   - URL パラメータ（08 に無いもの）: ?alignN=10（確定に必要な連続観測数）&alignDist=1.6（マーカーまでの距離の上限 [m]）
-//     &alignOff=20（画面中央からの角度の上限 [deg]）&alignFace=25（正対からの角度の上限 [deg]）&alignTilt=15（水平化前の傾きの上限 [deg]）
-//     &alignErr=0.15（再投影誤差の上限）&alignSpread=0.05（窓の中の位置のばらつきの上限 [m]）&alignAngle=3（回転のばらつきの上限 [deg]）
+//   - URL パラメータ（08 に無いもの）: ?alignN=10（確定に必要な信頼できる観測の数）&alignWindow=14（直近何回の観測の中で数えるか）
+//     &alignDist=1.6（マーカーまでの距離の上限 [m]）&alignOff=20（画面中央からの角度の上限 [deg]）
+//     &alignFace=25（正対からの角度の上限 [deg]。gravityAlign が on なら壁のマーカーは水平面で測る）
+//     &alignTilt=30（水平化前の傾きの上限 [deg]。gravityAlign が off なら 15）
+//     &alignErr=0.15（再投影誤差の上限）&alignSpread=0.05（窓の中の位置のばらつきの上限 [m]）&alignAngle=3（回転のばらつきの上限 [deg]。gravityAlign が on なら 15°（POSIT のヨーは 1.0m・150mm で ±15° ばらつくため。確定後の誤差は平均で 2° 前後））
 //     &refine=0.02（確定後の補正の強さ。0 で完全固定。08 の ?smooth= も同じ意味で受け付ける）&refineMax=0.5（これ以上離れた観測は補正に使わない [m]）
 //     &refineMaxDeg=20（回転がこれ以上ずれた観測は補正に使わない [deg]）&realignHoldMs=2000（0 で無効）
 //   - HUD: 08 の marker= の行の代わりに align=（locked / aligning n/N、直近の観測の質と信頼できなかった理由、
@@ -114,17 +119,12 @@ const MARKER_INTERVAL_MS = numParam("markerIntervalMs", 100, { min: 0, max: 2000
 const MARKER_LOST_MS = numParam("lostMs", 500, { min: 50, max: 10000 });
 
 // 位置合わせ（08-2 固有。fixed-anchor.ts / fixed-anchor-math.ts）
-/** 確定に必要な「信頼できる観測」の連続数 */
+/** 確定に必要な「信頼できる観測」の数 */
 const ALIGN_SAMPLES = Math.round(numParam("alignN", 10, { min: 1, max: 100 }));
-const ALIGN_TRUST = {
-  maxDistM: numParam("alignDist", DEFAULT_TRUST_LIMITS.maxDistM, { min: 0.1, max: 10 }),
-  maxOffAxisDeg: numParam("alignOff", DEFAULT_TRUST_LIMITS.maxOffAxisDeg, { min: 1, max: 90 }),
-  maxFacingDeg: numParam("alignFace", DEFAULT_TRUST_LIMITS.maxFacingDeg, { min: 1, max: 90 }),
-  maxTiltDeg: numParam("alignTilt", DEFAULT_TRUST_LIMITS.maxTiltDeg, { min: 0, max: 90 }),
-  maxErr: numParam("alignErr", DEFAULT_TRUST_LIMITS.maxErr, { min: 0, max: 100 }),
-};
+/** 直近何回の観測の中に ALIGN_SAMPLES 回の信頼できる観測があれば良いか（信頼できない観測 1 回で窓を捨てない）。alignN 未満なら alignN（= 連続） */
+const ALIGN_WINDOW = Math.max(ALIGN_SAMPLES, Math.round(numParam("alignWindow", 14, { min: 1, max: 400 })));
+// 信頼できる観測の閾値（ALIGN_TRUST）は tilt の既定が gravityAlign に依るので、GRAVITY_ALIGN の後で決める
 const ALIGN_SPREAD_M = numParam("alignSpread", 0.05, { min: 0, max: 2 });
-const ALIGN_ANGLE_DEG = numParam("alignAngle", 3, { min: 0, max: 90 });
 /**
  * 確定後の緩やかな補正の EMA 係数（観測 1 回ごと）。0 で完全固定。
  * 08 の ?smooth=（観測をアンカーに馴染ませる係数。既定 0.5）は同義の値なので、?refine= が無いときは ?smooth= を同じ意味で受け付ける
@@ -236,6 +236,17 @@ const touch = isTouchDevice();
  * PC + 実カメラ（OrbitControls）ではワールドと重力が対応しないので off。?gravityAlign=0/1 で上書き
  */
 const GRAVITY_ALIGN = params.has("gravityAlign") ? params.get("gravityAlign") !== "0" : touch || FAKE_CAM;
+/** 08-2: 信頼できる観測の閾値。tilt は水平化（gravityAlign）が on なら位置に効かないので既定 30°、off なら 15°（fixed-anchor-math.ts の defaultTrustLimits） */
+const ALIGN_TRUST_DEFAULT = defaultTrustLimits(GRAVITY_ALIGN);
+/** 窓の中の回転のばらつきの上限 [deg]。gravityAlign が on なら 15°（POSIT のヨーは 1.0m・150mm で ±15° ばらつくため。確定後の誤差は平均で 2° 前後）。fixed-anchor-math.ts の defaultAlignAngleDeg */
+const ALIGN_ANGLE_DEG = numParam("alignAngle", defaultAlignAngleDeg(GRAVITY_ALIGN), { min: 0, max: 90 });
+const ALIGN_TRUST = {
+  maxDistM: numParam("alignDist", ALIGN_TRUST_DEFAULT.maxDistM, { min: 0.1, max: 10 }),
+  maxOffAxisDeg: numParam("alignOff", ALIGN_TRUST_DEFAULT.maxOffAxisDeg, { min: 1, max: 90 }),
+  maxFacingDeg: numParam("alignFace", ALIGN_TRUST_DEFAULT.maxFacingDeg, { min: 1, max: 90 }),
+  maxTiltDeg: numParam("alignTilt", ALIGN_TRUST_DEFAULT.maxTiltDeg, { min: 0, max: 90 }),
+  maxErr: numParam("alignErr", ALIGN_TRUST_DEFAULT.maxErr, { min: 0, max: 100 }),
+};
 
 // ---- シーン ----
 const scene = new THREE.Scene();
@@ -342,10 +353,22 @@ buildField();
 /** サーバーの config を取り込む。壁と床の形に効く値が変わっていたら作り直す（塗りは直後の state の格子で描き直される）。追加マーカーの配置も反映する */
 function applyFieldConfig(cfg: FieldConfig): boolean {
   const changed = cfg.wallW !== fieldCfg.wallW || cfg.wallH !== fieldCfg.wallH || cfg.floorDepth !== fieldCfg.floorDepth || cfg.floorDrop !== fieldCfg.floorDrop || cfg.cellM !== fieldCfg.cellM;
+  // 08-2: 確定に使ったマーカーの配置か、マーカーの高さ（floorDrop）が変わったら、確定した姿勢はもう合っていない
+  const lockedIds = fixedAnchor?.locked ? fixedAnchor.lockedIds : [];
+  const lockedLayoutBefore = lockedLayoutKey(lockedIds, fieldCfg);
+  const floorDropBefore = fieldCfg.floorDrop;
   fieldCfg = cfg;
   if (changed) buildField();
   applyMarkerLayout(cfg.markers ?? []);
+  if (fixedAnchor?.locked && (cfg.floorDrop !== floorDropBefore || lockedLayoutKey(lockedIds, cfg) !== lockedLayoutBefore)) {
+    requestAutoRealign("layout");
+  }
   return changed;
+}
+
+/** 08-2: 確定に使ったマーカー ID の配置（原点は配置を持たないので除く）。変わったかの比較用 */
+function lockedLayoutKey(ids: readonly number[], cfg: FieldConfig): string {
+  return JSON.stringify(ids.filter((id) => id !== MARKER_ID).map((id) => (cfg.markers ?? []).find((m) => m.id === id) ?? null));
 }
 const message = new TextPanel(0.9, 0.24);
 message.mesh.position.set(0, -0.28, -1.2);
@@ -653,7 +676,9 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     observed,
     markerAnchor: () => markerAnchor,
     toAnchorOf: (id) => (id === MARKER_ID ? identity : (extraMarkers.find((m) => m.id === id)?.toAnchor ?? null)),
+    worldUp,
     samples: ALIGN_SAMPLES,
+    windowLen: ALIGN_WINDOW,
     trust: ALIGN_TRUST,
     maxSpreadM: ALIGN_SPREAD_M,
     maxAngleDeg: ALIGN_ANGLE_DEG,
@@ -661,14 +686,17 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
     refineMaxM: REFINE_MAX_M,
     refineMaxDeg: REFINE_MAX_DEG,
     lostMs: MARKER_LOST_MS,
-    // 合わせ直しの確定は練習中（または入室前）だけ。長押しの計時中に対戦が始まっていたら確定を捨てる（updateRealign の判定の補強）
-    canReplace: () => auth === null || auth.state.phase === "practice",
+    // 最初の確定は練習中か結果表示中だけ（対戦中に正面に来ても確定しない。入室して状態が届くまでも待つ）。
+    // 合わせ直しの確定は練習中だけ。長押しの計時中に対戦が始まっていたら確定を捨てる（onState の cancelRealign の補強）
+    canLock: (initial) => canLockNow(initial),
   });
   (window as unknown as { __fixedDebug: unknown }).__fixedDebug = {
     anchorPos: () => [anchor.position.x, anchor.position.y, anchor.position.z],
     anchorQuat: () => [anchor.quaternion.x, anchor.quaternion.y, anchor.quaternion.z, anchor.quaternion.w],
     observedPos: () => [observed.position.x, observed.position.y, observed.position.z],
-    state: () => ({ locked: fixedAnchor?.locked, realigning: fixedAnchor?.realigning, locks: fixedAnchor?.locks, refined: fixedAnchor?.refined, count: fixedAnchor?.count, reason: fixedAnchor?.lastReason, obsDeltaM: fixedAnchor?.obsDeltaM, obsRotDeg: fixedAnchor?.obsRotDeg, driftM: fixedAnchor?.driftM }),
+    state: () => ({ locked: fixedAnchor?.locked, realigning: fixedAnchor?.realigning, locks: fixedAnchor?.locks, refined: fixedAnchor?.refined, count: fixedAnchor?.count, reason: fixedAnchor?.lastReason, obsDeltaM: fixedAnchor?.obsDeltaM, obsRotDeg: fixedAnchor?.obsRotDeg, driftM: fixedAnchor?.driftM, lockBlocked: fixedAnchor?.lockBlocked, cancelled: fixedAnchor?.cancelled, lockedIds: fixedAnchor?.lockedIds, staleNote: staleAnchorNote, pendingRealign: pendingAutoRealign }),
+    /** 視界内メッセージの文字列（ヘッドレス確認用） */
+    message: () => lastMessageText,
   };
 }
 
@@ -806,6 +834,10 @@ function onState(state: GameSnapshot) {
   const now = performance.now();
   auth = { state, recvMs: now };
   myColor = colorOf(selfId);
+  // 08-2: 合わせ直しは練習中だけ。対戦（カウントダウン・結果を含む）に入ったら取り消す（コートが跳ぶと対戦が壊れる）
+  if (state.phase !== "practice" && fixedAnchor?.cancelRealign()) {
+    suppressFireUntilRelease = false;
+  }
   // インク残量はサーバーが権威。受信のたびローカルの予測を上書きする（間はローカルで進める）
   const serverInk = state.ink?.[selfId];
   if (serverInk !== undefined) inkLocal = serverInk;
@@ -1002,6 +1034,8 @@ let holdStartMs = -Infinity;
 /** この押し続けで合わせ直しを起動済みか（離すまで 1 回だけ） */
 let realignFired = false;
 let realignRequests = 0;
+/** 08-2: 長押しで合わせ直しが始まったら、指を離すまで発射しない */
+let suppressFireUntilRelease = false;
 let lastShapeInfo = "";
 /** インク残量 0..1 のローカル予測（表示用。権威は state.ink） */
 let inkLocal = 1;
@@ -1016,7 +1050,8 @@ function hasInkForShot(): boolean {
 /** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
 function canShoot(): boolean {
   const phase = auth?.state.phase;
-  return joined && (phase === "play" || phase === "practice") && anchor.visible && myColor !== null && posesSent > 0;
+  // 08-2: 合わせ直しを始めた押し続けの間は撃たない（離すまで。集め直している間に動かないように）
+  return joined && (phase === "play" || phase === "practice") && anchor.visible && myColor !== null && posesSent > 0 && !suppressFireUntilRelease;
 }
 
 const camWorldPos = new THREE.Vector3();
@@ -1083,8 +1118,9 @@ function updateFire(now: number) {
 
 /**
  * 08-2: 合わせ直し。画面（PC は Space）を REALIGN_HOLD_MS 押し続けたら、練習中（または入室前）に限って位置合わせをやり直す。
- * 08 の「押している間は視界の中央へ連射」はそのまま（2 秒を超えると練習中は合わせ直しも始まる。集め直している間も
- * いまの位置で遊べるので、連射が途切れることはない）。対戦中・カウントダウン中・結果表示中は合わせ直さない（コートが跳ぶと対戦が壊れる）
+ * 2 秒押すまでの間は 08 と同じ「押している間は視界の中央へ連射」。合わせ直しが始まったら指を離すまで発射を止める
+ * （集め直している間に端末を動かさないように。コートはいまの位置のまま）。
+ * 対戦中・カウントダウン中・結果表示中は合わせ直さない（コートが跳ぶと対戦が壊れる。その間は 08 と同じく連射が続く）
  */
 function updateRealign(now: number) {
   if (!holdPressed || REALIGN_HOLD_MS <= 0 || realignFired) return;
@@ -1096,10 +1132,59 @@ function updateRealign(now: number) {
     return;
   }
   // 確定の瞬間にも phase を見る（createFixedAnchor の canReplace）: 押している間に対戦が始まっていたら確定を捨てる
-  if (fixedAnchor?.realign()) {
-    realignRequests++;
-    flash = { text: "合わせ直します\nマーカーの正面 1m に立ってください", untilMs: now + 2500 };
-    console.log(`[fixed-anchor] realign requested (#${realignRequests})`);
+  if (startRealign(now, "hold", "合わせ直します\nマーカーの正面 1m に立ってください")) {
+    suppressFireUntilRelease = true;
+  }
+}
+
+/** 合わせ直しを始めて案内を出す（確定前なら何もしない） */
+function startRealign(now: number, how: string, text: string): boolean {
+  if (!fixedAnchor?.realign()) return false;
+  realignRequests++;
+  staleAnchorNote = "";
+  flash = { text, untilMs: now + 2500 };
+  console.log(`[fixed-anchor] realign requested (#${realignRequests}, ${how})`);
+  return true;
+}
+
+/** 確定を許すか（createFixedAnchor の canLock）。最初の確定は練習中か結果表示中、合わせ直しは練習中だけ */
+function canLockNow(initial: boolean): boolean {
+  if (!joined || !auth) return false;
+  const phase = auth.state.phase;
+  return phase === "practice" || (initial && phase === "result");
+}
+
+/**
+ * 08-2: 自動の合わせ直し（別ページから戻った = bfcache、確定に使ったマーカーの配置 / マーカーの高さが変わった）。
+ * 入室し直して状態が届くのを待ってから、練習中なら合わせ直し、そうでなければ「練習中に合わせ直してください」を出し続ける
+ */
+let pendingAutoRealign: "bfcache" | "layout" | null = null;
+/** 位置がずれているかもしれないときの案内（視界内メッセージの末尾と HUD。合わせ直しを始めたら消す） */
+let staleAnchorNote = "";
+function requestAutoRealign(reason: "bfcache" | "layout") {
+  if (!fixedAnchor?.locked) return;
+  pendingAutoRealign = reason;
+  console.log(`[fixed-anchor] auto realign pending (${reason})`);
+}
+function updateAutoRealign(now: number) {
+  if (!pendingAutoRealign) return;
+  if (!fixedAnchor?.locked) {
+    pendingAutoRealign = null;
+    return;
+  }
+  if (!joined || !auth) return;
+  const reason = pendingAutoRealign;
+  pendingAutoRealign = null;
+  if (auth.state.phase === "practice") {
+    if (fixedAnchor.realigning) fixedAnchor.cancelRealign();
+    startRealign(
+      now,
+      reason,
+      reason === "bfcache" ? "戻ったので合わせ直します\nマーカーの正面 1m に立ってください" : "マーカーの配置が変わったので合わせ直します\nマーカーの正面 1m に立ってください",
+    );
+  } else {
+    staleAnchorNote =
+      reason === "bfcache" ? "戻ったので位置がずれているかもしれません。練習中に合わせ直してください" : "マーカーの配置が変わりました。練習中に合わせ直してください";
   }
 }
 
@@ -1133,6 +1218,7 @@ if (touch) {
 }
 function releaseHold() {
   holdPressed = false;
+  suppressFireUntilRelease = false;
   holdStartMs = -Infinity;
   realignFired = false;
 }
@@ -1227,30 +1313,49 @@ function remainingSec(now: number): number {
 }
 
 /**
- * 08-2: 位置合わせの案内（視界内メッセージ）。信頼できない理由に応じて「近づいて / 中央に / 正面に」を出し、
- * 集まっている間は「合わせ中 n/N」、ばらついていれば「止まってください」
+ * 08-2: 位置合わせの案内（視界内メッセージ）。信頼できない理由に応じて「近づいて / 中央に / 正面に / 1 枚だけ」を出し、
+ * 集まっている間は「合わせ中 n/N」、ばらついていれば「止まってください」。対戦中で確定を待っていれば「対戦が終わるまで」
  */
 function alignMessage(fa: FixedAnchor | null, head: string): string {
   if (!fa) return `${head}\nマーカーの正面 1m に立ってください`;
+  const phase = auth?.state.phase;
+  if (!fa.locked && (fa.lockBlocked || phase === "waiting" || phase === "play")) {
+    return `${head}\n対戦が終わるまで位置合わせできません`;
+  }
   const n = fa.count;
-  if (n === 0) {
+  if (n === 0 || fa.lastReason === "multi") {
+    const q = fa.lastQuality;
     const hint =
-      fa.lastReason === "far"
-        ? "もっとマーカーに近づいてください"
-        : fa.lastReason === "off"
-          ? "マーカーを画面の中央に"
-          : fa.lastReason === "face"
-            ? "マーカーの正面に回ってください"
-            : fa.lastReason === "tilt"
-              ? "端末を水平に構えてください"
-              : fa.lastReason === "err" || fa.lastReason === "nan"
-                ? "止まってマーカーをはっきり映してください"
-                : "（マーカーが画面の中央に大きく映るように）";
-    return `${head}\nマーカーの正面 1m に立ってください\n${hint}`;
+      fa.lastReason === "multi"
+        ? "マーカーが 1 枚だけ映るように近づいてください"
+        : q && fa.lastReason !== null && fa.lastReason !== "far" && q.elevationDeg > ALIGN_TRUST.maxFacingDeg
+          ? // 目とマーカーの高さの差が大きい（見上げる / 見下ろす）: 離れると角度が浅くなる
+            "少し下がってください"
+          : fa.lastReason === "far"
+            ? "もっとマーカーに近づいてください"
+            : fa.lastReason === "off"
+              ? "マーカーを画面の中央に"
+              : fa.lastReason === "face"
+                ? "マーカーの正面に回ってください"
+                : fa.lastReason === "tilt"
+                  ? "止まってマーカーを正面に大きく映してください"
+                  : fa.lastReason === "err" || fa.lastReason === "nan"
+                    ? "止まってマーカーをはっきり映してください"
+                    : "（マーカーが画面の中央に大きく映るように）";
+    return n === 0 ? `${head}\nマーカーの正面 1m に立ってください\n${hint}` : `${head}\n合わせ中 ${n}/${fa.samplesNeeded}\n${hint}`;
   }
   const progress = `合わせ中 ${n}/${fa.samplesNeeded}`;
   return fa.stable ? `${head}\n${progress}\nそのまま動かないでください` : `${head}\n${progress}\nぶれています。止まってください`;
 }
+
+/** 08-2: 視界内メッセージに足す注意（位置がずれているかもしれない / ヨーのドリフト）。無ければ空 */
+function anchorNotes(): string {
+  const notes: string[] = [];
+  if (staleAnchorNote) notes.push(staleAnchorNote);
+  if (fixedAnchor?.yawDriftSuspected) notes.push("向きがずれています。練習中に合わせ直してください");
+  return notes.map((n) => `\n${n}`).join("");
+}
+let lastMessageText = "";
 
 function updateMessages(now: number) {
   const s = auth?.state;
@@ -1307,8 +1412,8 @@ function updateMessages(now: number) {
   } else if (flash && now < flash.untilMs) {
     text = flash.text;
     color = flash.text.startsWith("インク切れ") ? "#fdd663" : "#81c995";
-  } else if (fixedAnchor.realigning) {
-    // 08-2: 合わせ直し中（いまの位置のまま遊べる）
+  } else if (fixedAnchor.realigning && auth.state.phase === "practice") {
+    // 08-2: 合わせ直し中（いまの位置のまま遊べる。練習中だけ。対戦に入ったら onState で取り消している）
     text = alignMessage(fixedAnchor, "合わせ直し中（いまの位置は保持）");
     color = "#fdd663";
   } else if (auth.state.phase === "result") {
@@ -1328,6 +1433,9 @@ function updateMessages(now: number) {
     text = `残り ${Math.ceil(remainingSec(now))} 秒（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充`;
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
+  // 08-2: 位置がずれているかもしれないときは、状態の案内（残り時間など）を隠さずに末尾に足す
+  if (fixedAnchor?.locked && !fixedAnchor.realigning && !(flash && now < flash.untilMs)) text += anchorNotes();
+  lastMessageText = text;
   message.set(text, color);
 }
 
@@ -1474,7 +1582,7 @@ function renderHud() {
     hudState.fsChange && `fs-change: ${hudState.fsChange}`,
     hudState.wake && `wake=${hudState.wake}`,
     // 08-2: 08 の marker= の行の代わりに位置合わせの状態（align=）。生の観測は obs= に 08 の marker= と同じ内容
-    `align=${fixedAnchor?.info ?? "-"} realigns=${realignRequests} obs=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (lost)" : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
+    `align=${fixedAnchor?.info ?? "-"} realigns=${realignRequests}${staleAnchorNote ? " stale=yes" : ""}${pendingAutoRealign ? ` pendingRealign=${pendingAutoRealign}` : ""} obs=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? " (lost)" : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
@@ -1523,7 +1631,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} alignN=${ALIGN_SAMPLES} refine=${REFINE} realignHoldMs=${REALIGN_HOLD_MS} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} alignN=${ALIGN_SAMPLES}/${ALIGN_WINDOW} alignTilt=${ALIGN_TRUST.maxTiltDeg} alignAngle=${ALIGN_ANGLE_DEG} refine=${REFINE} realignHoldMs=${REALIGN_HOLD_MS} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";
@@ -1566,6 +1674,8 @@ addEventListener("pageshow", (e) => {
   if (!document.body.classList.contains("started")) return;
   const name = readPlayerName();
   if (name !== null) connect(name);
+  // 08-2: 離れている間に端末が動いていれば確定した位置はずれている。入室し直したら、練習中なら自動で合わせ直す
+  requestAutoRealign("bfcache");
   if (hudState.cam && !hudState.cam.includes("bfcache")) {
     hudState.cam += " (bfcache: カメラ停止の可能性)";
   }
@@ -1591,6 +1701,7 @@ renderer.setAnimationLoop(() => {
   fixedAnchor?.update(now);
   if (fixedAnchor && fixedAnchor.locks > locksBefore) {
     flash = { text: locksBefore === 0 ? "確定！\nコートを固定しました" : "確定！\nコートを合わせ直しました", untilMs: now + 2000 };
+    staleAnchorNote = "";
   }
   if (fixedAnchor?.locked && !anchor.visible) anchor.visible = true;
   const tracking = markerAnchor?.isTracking(now, MARKER_LOST_MS) ?? false;
@@ -1603,6 +1714,7 @@ renderer.setAnimationLoop(() => {
   anchor.updateMatrixWorld(true);
   updateHands(now);
   updateRealign(now);
+  updateAutoRealign(now);
   updateFire(now);
   updatePeers(now);
   updateShots(now);

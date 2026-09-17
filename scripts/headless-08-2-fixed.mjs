@@ -9,8 +9,13 @@
 //   - 信頼できる観測（正面のまま 10cm 横へ）でも refine=0 なら動かない
 //   - refine=0.1 のウィンドウでは、正面のまま 10cm 横へ動かすと跳ばずに（最初の読みは 5cm 未満）単調に寄っていき 7cm 以上進む
 //   - 練習中に Space を 2 秒押し続けると合わせ直し（realigning → locked #2）になり、新しいカメラ位置に一致する
+//   - 練習中に合わせ直しを始めた（マーカーを隠して集まらない）まま対戦が始まると、合わせ直しは取り消される（realigning が解除、
+//     cancelled=1、視界に「合わせ直し中」を出さない）
 //   - 対戦中は Space を押し続けても合わせ直さない
+//   - 対戦中に入ってきた 5 つ目のウィンドウは、正面にいても確定しない（視界に「対戦が終わるまで位置合わせできません」、
+//     俯瞰画面に「位置合わせ中: 1 人」）。結果表示になったら確定する
 //   - 床の追加マーカーだけが見える 4 つ目のウィンドウも（俯瞰画面で配置を配ると）確定して入室・連射できる
+//   - 確定に使った床のマーカーの配置を変えると 4 つ目だけ自動で合わせ直す。4 つ目で pagehide → pageshow(persisted) を再現すると、入室し直して自動で合わせ直す
 //   - 俯瞰画面の「対戦開始」で試合になり、両ウィンドウと俯瞰画面の得点が一致する（08 と同じ経路が生きている）
 //   - 例外が出ていない
 import { spawn } from "node:child_process";
@@ -231,6 +236,9 @@ try {
   const readOverview = async () => parseOverviewHud((await p3.eval("document.querySelector('#hud')?.textContent")) ?? "");
   const anchorPos = (p) => p.eval("window.__fixedDebug?.anchorPos()");
   const anchorQuat = (p) => p.eval("window.__fixedDebug?.anchorQuat()");
+  const fixedState = (p) => p.eval("window.__fixedDebug?.state()");
+  const viewMessage = (p) => p.eval("window.__fixedDebug?.message()");
+  const alignPendingText = () => p3.eval("(() => { const el = document.querySelector('#align-pending'); return el && !el.hidden ? el.textContent : ''; })()");
   const quatDeg = (a, b) => (a && b ? (2 * Math.acos(Math.min(1, Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]))) * 180) / Math.PI : NaN);
   const setCam = (p, pos, yaw = 0, pitch = 0) => p.eval(`(() => { const c = window.__fakeCam; c.pos = ${JSON.stringify(pos)}; c.yaw = ${yaw}; c.pitch = ${pitch}; return true; })()`);
   const show = (h) => `me=${h.me} align=${h.align} locks=${h.locks} phase=${h.phase} color=${h.color} players=${h.players.join("|")} scores=${JSON.stringify(h.scores)} shots=${h.sent}/${h.accepted} self=${h.self ? fmt(h.self) : "-"}`;
@@ -334,7 +342,8 @@ try {
   await sleep(1500);
   const pre1 = await readHud(p1);
   check("合わせ直す前: 新しい位置の観測は信頼できる（face 20°）が、アンカーは古いまま（obsΔ の回転 ≥ 15°、位置は不動）", pre1.trusted === "yes" && pre1.obsRot >= 15 && dist3(a0, await anchorPos(p1)) < 1e-6, `${pre1.trusted} obsΔ=${pre1.obsDelta}m/${pre1.obsRot}deg`);
-  const key = (type) => p1.send("Input.dispatchKeyEvent", { type, key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 });
+  const keyOn = (p, type) => p.send("Input.dispatchKeyEvent", { type, key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 });
+  const key = (type) => keyOn(p1, type);
   await key("keyDown");
   await sleep(800);
   const mid1 = await readHud(p1);
@@ -351,7 +360,7 @@ try {
   const aRe = await anchorPos(p1);
   console.log(`realign window1: ${re1.alignLine}\n  anchor ${fmt(a0)} → ${fmt(aRe)} self=${fmt(re1.self)}`);
   check("押し始めて 0.8 秒ではまだ合わせ直していない（2 秒の押し続けが要る）", mid1.realigns === 0 && mid1.locks === 1, `realigns=${mid1.realigns}`);
-  check("2 秒押し続けると合わせ直しが始まり（realigns=1、console の realign requested）、確定し直す（locks=2）", re1.realigns === 1 && re1.locks === 2 && re1.align === "locked" && p1.logs.some((l) => /\[fixed-anchor\] realign requested \(#1\)/.test(l)), `realigns=${re1.realigns} locks=${re1.locks} align=${re1.align}`);
+  check("2 秒押し続けると合わせ直しが始まり（realigns=1、console の realign requested）、確定し直す（locks=2）", re1.realigns === 1 && re1.locks === 2 && re1.align === "locked" && p1.logs.some((l) => /\[fixed-anchor\] realign requested \(#1, hold\)/.test(l)), `realigns=${re1.realigns} locks=${re1.locks} align=${re1.align}`);
   check("合わせ直しの途中は realigning（いまの位置を保持したまま集め直す）を通っている", sawRealigning || p1.logs.some((l) => /\[fixed-anchor\] locked #2/.test(l)), `sawRealigning=${sawRealigning}`);
   const selfReErr = re1.self ? dist3(re1.self, RE_POS) : Infinity;
   check(`合わせ直し後の自分の位置が新しいカメラの位置 (${RE_POS.join(",")}) に 5cm 以内で一致`, selfReErr < 0.05, `self=${fmt(re1.self)} err=${selfReErr.toFixed(3)}m`);
@@ -394,10 +403,68 @@ try {
   check("床のマーカーだけの端末も入室して連射が受理される", h4.me.startsWith("p") && h4.accepted >= 2 && h4.phase === "practice", `${h4.sent}/${h4.accepted}`);
   const ov4 = await readOverview();
   check("俯瞰画面でも 4 つ目の端末は床のマーカー（1）で位置合わせしていると見える", ov4.peerMarkers[h4.me] === "1", JSON.stringify(ov4.peerMarkers));
+  // 確定に使った床のマーカーの配置を練習中に変える → ウィンドウ 4 だけ自動で合わせ直す（原点で確定したウィンドウ 1 は合わせ直さない）
+  const realigns1BeforeLayout = (await readHud(p1)).realigns;
+  await p3.eval(`(() => {
+    const nums = document.querySelectorAll('#marker-rows .row')[0].querySelectorAll('input[type=number]');
+    // [ID, X, Y, Z] の X
+    nums[1].value = '0.05';
+    nums[1].dispatchEvent(new Event('input'));
+    return true;
+  })()`);
+  await sleep(300);
+  await p3.eval("document.querySelector('#apply-markers').click()");
+  const tl = Date.now();
+  let l4 = await readHud(p4);
+  while (Date.now() - tl < 15000 && !(l4.realigns === 1 && l4.locks === 2)) {
+    await sleep(300);
+    l4 = await readHud(p4);
+  }
+  const l1 = await readHud(p1);
+  console.log(`layout-change window4: realigns=${l4.realigns} locks=${l4.locks} layout=${l4.layout}`);
+  check("確定に使ったマーカーの配置が変わると、練習中なら自動で合わせ直して確定し直す（ウィンドウ 4: realigns=1、locks=2）", l4.realigns === 1 && l4.locks === 2 && p4.logs.some((l) => /realign requested \(#1, layout\)/.test(l)), `realigns=${l4.realigns} locks=${l4.locks}`);
+  check("確定に使っていないマーカーの配置の変更では合わせ直さない（ウィンドウ 1）", l1.realigns === realigns1BeforeLayout && l1.locks === 2, `realigns=${l1.realigns} locks=${l1.locks}`);
+  // 別ページから戻った（bfcache）: pagehide → pageshow(persisted) を再現 → 入室し直してから練習中なので自動で合わせ直す
+  await p4.eval("dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })); dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); true");
+  const tb = Date.now();
+  let b4 = await readHud(p4);
+  while (Date.now() - tb < 15000 && !(b4.realigns === 2 && b4.locks === 3)) {
+    await sleep(300);
+    b4 = await readHud(p4);
+  }
+  console.log(`bfcache window4: me=${b4.me} realigns=${b4.realigns} locks=${b4.locks} phase=${b4.phase}`);
+  check("別ページから戻ると（pageshow persisted）、入室し直して練習中なら自動で合わせ直す（realigns=2、locks=3）", b4.realigns === 2 && b4.locks === 3 && p4.logs.some((l) => /realign requested \(#2, bfcache\)/.test(l)), `realigns=${b4.realigns} locks=${b4.locks}`);
+
+  // ---- 練習中に合わせ直しを始めたまま対戦に入ると取り消される（ウィンドウ 2）----
+  // マーカーを隠して集まらないようにしてから Space を 2 秒押し続け、合わせ直し中のまま俯瞰画面で対戦を始める
+  await p2.eval("window.__fakeMarkers.hidden.add(0)");
+  await sleep(600);
+  const shotsBeforeHold2 = (await readHud(p2)).sent;
+  await keyOn(p2, "keyDown");
+  await sleep(2600);
+  const hold2 = await readHud(p2);
+  const st2 = await fixedState(p2);
+  await sleep(1000);
+  const held2 = await readHud(p2);
+  check("ウィンドウ 2: 練習中に 2 秒押し続けると合わせ直し中（realigning）になる", st2?.realigning === true && hold2.realigns === 1, `realigning=${st2?.realigning} realigns=${hold2.realigns}`);
+  check("合わせ直しが始まったら、押し続けている間は発射しない", held2.sent === hold2.sent, `${shotsBeforeHold2} → ${hold2.sent} → ${held2.sent}`);
+  await keyOn(p2, "keyUp");
 
   // ---- 対戦開始（俯瞰画面のボタン）→ 対戦中は合わせ直さない → 得点の一致 ----
   await p3.eval("document.querySelector('#start-match').click()");
-  await sleep(PLAY_WAIT_SEC * 1000);
+  // 対戦中に入ってくるウィンドウ 5（正面・信頼できる位置）
+  const p5 = await newWindow("5");
+  await p5.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Five&refine=0` });
+  await sleep(2500);
+  const st2play = await fixedState(p2);
+  const msg2play = (await viewMessage(p2)) ?? "";
+  check(
+    "対戦に入ると合わせ直しは取り消される（realigning=false、cancelled=1、locks=1 のまま、視界に「合わせ直し中」を出さない）",
+    st2play?.realigning === false && st2play?.cancelled === 1 && st2play?.locks === 1 && !msg2play.includes("合わせ直し中"),
+    `realigning=${st2play?.realigning} cancelled=${st2play?.cancelled} locks=${st2play?.locks} msg=${JSON.stringify(msg2play)}`,
+  );
+  await p2.eval("window.__fakeMarkers.hidden.delete(0)");
+  await sleep(Math.max(0, PLAY_WAIT_SEC * 1000 - 2500));
   const hud1 = await readHud(p1);
   const hud2 = await readHud(p2);
   const hudOv = await readOverview();
@@ -419,7 +486,27 @@ try {
   const landings = serverLines.filter((l) => / shot #\d+: /.test(l));
   const hits = landings.filter((l) => !/ shot #\d+: miss/.test(l));
   check("着弾のほとんどが壁か床に当たっている（外れが半分未満）", landings.length >= 6 && hits.length > landings.length / 2, `${hits.length}/${landings.length} hit`);
-  check("例外が出ていない", [p1, p2, p3, p4].every((p) => p.exceptions.length === 0), [p1, p2, p3, p4].flatMap((p) => p.exceptions).slice(0, 2).join(" | "));
+  // ---- 対戦中に入ってきたウィンドウ 5 は確定しない → 結果表示で確定する ----
+  const h5 = await readHud(p5);
+  const st5 = await fixedState(p5);
+  const msg5 = (await viewMessage(p5)) ?? "";
+  const pending5 = await alignPendingText();
+  console.log(`play window5: ${h5.alignLine}\n  msg=${JSON.stringify(msg5)} overview=${JSON.stringify(pending5)}`);
+  check("対戦中に入ったウィンドウ 5 は正面の観測でも確定しない（align=aligning、locks=0、窓は揃って blocked）", h5.me.startsWith("p") && h5.align === "aligning" && h5.locks === 0 && st5?.lockBlocked === true, `me=${h5.me} ${h5.alignLine.slice(0, 80)}`);
+  check("ウィンドウ 5 の視界に「対戦が終わるまで位置合わせできません」", msg5.includes("対戦が終わるまで位置合わせできません"), JSON.stringify(msg5));
+  check("俯瞰画面の対戦開始ボタンの近くに「位置合わせ中: 1 人」", pending5 === "位置合わせ中: 1 人", JSON.stringify(pending5));
+  await p3.eval("document.querySelector('#stop-match').click()");
+  const t5 = Date.now();
+  let r5 = await readHud(p5);
+  while (Date.now() - t5 < 15000 && !(r5.align === "locked" && r5.locks === 1)) {
+    await sleep(300);
+    r5 = await readHud(p5);
+  }
+  await sleep(1500);
+  const pending5After = await alignPendingText();
+  console.log(`result window5: phase=${r5.phase} ${r5.alignLine.slice(0, 60)} overview=${JSON.stringify(pending5After)}`);
+  check("結果表示になるとウィンドウ 5 は確定し（locks=1）、俯瞰画面の「位置合わせ中」が消える", r5.phase === "result" && r5.align === "locked" && r5.locks === 1 && pending5After === "", `phase=${r5.phase} align=${r5.align} locks=${r5.locks} overview=${JSON.stringify(pending5After)}`);
+  check("例外が出ていない", [p1, p2, p3, p4, p5].every((p) => p.exceptions.length === 0), [p1, p2, p3, p4, p5].flatMap((p) => p.exceptions).slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[fixed-anchor]"))) console.log(`window1 log: ${l}`);
 
   const failed = results.filter(([, ok]) => !ok);

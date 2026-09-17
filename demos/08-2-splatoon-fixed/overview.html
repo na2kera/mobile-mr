@@ -58,6 +58,12 @@
         font-weight: 700;
         margin: 6px 0;
       }
+      /* 08-2: pose を一度も送っていない（位置合わせが済んでいない）プレイヤーの数。開始は止めない */
+      #align-pending {
+        margin: 8px 0 0;
+        color: #fdd663;
+        font-size: 0.9rem;
+      }
       #start-match {
         width: 100%;
         font-size: 1rem;
@@ -320,6 +326,7 @@
         <div id="markers-hint"></div>
       </fieldset>
       <button id="reset-practice" type="button" disabled>練習のインクをリセット</button>
+      <div id="align-pending" hidden></div>
       <button id="start-match" type="button" disabled>対戦開始</button>
       <button id="stop-match" type="button" disabled>対戦を終了</button>
       <ul id="players"></ul>

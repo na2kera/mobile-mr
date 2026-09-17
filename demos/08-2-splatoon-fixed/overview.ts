@@ -561,6 +561,8 @@ function updateShots(now: number) {
 const phaseEl = document.querySelector<HTMLDivElement>("#phase")!;
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-practice")!;
 const startButton = document.querySelector<HTMLButtonElement>("#start-match")!;
+/** 08-2: 位置合わせ中（pose を一度も受け取っていない）プレイヤーの数を対戦開始ボタンの上に出す */
+const alignPendingEl = document.querySelector<HTMLDivElement>("#align-pending")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop-match")!;
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
@@ -995,10 +997,15 @@ function renderPanel() {
           return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
         })
     : [];
-  const key = JSON.stringify([phaseText, canStart, startPending, canStop, stopText, canReset, resetPending, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, canEditMarkers, canApplyMarkers, markersPending, markersHintText, rowStates]);
+  // 08-2: 位置合わせが済むまでスマホは pose を送らない（確定は練習中か結果表示中だけ）ので、pose を一度も受け取っていない人を数える。
+  // 対戦開始は止めない（サーバーとプロトコルは 08 のまま）
+  const alignPending = s ? s.players.filter((p) => (peers.get(p.id)?.lastPoseMs ?? -Infinity) === -Infinity).length : 0;
+  const key = JSON.stringify([alignPending, phaseText, canStart, startPending, canStop, stopText, canReset, resetPending, ranking, netStatus, lastRejectReason, peers.size, sizeEditable, canApplySize, fieldPending, sizeHintText, canEditMarkers, canApplyMarkers, markersPending, markersHintText, rowStates]);
   if (key === lastPanelKey) return;
   lastPanelKey = key;
   phaseEl.textContent = phaseText;
+  alignPendingEl.hidden = !joined || alignPending === 0;
+  alignPendingEl.textContent = `位置合わせ中: ${alignPending} 人`;
   startButton.disabled = !canStart;
   stopButton.disabled = !canStop;
   stopButton.textContent = stopText;

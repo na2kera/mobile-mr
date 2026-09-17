@@ -1,7 +1,7 @@
 // 08-2「一度合わせて固定」の純粋な数学（docs/space-stability-options.md §4 の 5b）。
 // three.js に依存しない（配列だけ）ので Node の回帰テスト（scripts/test-08-2-fixed.mjs）から直接 import できる。
 //   - 観測の「信頼できる度合い」: マーカーがカメラの正面・近距離・画面の中央にあり、傾きと再投影誤差が小さいか
-//   - 位置合わせの窓: 信頼できる観測が N 回連続し、その間の位置とヨーのばらつきが小さければ確定
+//   - 位置合わせの窓: 直近 windowLen 回の観測のうち信頼できる観測が N 回あり、その N 回の位置とヨーのばらつきが小さければ確定
 //   - 確定の姿勢: 位置は成分ごとの中央値、回転は符号を揃えた四元数の平均
 //   - 確定後の緩やかな補正: 位置は lerp、回転は slerp（係数 refine。0 で完全固定）
 // 相対 import を持たないのは、Node から .ts のまま import するとき拡張子無しの相対 import が解決できないため
@@ -11,14 +11,19 @@ export type V3 = [number, number, number];
 export type Quat = [number, number, number, number];
 export type Pose = { pos: V3; quat: Quat };
 
-/** 1 回の観測の質（マーカー 1 枚ぶん。複数見えたときは最も条件の良い 1 枚） */
+/** 1 回の観測の質（マーカー 1 枚ぶん。複数枚を同時に使った観測は fixed-anchor.ts が評価せずにスキップする） */
 export type Quality = {
   /** カメラからマーカー中心までの距離 [m] */
   distM: number;
   /** カメラの光軸（画面の中央）からマーカー中心までの角度 [deg]。0 = 画面のど真ん中 */
   offAxisDeg: number;
-  /** マーカーの法線と「マーカー → カメラ」の向きの角度 [deg]。0 = 真正面から見ている */
+  /**
+   * マーカーの法線と「マーカー → カメラ」の向きの角度 [deg]。0 = 真正面から見ている。
+   * 上向き（upCam）が分かっていて壁のマーカー（法線が水平に近い）なら、両方を水平面に投影した角度（目とマーカーの高さの差で落ちない）
+   */
   facingDeg: number;
+  /** 壁のマーカーで上向きが分かっているとき、「マーカー → カメラ」が水平面から上下に何度ずれているか [deg]（高さの差の目安）。それ以外は 0 */
+  elevationDeg: number;
   /** 水平化する前のアンカーの傾き [deg]（marker-anchor.ts の tiltDeg。worldUp が無ければ 0） */
   tiltDeg: number;
   /** 正規化再投影誤差（marker-detector.ts の error。複数なら最大） */
@@ -34,8 +39,8 @@ export type TrustLimits = {
 };
 
 /**
- * 既定の閾値。「正面 1m に立つ」誘導で自然に満たせ、斜め（30° 超）や遠い（2m 超）観測は落とす値。
- * tilt は issue #54 の計測で正面付近の POSIT が 10〜30° 外すことがあるので 15° まで許す（水平化で消える誤差なので位置には効かない）
+ * 既定の閾値（gravityAlign が off のとき）。「正面 1m に立つ」誘導で自然に満たせ、斜め（30° 超）や遠い（2m 超）観測は落とす値。
+ * tilt は issue #54 の計測で正面付近の POSIT が 10〜30° 外すことがあるので 15° まで許す
  */
 export const DEFAULT_TRUST_LIMITS: TrustLimits = {
   maxDistM: 1.6,
@@ -44,6 +49,32 @@ export const DEFAULT_TRUST_LIMITS: TrustLimits = {
   maxTiltDeg: 15,
   maxErr: 0.15,
 };
+
+/**
+ * gravityAlign が on のときの tilt の上限 [deg]。水平化（marker-anchor.ts の worldUp）ではアンカーの Y 軸をジャイロの上に固定し、
+ * マーカーからは位置（画像上の位置と大きさでほぼ決まる）とヨー（法線を水平面に投影）だけを採るので、傾きの推定誤差は位置に効かない。
+ * 150mm・1.0m・角 ±1px のノイズで tilt > 15° が 11.7%、1.6m で 38.3%（Fable の合成実験）あり、15° では実機で確定に数十秒かかるため 30° に緩める
+ */
+export const LEVELED_MAX_TILT_DEG = 30;
+
+/**
+ * gravityAlign が on のときの位置合わせの窓の回転のばらつき（平均からの最大角度）の上限 [deg]。off のときは DEFAULT_ALIGN_ANGLE_DEG（3°）。
+ * 水平化では回転はヨーだけで、POSIT のヨーは 150mm・1.0m・角 ±1px で ±15° ばらつく（10 回の最大ずれの中央値 12°）ので、3° では
+ * 実機でほぼ確定しない（合成実験で 30 観測以内 0/300）。15° なら 300/300 がほぼ 10 観測目で確定し、10 回の平均を取るので
+ * 確定後のヨー誤差は中央値 1.7°・p90 3.7°（scripts/test-08-2-fixed.mjs の合成テスト、README の表）
+ */
+export const LEVELED_ALIGN_ANGLE_DEG = 15;
+export const DEFAULT_ALIGN_ANGLE_DEG = 3;
+
+/** gravityAlign の有無に応じた窓の回転のばらつきの上限の既定 [deg] */
+export function defaultAlignAngleDeg(gravityAlign: boolean): number {
+  return gravityAlign ? LEVELED_ALIGN_ANGLE_DEG : DEFAULT_ALIGN_ANGLE_DEG;
+}
+
+/** gravityAlign の有無に応じた既定の閾値 */
+export function defaultTrustLimits(gravityAlign: boolean): TrustLimits {
+  return gravityAlign ? { ...DEFAULT_TRUST_LIMITS, maxTiltDeg: LEVELED_MAX_TILT_DEG } : { ...DEFAULT_TRUST_LIMITS };
+}
 
 export type UntrustedReason = "far" | "off" | "face" | "tilt" | "err" | "nan";
 
@@ -58,20 +89,40 @@ export function untrustedReason(q: Quality, limits: TrustLimits = DEFAULT_TRUST_
   return null;
 }
 
+/** 法線と上向きの角度の余弦がこれ未満なら「壁のマーカー」（法線が水平から 45° 以内）として水平面で正対を評価する */
+const WALL_NORMAL_MAX_UP_COS = Math.SQRT1_2;
+
 /**
  * マーカー → カメラ座標系の 4x4（列優先 16 要素。カメラは three.js 規約で -Z 前方）から観測の質を出す。
- * 位置（列 3）から距離と画面中央からの角度、法線（列 2 = マーカーの +Z、面から視点側）から正対の度合い
+ * 位置（列 3）から距離と画面中央からの角度、法線（列 2 = マーカーの +Z、面から視点側）から正対の度合い。
+ * upCam（カメラ座標系での重力の上。gravityAlign が on のとき）を渡すと、壁のマーカーの正対は水平面に投影した角度で測る
+ * （水平化ではヨーだけを法線から採るので、効くのは水平面内の角度。目とマーカーの高さの差は elevationDeg に分けて出す）。
+ * 床のマーカー（法線が上に近い）は投影が潰れるので 3D の角度のまま
  */
-export function markerQuality(markerToCam: readonly number[], tiltDeg: number, err: number): Quality {
+export function markerQuality(markerToCam: readonly number[], tiltDeg: number, err: number, upCam: V3 | null = null): Quality {
   const c: V3 = [markerToCam[12], markerToCam[13], markerToCam[14]];
   const distM = Math.hypot(c[0], c[1], c[2]);
-  if (distM < 1e-9) return { distM: 0, offAxisDeg: 0, facingDeg: 0, tiltDeg, err };
+  if (distM < 1e-9) return { distM: 0, offAxisDeg: 0, facingDeg: 0, elevationDeg: 0, tiltDeg, err };
   const toCam: V3 = [-c[0] / distM, -c[1] / distM, -c[2] / distM];
   // 光軸は -Z。カメラの後ろ（c.z > 0）なら 180° に近づく
   const offAxisDeg = degOf(clamp(-c[2] / distM));
   const n = normalize([markerToCam[8], markerToCam[9], markerToCam[10]]);
-  const facingDeg = degOf(clamp(n[0] * toCam[0] + n[1] * toCam[1] + n[2] * toCam[2]));
-  return { distM, offAxisDeg, facingDeg, tiltDeg, err };
+  let facingDeg = degOf(clamp(dot3(n, toCam)));
+  let elevationDeg = 0;
+  const upLen = upCam ? Math.hypot(upCam[0], upCam[1], upCam[2]) : 0;
+  if (upCam && upLen > 1e-9) {
+    const u: V3 = [upCam[0] / upLen, upCam[1] / upLen, upCam[2] / upLen];
+    if (Math.abs(dot3(n, u)) < WALL_NORMAL_MAX_UP_COS) {
+      const nh = sub3(n, scale3(u, dot3(n, u)));
+      const th = sub3(toCam, scale3(u, dot3(toCam, u)));
+      const nhLen = Math.hypot(nh[0], nh[1], nh[2]);
+      const thLen = Math.hypot(th[0], th[1], th[2]);
+      elevationDeg = 90 - degOf(clamp(Math.abs(dot3(toCam, u))));
+      // 真上 / 真下から見ている（水平成分が無い）ときは 3D の角度のまま
+      if (nhLen > 1e-6 && thLen > 1e-6) facingDeg = degOf(clamp(dot3(nh, th) / (nhLen * thLen)));
+    }
+  }
+  return { distM, offAxisDeg, facingDeg, elevationDeg, tiltDeg, err };
 }
 
 /** 2 つの回転の差 [deg]（0〜180） */
@@ -151,8 +202,10 @@ export function distance3(a: V3, b: V3): number {
 }
 
 export type AlignWindowOptions = {
-  /** 確定に必要な連続観測の数 */
+  /** 確定に必要な「信頼できる観測」の数 */
   samples: number;
+  /** 直近何回の観測（信頼できない観測も数える）の中に samples 回の信頼できる観測があれば良いか。省略時・samples 未満なら samples（= 連続） */
+  windowLen?: number;
   /** 窓の中の位置のばらつき（中央値からの最大距離）の上限 [m] */
   maxSpreadM: number;
   /** 窓の中の回転のばらつき（平均からの最大角度）の上限 [deg] */
@@ -160,11 +213,15 @@ export type AlignWindowOptions = {
 };
 
 /**
- * 位置合わせの窓。信頼できる観測だけを push し（信頼できない観測やロストでは呼び出し側が reset する）、
- * 直近 samples 個が揃って位置と回転のばらつきが小さければ ready。ばらつきが大きいときは古いものから捨てて滑らせる
+ * 位置合わせの窓。観測ごとに、信頼できれば push、信頼できなければ pushUntrusted を呼ぶ（ロストでは呼び出し側が reset する）。
+ * 直近 windowLen 回の観測のうち信頼できる観測が samples 回あり、その直近 samples 回の位置と回転のばらつきが小さければ ready。
+ * 信頼できない観測 1 回で窓を捨てない（実機では tilt などで数回に 1 回落ちるので、連続を要求すると確定に数十秒かかる）。
+ * ばらつきが大きいときは古いものから捨てて滑らせる
  */
 export class AlignWindow {
-  private readonly buf: Pose[] = [];
+  /** 直近 windowLen 回の観測。null = 信頼できなかった観測 */
+  private readonly buf: (Pose | null)[] = [];
+  private readonly windowLen: number;
   /** 直近の push で測ったばらつき（HUD 用） */
   spreadM = 0;
   angleDeg = 0;
@@ -174,15 +231,17 @@ export class AlignWindow {
   constructor(opts: AlignWindowOptions) {
     if (!(opts.samples >= 1)) throw new Error("AlignWindow: samples は 1 以上");
     this.opts = opts;
+    this.windowLen = Math.max(opts.samples, Math.round(opts.windowLen ?? opts.samples));
   }
 
+  /** 窓の中の信頼できる観測の数（samples で頭打ち。「合わせ中 n/N」の n） */
   get count(): number {
-    return this.buf.length;
+    return Math.min(this.opts.samples, this.trusted().length);
   }
 
   /** 窓が満杯で、ばらつきが閾値内か */
   get ready(): boolean {
-    return this.buf.length >= this.opts.samples && this.stable;
+    return this.trusted().length >= this.opts.samples && this.stable;
   }
 
   /** いまの窓のばらつきが閾値内か（満杯でなくても評価する） */
@@ -190,10 +249,26 @@ export class AlignWindow {
     return this.spreadM <= this.opts.maxSpreadM && this.angleDeg <= this.opts.maxAngleDeg;
   }
 
+  /** 信頼できる観測 */
   push(sample: Pose): void {
-    this.buf.push({ pos: [...sample.pos] as V3, quat: [...sample.quat] as Quat });
-    while (this.buf.length > this.opts.samples) this.buf.shift();
+    this.append({ pos: [...sample.pos] as V3, quat: [...sample.quat] as Quat });
+  }
+
+  /** 信頼できなかった観測（窓の長さだけ進める。捨てない） */
+  pushUntrusted(): void {
+    this.append(null);
+  }
+
+  private append(entry: Pose | null): void {
+    this.buf.push(entry);
+    while (this.buf.length > this.windowLen) this.buf.shift();
     this.measure();
+  }
+
+  /** 窓の中の信頼できる観測のうち直近 samples 個 */
+  private trusted(): Pose[] {
+    const out = this.buf.filter((s): s is Pose => s !== null);
+    return out.length > this.opts.samples ? out.slice(out.length - this.opts.samples) : out;
   }
 
   reset(): void {
@@ -204,25 +279,47 @@ export class AlignWindow {
 
   /** 確定の姿勢（中央値 / 平均）。空なら null */
   result(): Pose | null {
-    return this.buf.length === 0 ? null : medianPose(this.buf);
+    const t = this.trusted();
+    return t.length === 0 ? null : medianPose(t);
   }
 
   private measure(): void {
-    if (this.buf.length < 2) {
+    const t = this.trusted();
+    if (t.length < 2) {
       this.spreadM = 0;
       this.angleDeg = 0;
       return;
     }
-    const m = medianPose(this.buf);
-    this.spreadM = Math.max(...this.buf.map((s) => distance3(s.pos, m.pos)));
-    this.angleDeg = Math.max(...this.buf.map((s) => quatAngleDeg(s.quat, m.quat)));
+    const m = medianPose(t);
+    this.spreadM = Math.max(...t.map((s) => distance3(s.pos, m.pos)));
+    this.angleDeg = Math.max(...t.map((s) => quatAngleDeg(s.quat, m.quat)));
   }
+}
+
+/** marker-anchor.ts の info（"id=0+5 err=0.03,0.05 ..."）から再投影誤差の最大を読む。無ければ Infinity（信頼しない） */
+export function maxErrOf(info: string): number {
+  const m = info.match(/err=([\d.,]+)/);
+  if (!m) return Infinity;
+  const values = m[1].split(",").map(Number).filter(Number.isFinite);
+  return values.length === 0 ? Infinity : Math.max(...values);
 }
 
 function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
   const mid = s.length >> 1;
   return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function dot3(a: V3, b: V3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function sub3(a: V3, b: V3): V3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function scale3(a: V3, s: number): V3 {
+  return [a[0] * s, a[1] * s, a[2] * s];
 }
 
 function normalize(v: V3): V3 {
