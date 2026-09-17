@@ -9,6 +9,7 @@ import { dartsServer } from "./server/darts.ts";
 import { surfaceServer } from "./server/surface.ts";
 import { splatoonServer } from "./server/splatoon.ts";
 import { splatoonOutsideInServer } from "./server/splatoon-outside-in.ts";
+import { splatoonPoseCamServer } from "./server/splatoon-pose-cam.ts";
 import { personServer } from "./server/person.ts";
 import { golfServer } from "./server/golf.ts";
 import { battingServer } from "./server/batting.ts";
@@ -72,6 +73,7 @@ export default defineConfig({
     surfaceServer(),
     splatoonServer(),
     splatoonOutsideInServer(),
+    splatoonPoseCamServer(),
     personServer(),
     golfServer(),
     battingServer(),
@@ -142,6 +144,9 @@ export default defineConfig({
         "demo-08-3-splatoon-outside-in": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/index.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-overview": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/overview.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-markers": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/markers.html", import.meta.url)),
+        "demo-08-8-splatoon-pose-cam": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/index.html", import.meta.url)),
+        "demo-08-8-splatoon-pose-cam-overview": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/overview.html", import.meta.url)),
+        "demo-08-8-splatoon-pose-cam-markers": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/markers.html", import.meta.url)),
       },
     },
   },
