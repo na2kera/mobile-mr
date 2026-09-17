@@ -93,10 +93,19 @@ const MARKER_ID = Math.round(numParam("markerId", 0, { min: 0, max: 999 }));
 const TRACK_SMOOTH = numParam("trackSmooth", 0.3, { min: 0.01, max: 1 });
 /** トラッカーの観測がこれより古ければ「見失った」（最後の位置を保持し HUD に "tracked (0.8s ago)"）[ms] */
 const TRACK_LOST_MS = numParam("trackLostMs", TRACK_STALE_MS, { min: 50, max: 30000 });
+/**
+ * 08-8: 自分の観測がこれより古ければ撃てない [ms]（「いま追跡されている」の判定。割当が外れる・要確認になるとサーバーは位置を配らなくなる。
+ * トラッカーの間隔（既定 66ms、推論が重いと延びる）より十分長く）
+ */
+const SHOOT_TRACK_MS = numParam("shootTrackMs", 1000, { min: 50, max: 30000 });
 /** ヨーの補正: 品質がこれ以上の観測だけ使う（0..1。正面を向いて肩が大きく映ったとき） */
 const YAW_MIN_QUALITY = numParam("yawQuality", 0.5, { min: 0, max: 1 });
-/** ヨーの補正の速さ（観測 1 回あたり角度差のこの割合だけ寄せる。1 で即座） */
-const YAW_SMOOTH = numParam("yawSmooth", 0.1, { min: 0.01, max: 1 });
+/**
+ * ヨーの補正の速さ（観測 1 回あたり角度差のこの割合だけ寄せる。1 で即座）。08-8 の既定は 0 = 緩やかな補正をしない
+ * （初回・原点の確定し直し・見失い明けのスナップだけ）。トラッカーのヨーは体（肩・耳）の向きで、首だけ回して狙うと
+ * ゴーグルの向きとずれ、補正するとコートが回ってしまうため（Codex / Fable レビューの指摘）。ジャイロのドリフトが気になるなら 0.05 等
+ */
+const YAW_SMOOTH = numParam("yawSmooth", 0, { min: 0, max: 1 });
 /**
  * ヨーの緩やかな補正を止めるカメラのヨー角速度 [deg/s]。観測はトラッカーの検出時刻、ジャイロのヨーは受信時刻のものなので、
  * 首を振っている間は「角速度 × 遅延」だけ目標がずれる（60°/s × 100ms ≈ 6°）。スナップには適用しない
@@ -550,6 +559,11 @@ function isTracked(now: number): boolean {
   return now - lastTrackedMs <= TRACK_LOST_MS;
 }
 
+/** 08-8: いま追跡されていて撃てるか（SHOOT_TRACK_MS 以内に自分の観測が届いている） */
+function isTrackedForShot(now: number): boolean {
+  return now - lastTrackedMs <= SHOOT_TRACK_MS;
+}
+
 /** 毎フレーム: カメラのヨー角速度（ヨーの補正を首振り中に止めるため） */
 function updateCameraYawRate(now: number) {
   const yaw = cameraYawWorld();
@@ -598,7 +612,7 @@ function onTracked(status: TrackerStatus, players: TrackedPlayer[]) {
     phiSet = true;
     yawSnaps++;
     lastYawQuality = me.quality;
-  } else if (me.quality >= YAW_MIN_QUALITY && canSnap && camYawRateDps <= YAW_MAX_RATE_DPS) {
+  } else if (YAW_SMOOTH > 0 && me.quality >= YAW_MIN_QUALITY && canSnap && camYawRateDps <= YAW_MAX_RATE_DPS) {
     // 緩やかな補正: 品質が高く、首を振っておらず、連射中でない観測だけ（ジャイロのドリフトを消す）
     const next = approachAngle(anchorPhi, anchorYaw(cameraYawWorld(), me.yaw), YAW_SMOOTH);
     lastPhiCorrectionDeg = THREE.MathUtils.radToDeg(Math.abs(wrapAngle(next - anchorPhi)));
@@ -978,10 +992,14 @@ function hasInkForShot(): boolean {
   return inkLocal + 1e-9 >= inkPerShot(fieldCfg);
 }
 
-/** 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない） */
+/**
+ * 練習中と試合中に撃てる（カウントダウン中・結果表示中は撃てない）。08-8 は「いまトラッカーに追跡されている」ことも条件
+ * （割当が外れる・要確認になるとサーバーは位置を配らず、発射も "not tracked yet" で拒否する。08-3 のマーカーの一時的な隠れと違い、
+ * 人物との対応が無効なので最後の位置で撃たせない）
+ */
 function canShoot(): boolean {
   const phase = auth?.state.phase;
-  return joined && (phase === "play" || phase === "practice") && anchor.visible && myColor !== null && posesSent > 0;
+  return joined && (phase === "play" || phase === "practice") && anchor.visible && isTrackedForShot(performance.now()) && myColor !== null && posesSent > 0;
 }
 
 const camWorldPos = new THREE.Vector3();
@@ -1211,6 +1229,15 @@ function updateMessages(now: number) {
           ? "俯瞰画面で「原点を確定」してください\n位置が届くまで撃てません"
           : "PC のカメラに映る所で、俯瞰画面の案内に\n合わせて手を挙げてください（届くまで撃てません）";
     color = "#fdd663";
+  } else if (!isTrackedForShot(now)) {
+    // 位置は一度届いたが、いまは届いていない（割当が外れた・他の人と近づいて要確認・トラッカーが止まった）: 撃てない
+    text =
+      oiStatus.connected === 0
+        ? "トラッカー（俯瞰画面の Web カメラ）が止まりました\n位置が届くまで撃てません"
+        : !oiStatus.locked
+          ? "俯瞰画面で「原点を確定」してください\n位置が届くまで撃てません"
+          : "位置を見失いました。俯瞰画面の案内に合わせて\n手を挙げて割り当ててもらってください（撃てません）";
+    color = "#fdd663";
   } else if (trackerStatus.startsWith("error")) {
     text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";
     color = "#f28b82";
@@ -1438,7 +1465,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} trackSmooth=${TRACK_SMOOTH} trackLostMs=${TRACK_LOST_MS} yawQuality=${YAW_MIN_QUALITY} yawSmooth=${YAW_SMOOTH} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} trackSmooth=${TRACK_SMOOTH} trackLostMs=${TRACK_LOST_MS} shootTrackMs=${SHOOT_TRACK_MS} yawQuality=${YAW_MIN_QUALITY} yawSmooth=${YAW_SMOOTH} hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

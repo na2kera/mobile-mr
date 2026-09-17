@@ -4,7 +4,8 @@
 //     トラッカー（俯瞰画面）が「手を挙げた人物 → 入室順で次のプレイヤー」の対応を持ち、そのプレイヤーの trackId を載せて送る
 //     （welcome / join の trackIds で番号を知っている）。サーバーから見ればマーカーの ID と区別が無いので、検証
 //     （tracker 以外は送れない・範囲・レート・知らない ID は捨てる・有効なトラッカーは 1 台・未測定の発射の拒否）は 08-3 のサーバーのまま効く
-//   - サーバーは server/splatoon-pose-cam.ts（08-3 の server/splatoon-outside-in.ts の spec をこのパスで登録する）。
+//   - サーバーは server/splatoon-pose-cam.ts（08-3 の server/splatoon-outside-in.ts のプラグインをオプション付きでこのパスに登録する。
+//     dropMissing で track に居ないプレイヤーは未測定に戻り撃てない）。
 //     08-3 と Room を分けるため（同じ room 名でも混ざらない）に別パスにする
 export * from "./splatoon-outside-in-protocol.ts";
 

@@ -31,7 +31,8 @@ import { createSplatSound } from "./splat-sound";
 //     （部屋（field）座標系）とヨーを 2 本目の接続（?role=tracker）でサーバーへ送る（track）。サーバーは 08-3 と同じ
 //   - 原点合わせは 08-3 と同じ（原点マーカーか「追加マーカーの配置」のマーカーをカメラで見て「原点を確定」）
 //   - 誰がどのプレイヤーか: マーカーが無いので、入室順に「次の人（名前）は手を挙げてください」→ 手首が頭より上の人物に割り当てる
-//     （以後は位置の近さで追跡、2 秒見失ったら未割当に戻る）。トラッカーの枠に人物一覧（検出中 / 割当済み）と「割当をやり直す」
+//     （以後は予測位置の近さで追跡。0.5 秒を超えて見失う・割当済みの 2 人が近づいて区別できないと未割当に戻り、手を挙げ直してもらう。
+//     近づいている間は「要確認」で位置を送らない = そのプレイヤーは撃てない）。トラッカーの枠に人物一覧（検出中 / 割当済み）と「割当をやり直す」
 //   - 一覧の「位置合わせ」は「割当待ち（手を挙げる番）/ 人物 #n q=品質 / 見失い」
 //   - PC 確認: ?tracker=1 で入室後にカメラを自動で開く。?fakecam=1 でフェイクカメラ（?fakeBodies= の合成の体を部屋に置く。
 //     window.__fakePose.bodies[i].raised = true で手を挙げる / hidden（体の index）で隠す）
@@ -75,12 +76,12 @@ const TRACK_CAM_LABEL = params.get("trackCam");
 /** 「原点を確定」で平均する直近のサンプル数 */
 const TRACK_LOCK_SAMPLES = Math.round(numParam("trackLockSamples", 10, { min: 1, max: 100 }));
 // 人物（PoseLandmarker）
-/** 同時に検出する人数の上限（増やすほど重い） */
-const POSES = Math.round(numParam("poses", 4, { min: 1, max: 8 }));
+/** 同時に検出する人数の上限（増やすほど重い。俯瞰画面の描画と同じ PC で回すので 4 人まで） */
+const POSES = Math.round(numParam("poses", 4, { min: 1, max: 4 }));
 const poseDelegateRaw = (params.get("poseDelegate") ?? "auto").toLowerCase();
 const POSE_DELEGATE = poseDelegateRaw === "gpu" ? "GPU" : poseDelegateRaw === "cpu" ? "CPU" : "auto";
-/** 推論に渡す画像の長辺の上限 [px]（0 なら video のまま。CPU のときは 640） */
-const POSE_DET_W = numParam("poseDetW", 0, { min: 0, max: 4096 });
+/** 推論に渡す画像の長辺の上限 [px]（既定 640 = 09 と同じ。0 なら video のまま。CPU のときは 640） */
+const POSE_DET_W = numParam("poseDetW", 640, { min: 0, max: 4096 });
 /** 肩幅の実寸の仮定 [m]（距離の尺度。10% 違えば距離も 10% ずれる） */
 const SHOULDER_M = numParam("shoulderM", 0.4, { min: 0.2, max: 0.7 });
 /** 首の長さの仮定 [m]（両耳が見えないときの頭の中心 = 肩の中点 + これ） */
@@ -91,9 +92,9 @@ const EYE_FWD_M = numParam("eyeFwdM", 0.1, { min: 0, max: 0.4 });
 const POSE_MIN_VIS = numParam("poseMinVis", 0.5, { min: 0, max: 1 });
 /** 品質が 1 になる肩の画面上の幅 [px]（既定 60px ≈ 1280x720・camFov=68 で 6m 先の肩幅 0.4m） */
 const POSE_QUALITY_PX = numParam("poseQualityPx", 60, { min: 5, max: 1000 });
-/** 割当: 同じ人物とみなす前フレームからの距離 [m] */
+/** 割当: 同じ人物とみなす「速度で予測した位置」からの距離 [m]（66ms あたり。経過時間に比例させて使う） */
 const ASSIGN_MATCH_M = numParam("assignMatchM", 0.6, { min: 0.05, max: 5 });
-/** 割当: これだけ見えなかった人物は未割当に戻す [ms] */
+/** 割当: これだけ見えなかった人物は一覧から消す [ms]（割当は 0.5 秒を超えて見失った時点で外れる） */
 const ASSIGN_LOST_MS = numParam("assignLostMs", 2000, { min: 100, max: 60000 });
 /** 割当: 手を挙げ続けてからこの時間で割り当てる [ms] */
 const RAISE_HOLD_MS = numParam("raiseHoldMs", 500, { min: 0, max: 10000 });
@@ -603,6 +604,13 @@ function trackerPlayers(): { id: string; trackId: number }[] {
 }
 function playerName(id: string): string {
   return auth?.state.players.find((p) => p.id === id)?.name ?? id;
+}
+/** 割当を外した理由の前置き（手を挙げ直してもらう理由。無ければ空） */
+function releasedText(id: string): string {
+  const reason = tracker?.releaseReason(id) ?? null;
+  if (reason === "lost") return `${playerName(id)} を見失ったので割当を外しました。`;
+  if (reason === "ambiguous") return `${playerName(id)} が他の人と近づいて区別できなくなったので割当を外しました。`;
+  return "";
 }
 
 function connectTracker() {
@@ -1228,11 +1236,11 @@ function renderPanel() {
       : peers.size === 0
         ? "プレイヤーの入室を待っています"
         : nextPlayer
-          ? `次の人（${playerName(nextPlayer)}）は手を挙げてください（頭より上に ${(RAISE_HOLD_MS / 1000).toFixed(1)} 秒）`
+          ? `${releasedText(nextPlayer)}次の人（${playerName(nextPlayer)}）は手を挙げてください（頭より上に ${(RAISE_HOLD_MS / 1000).toFixed(1)} 秒）`
           : "全員の割当が済みました";
   const personRows = (tracker?.persons ?? []).map(
     (t) =>
-      `#${t.key} ${t.player ? `${playerName(t.player)}（割当済み）` : "検出中（未割当）"}${t.det.raised ? " ✋" : ""} (${t.det.head.map((v) => v.toFixed(1)).join(", ")}) q=${t.det.quality.toFixed(2)}${now - t.lastSeenMs > 500 ? ` 見失い ${((now - t.lastSeenMs) / 1000).toFixed(1)}s` : ""}`,
+      `#${t.key} ${t.player ? `${playerName(t.player)}（${t.pending ? "要確認: 他の人と近づいています" : "割当済み"}）` : "検出中（未割当）"}${t.det.raised ? " ✋" : ""} (${t.det.head.map((v) => v.toFixed(1)).join(", ")}) q=${t.det.quality.toFixed(2)}${now - t.lastSeenMs > 500 ? ` 見失い ${((now - t.lastSeenMs) / 1000).toFixed(1)}s` : ""}`,
   );
   const canResetAssign = tracker !== null && tracker.running && tracker.locked && tracker.persons.some((t) => t.player !== null);
   const total = Math.max(1, s?.totalCells ?? 1);
@@ -1252,8 +1260,8 @@ function renderPanel() {
                 ? `見失い（${((now - peer.tracked.atMs) / 1000).toFixed(1)}s。最後の位置を維持）`
                 : (() => {
                     // 人物の通し番号はトラッカーを動かしている画面だけが知っている（別の俯瞰画面では「追跡中」）
-                    const key = tracker?.persons.find((t) => t.player === p.id)?.key;
-                    return `${key === undefined ? "追跡中" : `人物 #${key}`} q=${peer.tracked.quality.toFixed(2)}`;
+                    const person = tracker?.persons.find((t) => t.player === p.id);
+                    return `${person === undefined ? "追跡中" : `人物 #${person.key}${person.pending ? "（要確認）" : ""}`} q=${peer.tracked.quality.toFixed(2)}`;
                   })();
           return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
         })

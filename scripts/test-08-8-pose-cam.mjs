@@ -1,15 +1,19 @@
 // 08-8（PC カメラ + MediaPipe Pose で人を追う）の回帰テスト。`npm run test:pose-cam` で実行する。
 //   1. src/shared/pose-cam-track.ts — 頭の中心・体のヨー・手を挙げているか・Web カメラの写像・PoseLandmarker の結果 → field 座標系
 //      （実装の生成関数を使わない「手計算の固定期待値」のテストを先に置く。生成側と同じ規約で戻すと符号の取り違えを見逃すため）
-//   2. src/shared/pose-cam-assign.ts — 手を挙げた順の割当・位置の近さでの追跡・2 秒の見失いで未割当・割当のやり直し
-//   3. server/splatoon-pose-cam.ts — 08-3 の spec を別パスで登録したサーバー（別 Room・tracker 以外の track の拒否・未測定の発射の拒否・
-//      知らない ID は捨てる・trackId での引き当て）。Vite dev サーバーを起動して叩く（既定 PORT 5200）
+//   2. src/shared/pose-cam-assign.ts — 手を挙げた順の割当・予測位置での追跡・0.5 秒の見失いで未割当・期限切れ・割当のやり直し・
+//      取り違えの防止（Fable の検算シナリオ S1 別人が同じ場所 / S2 すれ違い / S3 融合して分離 / S5 重複検出）
+//   3. server/splatoon-pose-cam.ts — 08-3 のサーバーをオプション付きで別パスに登録したもの（別 Room・tracker 以外の track の拒否・
+//      未測定の発射の拒否・知らない ID は捨てる・trackId での引き当て・dropMissing（track に居ないプレイヤーは撃てない。08-3 のパスは従来どおり）・
+//      マーカー ID との衝突の検証をしない）。Vite dev サーバーを起動して叩く（既定 PORT 5200）
 // テストフレームワークは使わない（04〜08 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import {
   EYES_OFFSET,
   NOSE_OFFSET,
+  RAISE_MARGIN_M,
+  SHOULDER_YAW_WEIGHT_WITH_EARS,
   bodyYaw,
   fakeBodyInCamera,
   fakeShape,
@@ -20,7 +24,7 @@ import {
   shoulderScale,
   webcamViewMapping,
 } from "../src/shared/pose-cam-track.ts";
-import { PoseAssigner } from "../src/shared/pose-cam-assign.ts";
+import { PoseAssigner, dedupe } from "../src/shared/pose-cam-assign.ts";
 import { fakePoseResult, syntheticBodyShape } from "../src/shared/fake-body.ts";
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
 import { imageToRay } from "../src/shared/hand-math.ts";
@@ -49,7 +53,7 @@ function visAll(overrides = {}) {
   for (const [i, x] of Object.entries(overrides)) v[Number(i)].visibility = x;
   return v;
 }
-const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5, L_WRIST = 15, R_WRIST = 16;
+const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5, L_ELBOW = 13, R_ELBOW = 14, L_WRIST = 15, R_WRIST = 16;
 
 // ================= 1. 手計算の固定期待値 =================
 // ---- 体のヨー: 左肩 − 右肩の向きから ----
@@ -63,9 +67,13 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
   // カメラ（+Z 側）の方を向く人: 本人の左は +X → ヨー 180°
   const c = bodyYaw(pts({ [L_SH]: [0.2, 1.2, 2], [R_SH]: [-0.2, 1.2, 2] }), visAll({ [L_EAR]: 0, [R_EAR]: 0 }), 0.5);
   check("固定値: 左肩が +X・右肩が -X → 正面は +Z（ヨー 180°）", c && near(Math.abs(c.yaw * DEG), 180) && nearV(c.forward, [0, 0, 1]), JSON.stringify(c));
-  // 肩は正面（0°）、耳は左へ 90° 向く、重みは同じ（可視性 1 と 1）→ 45°
+  // 肩は正面（0°）、耳は左へ 90° 向く、可視性は同じ（1 と 1）。両耳が見えるので肩の重みは 0.25 → 正面 = 0.25×(0,0,-1) + 1×(-1,0,0)
+  // → ヨー = atan2(1, 0.25) = atan(4) ≈ 75.964°（耳 = 頭の向きを優先）
   const d = bodyYaw(pts({ [L_SH]: [-0.2, 1.2, 2], [R_SH]: [0.2, 1.2, 2], [L_EAR]: [0, 1.4, 2.1], [R_EAR]: [0, 1.4, 1.9] }), visAll(), 0.5);
-  check("固定値: 肩 0° と耳 90° を可視性 1:1 で合わせると 45°", d && near(d.yaw * DEG, 45, 1e-9), `${d && (d.yaw * DEG).toFixed(3)}`);
+  check("固定値: 肩 0° と耳 90° は耳を優先（肩の重み 0.25）→ atan(4) ≈ 75.964°", SHOULDER_YAW_WEIGHT_WITH_EARS === 0.25 && d && near(d.yaw * DEG, 75.96375653207353, 1e-9), `${d && (d.yaw * DEG).toFixed(3)}`);
+  // 耳が見えなければ肩だけ（重み 1）
+  const d2 = bodyYaw(pts({ [L_SH]: [-0.2, 1.2, 2], [R_SH]: [0.2, 1.2, 2], [L_EAR]: [0, 1.4, 2.1], [R_EAR]: [0, 1.4, 1.9] }), visAll({ [R_EAR]: 0.1 }), 0.5);
+  check("固定値: 片耳が見えなければ肩の向きだけ（0°）", d2 && near(d2.yaw * DEG, 0, 1e-9), `${d2 && (d2.yaw * DEG).toFixed(3)}`);
   const e = bodyYaw(pts({ [L_SH]: [0, 1.2, 2], [R_SH]: [0, 1.2, 2] }), visAll({ [L_EAR]: 0, [R_EAR]: 0 }), 0.5);
   check("肩が重なって（真横）耳も見えなければヨーは出さない", e === null);
 }
@@ -81,18 +89,31 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
   // 耳 (0,1.5,2)（可視性 1）と、ずれた鼻（(0,1.49,1.72) → 頭の中心の推定 (0,1.5,1.8)、可視性 0.6）→ z = (2×1 + 1.8×0.6) / 1.6 = 1.925
   const h3 = headCenter(pts({ [L_EAR]: [-0.1, 1.5, 2], [R_EAR]: [0.1, 1.5, 2], [NOSE]: [0, 1.49, 1.72] }), visAll({ [NOSE]: 0.6, [L_EYE]: 0, [R_EYE]: 0 }), [0, 0, -1], { minVisibility: 0.5, neckM: 0.25 });
   check("固定値: 耳と鼻を可視性で重み付け（z = (2×1 + 1.8×0.6)/1.6 = 1.925）", h3 && nearV(h3.pos, [0, 1.5, 1.925], 1e-9), JSON.stringify(h3));
-  // 耳が片方しか見えない → 肩の中点 (0,1.25,2) + 首 0.25 → (0,1.5,2)、source=shoulders
-  const h4 = headCenter(pts({ [L_SH]: [-0.2, 1.25, 2], [R_SH]: [0.2, 1.25, 2], [L_EAR]: [9, 9, 9] }), visAll({ [R_EAR]: 0.2 }), [0, 0, -1], { minVisibility: 0.5, neckM: 0.25 });
-  check("固定値: 耳が片方だけなら肩の中点 (0,1.25,2) + 首 0.25m → (0,1.5,2)", h4 && nearV(h4.pos, [0, 1.5, 2]) && h4.source === "shoulders", JSON.stringify(h4));
+  // 耳が片方しか見えず鼻も見えない → 肩の中点 (0,1.25,2) + 首 0.25 → (0,1.5,2)、source=shoulders
+  const h4 = headCenter(pts({ [L_SH]: [-0.2, 1.25, 2], [R_SH]: [0.2, 1.25, 2], [L_EAR]: [9, 9, 9] }), visAll({ [R_EAR]: 0.2, [NOSE]: 0.2 }), [0, 0, -1], { minVisibility: 0.5, neckM: 0.25 });
+  check("固定値: 片耳だけで鼻も見えなければ肩の中点 (0,1.25,2) + 首 0.25m → (0,1.5,2)", h4 && nearV(h4.pos, [0, 1.5, 2]) && h4.source === "shoulders", JSON.stringify(h4));
+  // 片耳 + 鼻（正面 -Z の人）: 左耳 (-0.1, 1.52, 2.03)、鼻 (0.02, 1.49, 1.92) → 鼻から戻した点 (0.02, 1.5, 2.0)。
+  // 横（X）は鼻から 0.02、正面方向（Z）は耳から 2.03、高さは耳 1.52 と 1.5 の平均 1.51 → (0.02, 1.51, 2.03)
+  const h5 = headCenter(pts({ [L_SH]: [-0.2, 1.25, 2], [R_SH]: [0.2, 1.25, 2], [L_EAR]: [-0.1, 1.52, 2.03], [R_EAR]: [9, 9, 9], [NOSE]: [0.02, 1.49, 1.92] }), visAll({ [R_EAR]: 0.2, [L_EYE]: 0, [R_EYE]: 0 }), [0, 0, -1], { minVisibility: 0.5, neckM: 0.25 });
+  check("固定値: 片耳 + 鼻 → 横は鼻、正面方向は耳、高さは平均 = (0.02, 1.51, 2.03)、source=ear-nose", h5 && nearV(h5.pos, [0.02, 1.51, 2.03], 1e-9) && h5.source === "ear-nose", JSON.stringify(h5));
+  // 右を向いた人（正面 +X、ヨー -90°）: 右耳 (1.98, 1.5, 2.1)（本人の右 = +Z）、鼻 (2.08, 1.49, 2.0) → 戻した点 (2.0, 1.5, 2.0)。
+  // 横（Z）は鼻から 2.0、正面方向（X）は耳から 1.98、高さ 1.5 → (1.98, 1.5, 2.0)
+  const h6 = headCenter(pts({ [R_EAR]: [1.98, 1.5, 2.1], [NOSE]: [2.08, 1.49, 2.0] }), visAll({ [L_EAR]: 0, [L_EYE]: 0, [R_EYE]: 0 }), [1, 0, 0], { minVisibility: 0.5, neckM: 0.25 });
+  check("固定値: 横を向いた人の片耳 + 鼻（正面 +X）→ (1.98, 1.5, 2.0)", h6 && nearV(h6.pos, [1.98, 1.5, 2.0], 1e-9) && h6.source === "ear-nose", JSON.stringify(h6));
   check("EYES_OFFSET は前 6cm・上 2cm", EYES_OFFSET.fwd === 0.06 && EYES_OFFSET.up === 0.02);
 }
 
 // ---- 手を挙げているか / 肩幅の尺度 / 写像 ----
 {
-  const f = pts({ [L_WRIST]: [0, 1.0, 2], [R_WRIST]: [0.3, 1.62, 2] });
-  check("固定値: 右手首 y=1.62 は頭 y=1.5 + 5cm より上 → 挙げている", isHandRaised(f, visAll(), 1.5, 0.5) === true);
-  check("固定値: 右手首が見えない（可視性 0.1）なら挙げていない", isHandRaised(f, visAll({ [R_WRIST]: 0.1 }), 1.5, 0.5) === false);
-  check("固定値: 手首 y=1.54 は 1.5 + 5cm に届かない → 挙げていない", isHandRaised(pts({ [R_WRIST]: [0, 1.54, 2] }), visAll(), 1.5, 0.5) === false);
+  // 肩 y=1.25、頭の中心 y=1.5。挙手 = 手首 > 1.5 + 0.15 かつ同じ側の肘 > 肩
+  const arm = (wristY, elbowY) => pts({ [L_SH]: [-0.2, 1.25, 2], [R_SH]: [0.2, 1.25, 2], [L_ELBOW]: [-0.3, 1.0, 2], [L_WRIST]: [-0.3, 0.8, 2], [R_ELBOW]: [0.3, elbowY, 2], [R_WRIST]: [0.3, wristY, 2] });
+  check("RAISE_MARGIN_M は 15cm", RAISE_MARGIN_M === 0.15);
+  check("固定値: 右手首 y=1.7（> 1.65）・右肘 y=1.4（> 肩 1.25）→ 挙げている", isHandRaised(arm(1.7, 1.4), visAll(), 1.5, 0.5) === true);
+  check("固定値: 右手首が見えない（可視性 0.1）なら挙げていない", isHandRaised(arm(1.7, 1.4), visAll({ [R_WRIST]: 0.1 }), 1.5, 0.5) === false);
+  check("固定値: 右肘が見えない（可視性 0.1）なら挙げていない", isHandRaised(arm(1.7, 1.4), visAll({ [R_ELBOW]: 0.1 }), 1.5, 0.5) === false);
+  check("固定値: 手首 y=1.62 は 1.5 + 15cm に届かない → 挙げていない（頭の上に手を置く程度）", isHandRaised(arm(1.62, 1.4), visAll(), 1.5, 0.5) === false);
+  check("固定値: 頭をかく（手首 y=1.7 でも右肘 y=1.2 が肩 1.25 より下）→ 挙げていない", isHandRaised(arm(1.7, 1.2), visAll(), 1.5, 0.5) === false);
+  check("固定値: 左右は同じ側で見る（右手首が高く、左肘だけ肩より上）→ 挙げていない", isHandRaised(pts({ [L_SH]: [-0.2, 1.25, 2], [R_SH]: [0.2, 1.25, 2], [L_ELBOW]: [-0.3, 1.4, 2], [L_WRIST]: [-0.3, 1.0, 2], [R_ELBOW]: [0.3, 1.1, 2], [R_WRIST]: [0.3, 1.7, 2] }), visAll(), 1.5, 0.5) === false);
   const world = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0 }));
   world[L_SH] = { x: 0.15, y: -0.5, z: 0 };
   world[R_SH] = { x: -0.15, y: -0.5, z: 0 };
@@ -177,8 +198,9 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
 
 // ================= 3. 割当（手を挙げた順）=================
 {
+  const assignedOf = (evs) => evs.filter((e) => e.kind === "assigned");
   const a = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 500 });
-  const P = (x, raised = false, z = 1.5) => ({ pos: [x, 0, z], raised });
+  const P = (x, raised = false, z = 1.5, score) => ({ pos: [x, 0, z], raised, ...(score === undefined ? {} : { score }) });
   const players = ["p1", "p2"];
   a.update([P(-0.5), P(0.5)], 0, players);
   check("割当: 2 人を検出、どちらも未割当、次は p1", a.tracks.length === 2 && a.tracks.every((t) => t.player === null) && a.nextPlayer(players) === "p1");
@@ -188,36 +210,63 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
   check("割当: 手を挙げて 500ms 経つまでは割り当てない", ev.length === 0);
   ev = a.update([P(-0.5), P(0.54, true)], 600, players);
   const right = a.tracks.find((t) => t.det.pos[0] > 0);
-  check("割当: 500ms 挙げ続けた右の人に入室順の p1 が割り当たる（追跡で少し動いても同じ人）", ev.length === 1 && ev[0].player === "p1" && right.player === "p1" && a.nextPlayer(players) === "p2", JSON.stringify(ev));
+  check("割当: 500ms 挙げ続けた右の人に入室順の p1 が割り当たる（追跡で少し動いても同じ人）", ev.length === 1 && ev[0].kind === "assigned" && ev[0].player === "p1" && right.player === "p1" && a.nextPlayer(players) === "p2", JSON.stringify(ev));
   // 左の人が「p1 の割当の前から」挙げていた場合は数えない → 挙げ直すと p2
   const b = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 500 });
   b.update([P(-0.5, true), P(0.5, true)], 0, players);
   const first = b.update([P(-0.5, true), P(0.5, true)], 500, players);
-  const second = b.update([P(-0.5, true), P(0.5, true)], 1200, players);
-  check("割当: 同時に挙げた 2 人は 1 人だけ割り当て、もう 1 人は挙げ続けても次のプレイヤーに流れ込まない", first.length === 1 && second.length === 0, JSON.stringify({ first, second }));
+  let second = [];
+  for (let tt = 600; tt <= 1200; tt += 100) second = second.concat(b.update([P(-0.5, true), P(0.5, true)], tt, players));
+  check("割当: 同時に挙げた 2 人は 1 人だけ割り当て、もう 1 人は挙げ続けても次のプレイヤーに流れ込まない", assignedOf(first).length === 1 && second.length === 0, JSON.stringify({ first, second }));
   const other = b.tracks.find((t) => t.player === null);
   b.update([P(other.det.pos[0], false), P(-other.det.pos[0], true)], 1300, players);
   b.update([P(other.det.pos[0], true), P(-other.det.pos[0], true)], 1400, players);
+  b.update([P(other.det.pos[0], true), P(-other.det.pos[0], true)], 1650, players);
   const again = b.update([P(other.det.pos[0], true), P(-other.det.pos[0], true)], 1900, players);
   check("割当: 下ろして挙げ直すと次の p2 が割り当たる", again.length === 1 && again[0].player === "p2" && other.player === "p2", JSON.stringify(again));
   // p1 の人物が 1 フレーム 20cm ずつ後ろ（+Z）へ歩いても、検出の並び順が入れ替わっても同じ人物に付いていく
-  let t = 2000;
+  let t = 600;
   for (let i = 0; i < 5; i++) {
     t += 66;
     a.update([P(0.54, false, 1.5 + 0.2 * (i + 1)), P(-0.5)], t, players);
   }
   const p1Track = a.trackOf("p1");
-  check("追跡: 1 フレーム 20cm ずつ歩いても割当は同じ人物に付いていく（p1 は z=2.5 へ）", p1Track && near(p1Track.det.pos[2], 2.5, 1e-9) && a.tracks.length === 2, p1Track ? JSON.stringify(p1Track.det.pos) : "null");
+  check("追跡: 1 フレーム 20cm ずつ歩いても割当は同じ人物に付いていく（p1 は z=2.5 へ）", p1Track && near(p1Track.det.pos[2], 2.5, 1e-9) && a.tracks.length === 2 && !p1Track.pending, p1Track ? JSON.stringify(p1Track.det.pos) : "null");
   const jump = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
   jump.update([P(0, true)], 0, ["p1"]);
   jump.update([P(0.7)], 66, ["p1"]);
-  check("追跡: 1 フレームで matchM（0.6m）より遠くへ跳んだ検出は別人（新しい未割当の人物）", jump.tracks.length === 2 && jump.tracks.find((tr) => tr.det.pos[0] === 0.7)?.player === null);
-  // 見失い: p1 の人物が 2 秒見えない → 消えて未割当に戻る。1.9 秒ならまだ残る
-  const leftAt = t;
-  a.update([P(-0.5)], leftAt + 1900, players);
-  check("見失い: 1.9 秒ではまだ割当が残る", a.trackOf("p1") !== null);
-  a.update([P(-0.5)], leftAt + 2100, players);
-  check("見失い: 2 秒を超えると人物が消え、p1 は未割当に戻る（次は p1）", a.trackOf("p1") === null && a.nextPlayer(players) === "p1");
+  check("追跡: 66ms で matchM（0.6m）より遠くへ跳んだ検出は別人（新しい未割当の人物）", jump.tracks.length === 2 && jump.tracks.find((tr) => tr.det.pos[0] === 0.7)?.player === null);
+  const slow = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+  slow.update([P(0, true)], 0, ["p1"]);
+  slow.update([P(0.7)], 200, ["p1"]);
+  check("追跡: 距離の上限は経過時間に比例（200ms 空けば 0.6 × 200/66 ≈ 1.8m まで同じ人物）", slow.tracks.length === 1 && slow.trackOf("p1")?.det.pos[0] === 0.7);
+  // 速度で予測: 1 フレーム 0.4m ずつ動く人は、予測位置（前回 + 速度）で追う
+  const fast = new PoseAssigner({ matchM: 0.3, lostMs: 2000, raiseHoldMs: 0 });
+  fast.update([P(0, true)], 0, ["p1"]);
+  for (let i = 1; i <= 6; i++) fast.update([P(0.25 * i)], 66 * i, ["p1"]);
+  check("追跡: 速度で予測するので、matchM 0.3m でも 1 フレーム 0.25m ずつ動く人に付いていく（予測との距離で見る）", fast.tracks.length === 1 && fast.trackOf("p1")?.det.pos[0] === 1.5, JSON.stringify(fast.tracks.map((x) => [x.key, x.player, x.det.pos[0]])));
+  // 見失い: 0.5 秒以内なら同じ場所に戻ってきた人に割当が残る、超えたら外れる（自動では戻らない）
+  a.update([P(-0.5)], t + 400, players);
+  check("見失い: 0.4 秒ではまだ割当が残る", a.trackOf("p1") !== null);
+  const back = a.update([P(0.54, false, 2.5), P(-0.5)], t + 466, players);
+  check("見失い: 0.5 秒以内に戻れば同じ人物に復帰する", a.trackOf("p1") !== null && back.length === 0);
+  const leftAt = t + 466;
+  a.update([P(-0.5)], leftAt + 400, players);
+  const rel = a.update([P(-0.5)], leftAt + 600, players);
+  check("見失い: 0.5 秒を超えると p1 の割当が外れる（released lost。次は p1）", a.trackOf("p1") === null && a.nextPlayer(players) === "p1" && rel.some((e) => e.kind === "released" && e.player === "p1" && e.reason === "lost"), JSON.stringify(rel));
+  a.update([P(0.54, false, 2.5), P(-0.5)], leftAt + 700, players);
+  check("見失い: 0.5 秒を超えてから同じ場所に戻っても自動では割り当たらない", a.trackOf("p1") === null);
+  a.update([P(-0.5)], leftAt + 2800, players);
+  check("見失い: lostMs（2 秒）を超えた人物は一覧から消える", a.tracks.length === 1);
+  // 1. 期限切れの人物は対応づけの前に消す（古い「挙げ始めた時刻」が新しい検出に引き継がれない）
+  {
+    const e = new PoseAssigner({ matchM: 0.6, lostMs: 3000, raiseHoldMs: 500 });
+    e.update([P(0, true)], 0, []);
+    e.update([P(0, true)], 100, []);
+    const oldKey = e.tracks[0].key;
+    const got = e.update([P(0, true)], 3200, ["p1"]);
+    check("期限切れ: 3 秒途切れた後に同じ場所の検出は新しい人物（古い挙手の時刻を引き継がず、すぐには割り当たらない）", got.length === 0 && e.tracks.length === 1 && e.tracks[0].key !== oldKey && e.tracks[0].raisedSinceMs === 3200, JSON.stringify({ got, keys: e.tracks.map((x) => x.key) }));
+  }
   // 割当のやり直し・退室
   const c = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
   c.update([P(0, true)], 0, ["p1"]);
@@ -229,6 +278,122 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
   check("reset 後に挙げ直すと割り当たる", c.trackOf("p1") !== null);
   c.update([P(0, false)], 50, ["p2"]);
   check("プレイヤーが退室すると（players から消える）その人物は未割当", c.tracks[0].player === null && c.nextPlayer(["p2"]) === "p2");
+
+  // ---- 取り違えの防止（Fable の検算シナリオ S1〜S3・S5）----
+  /** p1 を x=-0.5 の人物、p2 を x=+0.5 の人物に割り当てた状態（z=-2） */
+  const Q = (x, raised = false, z = -2) => ({ pos: [x, 0, z], raised });
+  const newAssigned = () => {
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+    s.update([Q(-0.5, true)], 0, players);
+    s.update([Q(-0.5, false), Q(0.5, true)], 100, players);
+    return s;
+  };
+  /** 入れ替わっていない: 各プレイヤーは未割当か、要確認（位置を送らない）か、真の位置に付いている */
+  const notSwapped = (s, truth) =>
+    Object.entries(truth).every(([p, x]) => {
+      const tr = s.trackOf(p);
+      return tr === null || tr.pending || Math.abs(tr.det.pos[0] - x) < 1e-9;
+    });
+  const who = (s) => s.tracks.map((x) => `#${x.key}:${x.player ?? "-"}${x.pending ? "?" : ""}@${x.det.pos[0].toFixed(2)}`).join(" ");
+  {
+    const s = newAssigned();
+    check("S0: p1 / p2 が割り当たっている", s.trackOf("p1")?.det.pos[0] === -0.5 && s.trackOf("p2")?.det.pos[0] === 0.5, who(s));
+    // p1 の人が t=200 で消え（p2 は見え続ける）、t=1500 に別人が x=-0.3 に現れる
+    for (let tt = 200; tt < 1500; tt += 66) s.update([Q(0.5)], tt, players);
+    s.update([Q(0.5), Q(-0.3)], 1500, players);
+    const at = s.tracks.find((x) => Math.abs(x.det.pos[0] + 0.3) < 1e-9);
+    check("S1: 割当済みの人が消えて 1.3 秒後に別人が近くに来ても、p1 を引き継がない", at && at.player !== "p1" && s.trackOf("p1") === null && s.trackOf("p2")?.det.pos[0] === 0.5, who(s));
+  }
+  {
+    const s = newAssigned();
+    let tt = 200;
+    let xa = -0.5;
+    let xb = 0.5;
+    let everSwapped = false;
+    for (let i = 0; i < 30; i++) {
+      tt += 66;
+      xa += 0.08;
+      xb -= 0.08;
+      s.update(i % 2 ? [Q(xa), Q(xb)] : [Q(xb), Q(xa)], tt, players);
+      if (!notSwapped(s, { p1: xa, p2: xb })) everSwapped = true;
+    }
+    check("S2: 同じ深度ですれ違っても入れ替わらない（どのフレームでも、確定した割当は真の人に付いている）", !everSwapped, who(s));
+  }
+  {
+    const s = newAssigned();
+    let tt = 200;
+    let xa = -0.5;
+    let xb = 0.5;
+    let everSwapped = false;
+    for (let i = 0; i < 30; i++) {
+      tt += 66;
+      xa += 0.08;
+      xb -= 0.08;
+      s.update(i % 2 ? [Q(xa, false, -2), Q(xb, false, -2.4)] : [Q(xb, false, -2.4), Q(xa, false, -2)], tt, players);
+      if (!notSwapped(s, { p1: xa, p2: xb })) everSwapped = true;
+    }
+    check("S2': 深度差 0.4m ですれ違っても入れ替わらない", !everSwapped, who(s));
+  }
+  {
+    const s = newAssigned();
+    s.update([Q(-0.2), Q(0.2)], 200, players);
+    s.update([Q(-0.2), Q(0.2)], 266, players);
+    check("S3: 割当済みの 2 人が 0.5m 以内に近づくと両方とも要確認", s.trackOf("p1")?.pending === true && s.trackOf("p2")?.pending === true, who(s));
+    let tt = 266;
+    for (let i = 0; i < 5; i++) {
+      tt += 66;
+      s.update([Q(0.0)], tt, players);
+    }
+    // 実際は p1 が右へ、p2 が左へ抜けた
+    let everSwapped = false;
+    for (const x of [0.2, 0.5, 0.8]) {
+      tt += 66;
+      s.update([Q(x), Q(-x)], tt, players);
+      if (!notSwapped(s, { p1: x, p2: -x })) everSwapped = true;
+    }
+    check("S3: 重なって 1 人に見えてから左右を入れ替えて離れても、入れ替わった割当は確定しない", !everSwapped, who(s));
+  }
+  {
+    // 近づいて元の側へ離れた（予測との差が明確）ならそのまま続く
+    const s = newAssigned();
+    let tt = 100;
+    const path = [-0.4, -0.3, -0.22, -0.3, -0.4, -0.5, -0.6];
+    for (const x of path) {
+      tt += 66;
+      s.update([Q(x), Q(-x)], tt, players);
+    }
+    const p1 = s.trackOf("p1");
+    const p2 = s.trackOf("p2");
+    check("要確認: 近づいて元の側へ離れた（予測との差が明確）なら割当はそのまま続き、要確認が解ける", p1 && p2 && !p1.pending && !p2.pending && p1.det.pos[0] === -0.6 && p2.det.pos[0] === 0.6, who(s));
+  }
+  {
+    // 要確認のまま片方を 0.5 秒超えて見失うと、両方外れる
+    const s = newAssigned();
+    s.update([Q(-0.2), Q(0.2)], 166, players);
+    let tt = 166;
+    const evs = [];
+    for (let i = 0; i < 10; i++) {
+      tt += 66;
+      evs.push(...s.update([Q(-0.2)], tt, players));
+    }
+    check("要確認: 片方が 0.5 秒を超えて見えないと、両方の割当が外れる（lost + ambiguous）", s.trackOf("p1") === null && s.trackOf("p2") === null && evs.some((e) => e.reason === "lost") && evs.some((e) => e.reason === "ambiguous"), JSON.stringify(evs));
+  }
+  {
+    // S5: 同じ人物が 5cm ずれて 2 重に検出される
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 500 });
+    s.update([Q(0, true)], 0, players);
+    s.update([Q(0, true)], 600, players);
+    s.update([Q(0, false)], 700, players);
+    let tt = 700;
+    const evs = [];
+    for (let i = 0; i < 12; i++) {
+      tt += 66;
+      evs.push(...s.update([Q(0, true), Q(0.05, true)], tt, players));
+    }
+    check("S5: 同じ人物の重複検出（0.05m ずれ）はまとめられ、手を挙げても 2 人目が同じ人に割り当たらない", s.trackOf("p1") !== null && evs.length === 0 && s.tracks.length === 1, `${JSON.stringify(evs)} ${who(s)}`);
+    const kept = dedupe([{ pos: [0, 0, 0], raised: false, score: 10 }, { pos: [0.2, 0, 0], raised: false, score: 20 }, { pos: [0.8, 0, 0], raised: false, score: 5 }], 0.3);
+    check("dedupe: 0.3m 以内は可視性の合計（score）の大きい方を残し、離れた検出は残す", kept.length === 2 && kept[0].score === 20 && kept[1].score === 5, JSON.stringify(kept));
+  }
 }
 
 // ================= 4. server（別パス）=================
@@ -236,7 +401,7 @@ const PORT = Number(process.env.PORT ?? "") || 5200;
 const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
 server.stderr.on("data", (d) => process.stderr.write(d));
 server.stdout.on("data", (d) => {
-  for (const line of d.toString().split("\n")) if (line.startsWith("[splatoon-oi]")) console.log(line);
+  for (const line of d.toString().split("\n")) if (line.startsWith("[splatoon-pose-cam]") || line.startsWith("[splatoon-oi]")) console.log(line);
 });
 let serverExited = false;
 server.on("exit", () => {
@@ -317,6 +482,49 @@ try {
   b.send({ type: "shot", pos: [0.6, 0, 1.2], vel: [0, 0, -5], radius: 0.09 });
   const shot = await a.waitFor((m) => m.type === "shot" && m.shot.by === wb.id);
   check("サーバー: 位置が届いた（割当済みの）プレイヤーは撃てて、着弾が配られる", shot && shot.shot.landing?.surfaceId === "wall");
+  // dropMissing: track に Bob が居なくなったら未測定に戻り、pose は配られず、発射は "not tracked yet"
+  tr.send({ type: "track", locked: true, players: [] });
+  await sleep(150);
+  a.msgs.length = 0;
+  b.msgs.length = 0;
+  b.send({ type: "pose", pos: [3, 3, 3], quat: [0, 0, 0, 1], tracking: true, fist: false });
+  await sleep(300);
+  b.send({ type: "shot", pos: [0.6, 0, 1.2], vel: [0, 0, -5], radius: 0.09 });
+  const dropped = await b.waitFor((m) => m.type === "rejected" && m.reason === "not tracked yet");
+  check("サーバー（08-8 の dropMissing）: track に居なくなったプレイヤーは発射が rejected: not tracked yet、pose も配られない", dropped !== null && !a.msgs.some((m) => m.type === "pose" && m.id === wb.id));
+  tr.send({ type: "track", locked: true, players: [{ id: 11, pos: [0.6, 0, 1.4], yaw: 0.2, quality: 0.8 }] });
+  const retracked = await a.waitFor((m) => m.type === "tracked" && m.players.some((p) => p.player === wb.id));
+  b.send({ type: "pose", pos: [3, 3, 3], quat: [0, 0, 0, 1], tracking: true, fist: false });
+  await sleep(300);
+  b.send({ type: "shot", pos: [0.6, 0, 1.2], vel: [0, 0, -5], radius: 0.09 });
+  check("サーバー（08-8）: 再び track に載れば撃てる", retracked !== null && (await a.waitFor((m) => m.type === "shot" && m.shot.by === wb.id)) !== null);
+  tr.send({ type: "track", locked: false, players: [] });
+  await sleep(150);
+  b.msgs.length = 0;
+  b.send({ type: "shot", pos: [0.6, 0, 1.2], vel: [0, 0, -5], radius: 0.09 });
+  check("サーバー（08-8）: 原点が未確定の track（locked=false）で全員が未測定に戻る", (await b.waitFor((m) => m.type === "rejected" && m.reason === "not tracked yet")) !== null);
+
+  // 08-3 のパス（オプション無し = 既定）は従来どおり: track に居なくなっても最後の測定位置で撃てる
+  const oiTr = connect(SPLATOON_OUTSIDE_IN_PATH, { ...cfg, role: "tracker" });
+  await oiTr.waitFor((m) => m.type === "welcome");
+  oiTr.send({ type: "track", locked: true, players: [{ id: 10, pos: [0, 0, 1.4], yaw: 0, quality: 1 }] });
+  await oi.waitFor((m) => m.type === "tracked" && m.players.length > 0);
+  oiTr.send({ type: "track", locked: true, players: [] });
+  await sleep(150);
+  oi.send({ type: "pose", pos: [3, 3, 3], quat: [0, 0, 0, 1], tracking: true, fist: false });
+  await sleep(300);
+  oi.msgs.length = 0;
+  oi.send({ type: "shot", pos: [0, 0, 1.2], vel: [0, 0, -5], radius: 0.09 });
+  const oiShot = await oi.waitFor((m) => m.type === "shot" && m.shot.by === woi.id);
+  check("サーバー（08-3 の既定）: track に居なくなっても最後の測定位置で撃てる（dropMissing は既定 false）", oiShot !== null && !oi.msgs.some((m) => m.type === "rejected"), JSON.stringify(oi.msgs.filter((m) => m.type === "rejected")));
+  // マーカー ID との衝突: 08-3 は原点マーカーの ID（10）を避けて 11、08-8 は避けない（10）
+  const cfg10 = { ...cfg, room: "collide", markerId: "10" };
+  const c83 = connect(SPLATOON_OUTSIDE_IN_PATH, cfg10, "C83");
+  const c88 = connect(SPLATOON_POSE_CAM_PATH, cfg10, "C88");
+  const [w83, w88] = [await c83.waitFor((m) => m.type === "welcome"), await c88.waitFor((m) => m.type === "welcome")];
+  check("サーバー: 原点マーカーが ID 10 のとき、08-3 は trackId 11（衝突を避ける）、08-8 は 10（checkTrackIdCollision: false）", w83?.trackId === 11 && w88?.trackId === 10, `${w83?.trackId} / ${w88?.trackId}`);
+  for (const c of [oiTr, c83, c88]) c.ws.close();
+
   const tr2 = connect(SPLATOON_POSE_CAM_PATH, { ...cfg, role: "tracker" });
   await tr2.waitFor((m) => m.type === "welcome");
   tr2.send({ type: "track", locked: true, players: [{ id: 10, pos: [1, 0, 1], yaw: 0, quality: 1 }] });

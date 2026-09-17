@@ -10,7 +10,8 @@
 //   - 頭の位置 → 部屋座標系の変換: 自分の位置（self）が合成の体の頭の中心 + 正面へ eyeFwdM に 5cm 以内、ヨー（肩の向き）が 2° 以内、
 //     相手が正しい相対位置に見える
 //   - 発射が着弾して得点が入る。俯瞰画面の一覧に「人物 #n」が出る
-//   - 1 秒隠しても割当は残る / 3 秒隠すと最後の位置を保持（tracked (x.xs ago)）して撃ち続けられ、割当は外れて「手を挙げる番」に戻る →
+//   - 0.3 秒隠しても割当は残る / 3 秒隠すと割当は外れて「手を挙げる番」に戻り（案内に「見失ったので割当を外しました」）、
+//     スマホは最後の位置を表示に保持（tracked (x.xs ago)）するが撃てない（サーバーの dropMissing。案内「手を挙げて割り当ててもらって」）→
 //     再び見えても自動では戻らず、手を挙げると戻る
 //   - 対戦開始 → 試合 → 途中終了 → 結果を閉じる（08 と同じ進行）
 //   - 「割当をやり直す」で全員が未割当に戻り、入室順に挙げ直せる
@@ -67,9 +68,9 @@ const landings = [];
 const serverLines = [];
 server.stdout.on("data", (d) => {
   for (const line of d.toString().split("\n")) {
-    if (!line.startsWith("[splatoon-oi]")) continue;
+    if (!line.startsWith("[splatoon-pose-cam]")) continue;
     serverLines.push(line);
-    const m = line.match(/^\[splatoon-oi\] (p\d+) shot #\d+: (\S+)/);
+    const m = line.match(/^\[splatoon-pose-cam\] (p\d+) shot #\d+: (\S+)/);
     if (m) landings.push({ by: m[1], where: m[2] });
     else console.log(line);
   }
@@ -431,23 +432,29 @@ try {
   check("俯瞰画面のプレイヤー一覧: トラッカーの画面は「位置合わせ: 人物 #n q=」、別の俯瞰画面は「位置合わせ: 追跡中 q=」", (listText4?.match(/位置合わせ: 人物 #\d+ q=0\.\d+/g) ?? []).length === 2 && (listText2?.match(/位置合わせ: 追跡中 q=0\.\d+/g) ?? []).length === 2, `${(listText4 ?? "").slice(0, 120)} / ${(listText2 ?? "").slice(0, 120)}`);
   check("トラッカーの送る観測にプレイヤーと番号が付いている（local= の players）", tOv2.local.includes(`${h1.me}:10:`) && tOv2.local.includes(`${h2.me}:11:`), tOv2.local);
 
-  // ---- 短い隠れ（1 秒）: 割当は残り、見えればそのまま追跡が続く ----
+  // ---- 短い隠れ（0.3 秒）: 割当は残り、見えればそのまま追跡が続く（復帰は 0.5 秒以内だけ）----
   await p4.eval("window.__fakePose.hidden.add(1)");
-  await sleep(1000);
+  await sleep(250);
   await p4.eval("window.__fakePose.hidden.delete(1)");
   await sleep(800);
   const short = await readPose();
-  check("1 秒隠れても割当は残る（再び見えた人物に同じプレイヤーが付いたまま）", short.persons.length === 2 && short.persons.some((p) => p.player === me2) && short.next === "none", JSON.stringify(short));
+  check("0.3 秒隠れても割当は残る（再び見えた人物に同じプレイヤーが付いたまま）", short.persons.length === 2 && short.persons.some((p) => p.player === me2) && short.next === "none", JSON.stringify(short));
 
-  // ---- 長い隠れ（3 秒）: スマホは最後の位置を保持し、割当は外れる → 見えても自動では戻らず、手を挙げると戻る ----
+  // ---- 長い隠れ（3 秒）: 割当は外れ、スマホは最後の位置を表示に保持するが撃てない → 見えても自動では戻らず、手を挙げると戻る ----
   await p4.eval("window.__fakePose.hidden.add(1)");
-  await sleep(3000);
+  await sleep(1500);
+  const mid2 = await readHud(p2);
+  const midPrompt = (await p4.eval("document.querySelector('#tracker-prompt')?.textContent")) ?? "";
+  await sleep(1500);
   const lost2 = await readHud(p2);
   const lostPose = await readPose();
-  console.log(`hidden window2: ${show(lost2)} holding=${lost2.holding} ago=${lost2.agoSec}`);
-  check("3 秒隠すと 2 人目は最後の位置を保持し HUD に tracked (x.xs ago)・holding last pose", lost2.holding && lost2.agoSec >= 2 && dist(lost2.self, P2_POS) < 0.05, `${lost2.track} self=${JSON.stringify(lost2.self)}`);
-  check("2 秒を超えて見失った人物は消え、2 人目は未割当に戻る（次に手を挙げるのは 2 人目）", lostPose.persons.length === 1 && lostPose.next === me2, JSON.stringify(lostPose));
-  check("見失っている間も最後の位置から撃てて受理される", lost2.accepted > h2.accepted, `${h2.accepted} → ${lost2.accepted}`);
+  const lostMsg = (await p2.eval("window.__poseCam.message()")) ?? "";
+  console.log(`hidden window2: ${show(lost2)} holding=${lost2.holding} ago=${lost2.agoSec} message=${JSON.stringify(lostMsg)}`);
+  check("3 秒隠すと 2 人目は最後の位置を表示に保持し HUD に tracked (x.xs ago)・holding last pose", lost2.holding && lost2.agoSec >= 2 && dist(lost2.self, P2_POS) < 0.05, `${lost2.track} self=${JSON.stringify(lost2.self)}`);
+  check("0.5 秒を超えて見失うと 2 人目は未割当に戻り（次に手を挙げるのは 2 人目）、2 秒を超えた人物は一覧から消える", lostPose.persons.length === 1 && lostPose.next === me2, JSON.stringify(lostPose));
+  check("トラッカーの案内に「見失ったので割当を外しました」と次に手を挙げる人が出る", new RegExp(`${p2.name} を見失ったので割当を外しました。次の人（${p2.name}）は手を挙げてください`).test(midPrompt), midPrompt);
+  check("割当が外れている間は撃てない（発射も受理も増えない。サーバーの dropMissing とスマホの canShoot）", lost2.sent === mid2.sent && lost2.accepted === mid2.accepted, `sent ${mid2.sent} → ${lost2.sent}, accepted ${mid2.accepted} → ${lost2.accepted}`);
+  check("スマホの案内が「…手を挙げて割り当ててもらってください（撃てません）」", /手を挙げて割り当ててもらってください/.test(lostMsg) && /撃てません/.test(lostMsg), lostMsg);
   const ovLost = await readOverview();
   check("俯瞰画面はウィンドウ 2 を「見失い」と出す", ovLost.peerTrack[h2.me]?.[1] === "lost" && ovLost.peerTrack[h1.me]?.[1] === "ok", JSON.stringify(ovLost.peerTrack));
   await p4.eval("window.__fakePose.hidden.delete(1)");

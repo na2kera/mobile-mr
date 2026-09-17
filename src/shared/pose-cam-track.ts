@@ -16,11 +16,13 @@ import { yawOfForward } from "./outside-in-track.ts";
 import {
   BODY_LANDMARK_COUNT,
   LEFT_EAR,
+  LEFT_ELBOW,
   LEFT_EYE,
   LEFT_SHOULDER,
   LEFT_WRIST,
   NOSE,
   RIGHT_EAR,
+  RIGHT_ELBOW,
   RIGHT_EYE,
   RIGHT_SHOULDER,
   RIGHT_WRIST,
@@ -40,6 +42,13 @@ export const NOSE_OFFSET = { fwd: 0.08, up: -0.01 };
 export const EYES_OFFSET = { fwd: 0.06, up: 0.02 };
 /** NOSE_OFFSET / EYES_OFFSET を測った体の肩幅 [m]（fake-body.ts の合成の体の両肩の間） */
 export const REF_SHOULDER_M = 0.36;
+/**
+ * 両耳が見えるときの肩の向きの重み（耳の重みに対する倍率）。ヨーはスマホの φ（アンカーの Y 回転）の補正に使うので、
+ * 「頭（ゴーグル）の向き」に近い耳を優先し、体の向き（肩）は耳が見えないときの代わりにする
+ */
+export const SHOULDER_YAW_WEIGHT_WITH_EARS = 0.25;
+/** 手を挙げている: 手首が頭の中心よりこれだけ上 [m]（頭をかく・髪を触る程度では届かない高さ） */
+export const RAISE_MARGIN_M = 0.15;
 /** 両肩の水平距離がこれ未満なら向きを出さない（真横を向いて肩が重なっている）[m] */
 const MIN_SHOULDER_SPAN_M = 0.02;
 
@@ -84,23 +93,25 @@ export type BodyYaw = {
 };
 
 /**
- * 体（頭）のヨー。両肩の向き（左 − 右）から正面を出し、両耳が見えればその向きも可視性で重み付けして足す。
+ * 体（頭）のヨー。両肩の向き（左 − 右）と両耳の向きを可視性で重み付けして足す。両耳が見えるときは耳を優先し、
+ * 肩の重みを SHOULDER_YAW_WEIGHT_WITH_EARS 倍に下げる（首だけ回したときに体の向きへ引っ張られないように）。
  * @param field 33 点の field 座標系での位置
  * @param landmarks 可視性の判定用（MediaPipe の landmarks）
  */
 export function bodyYaw(field: readonly V3[], landmarks: readonly BodyLandmark[], minVisibility: number): BodyYaw | null {
   let sx = 0;
   let sz = 0;
-  const add = (li: number, ri: number) => {
+  const add = (li: number, ri: number, scale: number): boolean => {
     const w = Math.min(vis(landmarks[li]), vis(landmarks[ri]));
-    if (w < minVisibility) return;
+    if (w < minVisibility) return false;
     const f = forwardFromLeftRight(field[li], field[ri]);
-    if (!f) return;
-    sx += f[0] * w;
-    sz += f[2] * w;
+    if (!f) return false;
+    sx += f[0] * w * scale;
+    sz += f[2] * w * scale;
+    return true;
   };
-  add(LEFT_SHOULDER, RIGHT_SHOULDER);
-  add(LEFT_EAR, RIGHT_EAR);
+  const ears = add(LEFT_EAR, RIGHT_EAR, 1);
+  add(LEFT_SHOULDER, RIGHT_SHOULDER, ears ? SHOULDER_YAW_WEIGHT_WITH_EARS : 1);
   const len = Math.hypot(sx, sz);
   if (len < 1e-6) return null;
   const forward: V3 = [sx / len, 0, sz / len];
@@ -110,14 +121,16 @@ export function bodyYaw(field: readonly V3[], landmarks: readonly BodyLandmark[]
 export type HeadEstimate = {
   /** 頭の中心（両耳の中点に相当）[m]（field 座標系） */
   pos: V3;
-  /** どこから出したか: ears = 耳（+ 鼻・目）、shoulders = 肩の中点 + 首の長さ */
-  source: "ears" | "shoulders";
+  /** どこから出したか: ears = 両耳（+ 鼻・目）、ear-nose = 片耳 + 鼻、shoulders = 肩の中点 + 首の長さ */
+  source: "ears" | "ear-nose" | "shoulders";
 };
 
 /**
  * 頭の中心。両耳が見えれば、両耳の中点・鼻・両目の中点それぞれから「頭の中心」を推定し（鼻と目は正面方向のオフセットを引く）、
  * 可視性で重み付けして平均する（ゴーグルで目が隠れると目の重みは 0 に近づく）。
- * 両耳が見えなければ、両肩の中点 + 上へ neckM（首の長さの仮定）に落とす。肩も見えなければ null
+ * 片耳しか見えなければ、見えている耳と鼻から出す（耳は頭の中心の真横にあるので「正面方向の位置」を、鼻は正面にあるので
+ * 「横方向の位置」を受け持つ。高さは両方の可視性の重み付き平均）。
+ * 耳も鼻も揃わなければ、両肩の中点 + 上へ neckM（首の長さの仮定）に落とす。肩も見えなければ null
  * @param forward 体の正面（bodyYaw。鼻・目のオフセットの向きに使う）
  */
 export function headCenter(
@@ -144,6 +157,18 @@ export function headCenter(
     if (eyeW >= opts.minVisibility) add(offsetBack(mid(field[LEFT_EYE], field[RIGHT_EYE]), forward, EYES_OFFSET, k), eyeW);
     return { pos: [s[0] / sw, s[1] / sw, s[2] / sw], source: "ears" };
   }
+  const leftW = vis(landmarks[LEFT_EAR]);
+  const rightW = vis(landmarks[RIGHT_EAR]);
+  const oneEarW = Math.max(leftW, rightW);
+  const noseW = vis(landmarks[NOSE]);
+  if (oneEarW >= opts.minVisibility && noseW >= opts.minVisibility) {
+    const ear = field[leftW >= rightW ? LEFT_EAR : RIGHT_EAR];
+    const nb = offsetBack(field[NOSE], forward, NOSE_OFFSET, k);
+    // 水平: 鼻から戻した点を、正面方向にだけ耳の位置へ寄せる（横方向は鼻、正面方向は耳）
+    const along = (ear[0] - nb[0]) * forward[0] + (ear[2] - nb[2]) * forward[2];
+    const y = (ear[1] * oneEarW + nb[1] * noseW) / (oneEarW + noseW);
+    return { pos: [nb[0] + forward[0] * along, y, nb[2] + forward[2] * along], source: "ear-nose" };
+  }
   const shW = Math.min(vis(landmarks[LEFT_SHOULDER]), vis(landmarks[RIGHT_SHOULDER]));
   if (shW < opts.minVisibility) return null;
   const m = mid(field[LEFT_SHOULDER], field[RIGHT_SHOULDER]);
@@ -159,10 +184,17 @@ function offsetBack(p: V3, forward: V3, o: { fwd: number; up: number }, k: numbe
   return [p[0] - forward[0] * o.fwd * k, p[1] - o.up * k, p[2] - forward[2] * o.fwd * k];
 }
 
-/** 手を挙げているか: どちらかの手首が見えていて、頭の中心より marginM 以上高い */
-export function isHandRaised(field: readonly V3[], landmarks: readonly BodyLandmark[], headY: number, minVisibility: number, marginM = 0.05): boolean {
-  for (const i of [LEFT_WRIST, RIGHT_WRIST]) {
-    if (vis(landmarks[i]) >= minVisibility && field[i][1] > headY + marginM) return true;
+/**
+ * 手を挙げているか: どちらかの側で、手首が頭の中心より marginM（既定 15cm）以上高く、かつ同じ側の肘が肩より高い
+ * （手首・肘・肩とも見えている）。頭をかく・髪を触る動作（肘が肩の高さより下）で割り当たらないように
+ */
+export function isHandRaised(field: readonly V3[], landmarks: readonly BodyLandmark[], headY: number, minVisibility: number, marginM = RAISE_MARGIN_M): boolean {
+  for (const [wrist, elbow, shoulder] of [
+    [LEFT_WRIST, LEFT_ELBOW, LEFT_SHOULDER],
+    [RIGHT_WRIST, RIGHT_ELBOW, RIGHT_SHOULDER],
+  ]) {
+    if (vis(landmarks[wrist]) < minVisibility || vis(landmarks[elbow]) < minVisibility || vis(landmarks[shoulder]) < minVisibility) continue;
+    if (field[wrist][1] > headY + marginM && field[elbow][1] > field[shoulder][1]) return true;
   }
   return false;
 }
@@ -178,6 +210,8 @@ export type PersonObservation = {
   quality: number;
   /** 手を挙げている（割当の儀式） */
   raised: boolean;
+  /** 33 点の可視性の合計（同じ人物の重複検出をまとめるとき、大きい方を残す） */
+  score: number;
   /** カメラからの深度 [m]（腰の中点） */
   depth: number;
   /** 肩の画面上の幅 [px] */
@@ -241,6 +275,7 @@ export function observePerson(landmarks: readonly BodyLandmark[], worldRaw: read
     yaw: by.yaw,
     quality,
     raised: isHandRaised(field, landmarks, head.pos[1], o.minVisibility),
+    score: landmarks.reduce((sum, l) => sum + vis(l), 0),
     depth: placement.depth,
     shoulderPx,
     field,

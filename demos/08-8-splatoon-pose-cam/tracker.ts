@@ -6,7 +6,7 @@
 //   - 人物: PoseLandmarker（src/shared/pose-tracker.ts）→ 1 人ずつ src/shared/pose-cam-track.ts の observePerson
 //     （肩幅の仮定で尺度を合わせた最小二乗で 3D 化 → カメラ → field。頭の中心は耳・鼻・目、無ければ肩 + 首。ヨーは肩と耳）
 //   - 誰がどのプレイヤーか: src/shared/pose-cam-assign.ts の PoseAssigner（入室順に「手を挙げた人」へ割り当て、位置の近さで追跡、
-//     2 秒見失ったら未割当）。track の id は割り当てたプレイヤーの trackId（サーバーが入室順に付けた番号。08-3 のマーカー ID と同じ枠）
+//     0.5 秒を超えて見失った・割当済みの 2 人が近づいて区別できなかったら未割当。近づいている間は「要確認」で位置を送らない）。track の id は割り当てたプレイヤーの trackId（サーバーが入室順に付けた番号。08-3 のマーカー ID と同じ枠）
 //   - 推論の例外（MediaPipe）は try/catch で握り、GPU なら CPU で作り直す（09 と同じ）。描画ループ・検出のタイマーは止めない
 //   - PC 確認: ?fakecam=1 で、フェイクカメラ（チェッカーボード + 原点・追加マーカーのピンホール投影）に加えて、
 //     field 座標系に置いた合成の体（?fakeBodies=）を PoseLandmarker の代わりに fake-body.ts の fakePoseResult で返す（MediaPipe は読まない）
@@ -41,7 +41,7 @@ export type TrackerOptions = {
   camHFovDeg: number;
   /** マーカー検出の画像の長辺 [px] */
   detW: number;
-  /** 検出（マーカー / 人物）の最小間隔 [ms] */
+  /** 検出（マーカー / 人物）の最小間隔 [ms]。人物の推論がこれより長くかかったら、間隔を推論時間の 2 倍まで自動で延ばす（俯瞰画面の描画を詰まらせない） */
   intervalMs: number;
   /** 正規化再投影誤差の上限（marker-detector.ts。超える観測は捨てる） */
   maxPoseError: number;
@@ -117,6 +117,10 @@ export type Tracker = {
   readonly persons: readonly PersonTrack<PersonObservation>[];
   /** 次に手を挙げてもらうプレイヤー（全員割当済みなら null） */
   nextPlayer(): string | null;
+  /** プレイヤーの割当を外した理由（lost = 見失った、ambiguous = 近づいて区別できなかった）。割り当て直すまで残る。無ければ null */
+  releaseReason(player: string): "lost" | "ambiguous" | null;
+  /** いまの検出の間隔 [ms]（推論が重いと intervalMs より延びる） */
+  readonly intervalMs: number;
   /** 直近に見えた原点候補の ID */
   readonly lastOriginIds: readonly number[];
   readonly video: HTMLVideoElement;
@@ -149,7 +153,9 @@ export function createTracker(opts: TrackerOptions): Tracker {
   const fakeShapes = opts.fake ? { down: syntheticBodyShape(), cache: new Map<boolean, { x: number; y: number; z: number }[]>() } : null;
 
   let stream: MediaStream | null = null;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  /** 割当を外した理由（プレイヤー → 理由。割り当て直したら消す） */
+  const releases = new Map<string, "lost" | "ambiguous">();
   let lastVideoTime = -1;
   let camToField: number[] | null = null;
   /** 直近の原点候補（カメラ → field）のサンプル（確定時に平均する） */
@@ -185,6 +191,10 @@ export function createTracker(opts: TrackerOptions): Tracker {
     nextPlayer() {
       return assigner.nextPlayer(opts.players().map((p) => p.id));
     },
+    releaseReason(player: string) {
+      return releases.get(player) ?? null;
+    },
+    intervalMs: Math.max(16, opts.intervalMs),
     async start() {
       if (self.running) return;
       self.error = "";
@@ -199,12 +209,12 @@ export function createTracker(opts: TrackerOptions): Tracker {
         throw e;
       }
       self.running = true;
-      timer = setInterval(tick, Math.max(16, opts.intervalMs));
+      scheduleTick();
       if ((!opts.fake || opts.fake.useModel) && !poseTracker && !poseLoading) void initPose(opts.delegate);
       opts.onChange();
     },
     stop() {
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
       timer = null;
       stream?.getTracks().forEach((t) => t.stop());
       stream = null;
@@ -231,6 +241,7 @@ export function createTracker(opts: TrackerOptions): Tracker {
     },
     resetAssignments() {
       assigner.reset(performance.now());
+      releases.clear();
       console.log("[tracker] assignments reset");
       opts.onChange();
     },
@@ -361,6 +372,18 @@ export function createTracker(opts: TrackerOptions): Tracker {
     return m ? markerToFieldMatrix(m) : null;
   }
 
+  /** 次の検出を予約する（setInterval ではなく毎回。推論が重いときに間隔を延ばすため） */
+  function scheduleTick() {
+    timer = setTimeout(() => {
+      if (!self.running) return;
+      try {
+        tick();
+      } finally {
+        if (self.running) scheduleTick();
+      }
+    }, self.intervalMs);
+  }
+
   function tick() {
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     const vw = video.videoWidth;
@@ -450,6 +473,9 @@ export function createTracker(opts: TrackerOptions): Tracker {
   }
 
   function applyPoses(result: PoseResultLike, w: number, h: number, now: number) {
+    // 推論が間隔より長くかかったら、間隔を推論時間の 2 倍まで延ばす（戻るときは設定の間隔へ）
+    const base = Math.max(16, opts.intervalMs);
+    self.intervalMs = detMs > base ? Math.min(2000, Math.round(detMs * 2)) : base;
     const mapping = webcamViewMapping(w, h, opts.camHFovDeg);
     const pairs: { obs: PersonObservation; lm: BodyLandmark[] }[] = [];
     for (let i = 0; i < result.landmarks.length; i++) {
@@ -463,20 +489,28 @@ export function createTracker(opts: TrackerOptions): Tracker {
     const observations = pairs.map((p) => p.obs);
     const players = opts.players();
     for (const ev of assigner.update(observations, now, players.map((p) => p.id))) {
-      console.log(`[tracker] assigned ${ev.player} to person #${ev.key}`);
-      opts.onAssign(ev.player, ev.key);
+      if (ev.kind === "assigned") {
+        releases.delete(ev.player);
+        console.log(`[tracker] assigned ${ev.player} to person #${ev.key}`);
+        opts.onAssign(ev.player, ev.key);
+      } else {
+        releases.set(ev.player, ev.reason);
+        console.log(`[tracker] released ${ev.player} from person #${ev.key} (${ev.reason})`);
+        opts.onChange();
+      }
     }
     const trackIdOf = new Map(players.map((p) => [p.id, p.trackId]));
     const entries: TrackedEntry[] = [];
     for (const tr of assigner.tracks) {
-      if (tr.player === null || tr.lastSeenMs !== now) continue;
+      // 要確認（割当済みの別の人と近づいている）の人物は送らない（サーバーが未測定に戻し、撃てなくなる）
+      if (tr.player === null || tr.pending || tr.lastSeenMs !== now) continue;
       const trackId = trackIdOf.get(tr.player);
       if (trackId === undefined) continue;
       const o = tr.det;
       entries.push({ id: trackId, player: tr.player, pos: [round3(o.pos[0]), round3(o.pos[1]), round3(o.pos[2])], yaw: Math.round(o.yaw * 1000) / 1000, quality: Math.round(o.quality * 100) / 100 });
     }
     self.lastEntries = entries;
-    self.info = `${video.videoWidth}x${video.videoHeight} pose=${detMs.toFixed(0)}ms bodies=${result.landmarks.length} solved=${observations.length} persons=${assigner.tracks.length} errors=${poseErrors}${opts.fake?.useModel ? ` model=${modelBodies}/${modelRuns}` : ""} ${self.poseStatus}`;
+    self.info = `${video.videoWidth}x${video.videoHeight} pose=${detMs.toFixed(0)}ms bodies=${result.landmarks.length} solved=${observations.length} persons=${assigner.tracks.length} every=${self.intervalMs}ms errors=${poseErrors}${opts.fake?.useModel ? ` model=${modelBodies}/${modelRuns}` : ""} ${self.poseStatus}`;
     opts.onTrack(true, entries.map(({ id, pos, yaw, quality }) => ({ id, pos, yaw, quality })));
   }
 
@@ -518,7 +552,7 @@ export function createTracker(opts: TrackerOptions): Tracker {
       // 今回の観測に対応した人物だけ（観測の元の landmarks の鼻の上に名札）
       const lm = lastPairs.find((p) => p.obs === tr.det)?.lm;
       if (!lm) continue;
-      const label = `#${tr.key} ${tr.player ? opts.playerLabel(tr.player) : "未割当"}${tr.det.raised ? " ✋" : ""}`;
+      const label = `#${tr.key} ${tr.player ? opts.playerLabel(tr.player) : "未割当"}${tr.pending ? " 要確認" : ""}${tr.det.raised ? " ✋" : ""}`;
       previewCtx.fillStyle = tr.player ? "#81c995" : "#fdd663";
       previewCtx.fillText(label, lm[0].x * pw - 20, Math.max(12, lm[0].y * ph - 16));
     }
