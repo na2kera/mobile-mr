@@ -26,7 +26,10 @@
     "test:batting": "node scripts/test-batting.mjs",
     "check:batting": "node scripts/headless-batting.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
-    "fetch:models": "node scripts/fetch-models.mjs"
+    "test:splatoon-apriltag": "node scripts/test-08-5-apriltag.mjs",
+    "check:splatoon-apriltag": "node scripts/headless-splatoon-apriltag.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:apriltag": "node scripts/fetch-apriltag.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
