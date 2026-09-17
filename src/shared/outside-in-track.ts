@@ -123,7 +123,7 @@ export function trackFromObservation(markerToCam: number[], camToField: number[]
  * 観測の品質 0..1。画面上の大きさ（辺長 [px] / fullPx で頭打ち）× 正対の度合い。
  * スマホは品質が高い（正面を向いてマーカーが大きく映った）ときだけヨーを補正する。位置はどの品質でも使う
  */
-export function trackQuality(sidePx: number, facing: number, fullPx = 60): number {
+export function trackQuality(sidePx: number, facing: number, fullPx = 30): number {
   const size = Math.min(1, Math.max(0, sidePx / fullPx));
   return size * Math.min(1, Math.max(0, facing));
 }

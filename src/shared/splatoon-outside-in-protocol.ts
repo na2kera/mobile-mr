@@ -24,8 +24,9 @@ export const SPLATOON_OUTSIDE_IN_PATH = "/api/splatoon-outside-in";
 /**
  * 08 とは別のサーバーなので別の番号で数える（08 の v11 を土台にした v1）。
  * v1: track / tracked、welcome / join の trackId、pose の pos をトラッカーの値で上書き
+ * v2: 使っていなかった tracked.t と TrackedPlayer.ageMs を削除（Fable レビューの指摘）
  */
-export const SPLATOON_OUTSIDE_IN_PROTOCOL_VERSION = 1;
+export const SPLATOON_OUTSIDE_IN_PROTOCOL_VERSION = 2;
 
 export { HAND_FLAT_LENGTH, MAX_POSE_MARKER_IDS, NAME_MAX_LENGTH };
 export type { FieldConfig, FieldSize, GameSnapshot, MarkerPlacement, PlayerPose, Shot, SplatoonRoomConfig, V3 };
@@ -40,11 +41,12 @@ export type ClientRole = "player" | "overview" | "tracker";
 export const TRACK_ID_FIRST = 10;
 /** track に載せられる観測の上限（プレイヤー 8 人 + 余り） */
 export const MAX_TRACK_ENTRIES = 16;
-/** トラッカーの送信レートの上限 [回/s]（検出間隔 50ms = 20Hz に余裕） */
+/** トラッカーの送信レートの上限 [回/s]（既定の検出間隔 ?trackIntervalMs=66 ≈ 15Hz に余裕） */
 export const TRACK_RATE_PER_SEC = 40;
 /**
- * トラッカーの観測がこれより古ければ「見失った」扱い [ms]（pose の pos の上書きをやめ、スマホは最後の位置を保持して
- * HUD に "tracked (0.8s ago)" を出す）
+ * トラッカーの観測がこれより古ければ「見失った」扱い [ms]。表示だけに使う（スマホは最後の位置を保持して
+ * HUD に "tracked (0.8s ago)" を出し、俯瞰画面の一覧は「見失い」になる）。サーバーは見失っても pose の pos を
+ * 最後の測定値で上書きし続ける（自己申告には戻らない）
  */
 export const TRACK_STALE_MS = 2000;
 
@@ -60,12 +62,10 @@ export type TrackEntry = {
   quality: number;
 };
 
-/** サーバーがプレイヤーに紐づけて配る観測 */
+/** サーバーがプレイヤーに紐づけて配る観測（今回の track で見えていた人だけ。見失った人は載せない） */
 export type TrackedPlayer = TrackEntry & {
   /** プレイヤー id（id はマーカーの ID のまま。両方持たせるのは俯瞰画面の表示のため） */
   player: string;
-  /** サーバーがこの観測を受けてからの経過 [ms]（tracked を配った時点。見失った人は載せない） */
-  ageMs: number;
 };
 
 export type ClientMessage =
@@ -98,7 +98,7 @@ export type ServerMessage =
    * トラッカーの観測（全員に配る。tracker が track を送るたび）。players は今回見えていた人だけ
    * （見失った人は載らないので、受け取る側は最後の値を保持する）
    */
-  | { type: "tracked"; t: number; tracker: TrackerStatus; players: TrackedPlayer[] };
+  | { type: "tracked"; tracker: TrackerStatus; players: TrackedPlayer[] };
 
 export type TrackerStatus = {
   /** 接続しているトラッカーの数（0 なら誰の位置も来ない） */

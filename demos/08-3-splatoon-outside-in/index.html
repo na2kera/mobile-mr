@@ -235,7 +235,7 @@
       <p>
         調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
         原点マーカーは ?markerMm=150（印刷ページ markers.html の既定と同じ。room 設定なので全員と俯瞰画面で揃える。手用は handDetW / handSmooth / handLostMs）。
-        アウトサイドイン固有: ?trackSmooth=0.3（届いた位置へ寄せる係数）&amp;trackLostMs=2000（見失い判定）&amp;yawQuality=0.5（ヨー補正に使う品質の下限）&amp;yawSmooth=0.1（ヨー補正の速さ）。
+        アウトサイドイン固有: ?trackSmooth=0.3（届いた位置へ寄せる係数）&amp;trackLostMs=2000（見失い判定）&amp;yawQuality=0.5（ヨー補正に使う品質の下限）&amp;yawSmooth=0.1（ヨー補正の速さ）&amp;yawMaxRate=30（これより速く首を振っている間はヨー補正を止める [deg/s]）。
         08 の detW / smooth / markerIntervalMs / lostMs / gravityAlign / fakeMarkers / fakeCamPos はこのデモにはありません（位置合わせは常に水平で、トラッカー側で行うため）。
         飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
         （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。

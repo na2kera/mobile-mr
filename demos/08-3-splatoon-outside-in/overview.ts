@@ -69,7 +69,7 @@ const TRACK_MAX_POSE_ERROR = numParam("maxPoseError", 0.5, { min: 0, max: 100 })
 /** マーカーの中心からスマホのカメラまでの距離 [m]（ゴーグルの前面に貼るならほぼ 0） */
 const TRACK_EYE_BACK_M = numParam("trackEyeBackM", 0, { min: 0, max: 0.5 });
 /** 品質が 1 になる画面上の辺長 [px] */
-const TRACK_QUALITY_PX = numParam("trackQualityPx", 60, { min: 5, max: 1000 });
+const TRACK_QUALITY_PX = numParam("trackQualityPx", 30, { min: 5, max: 1000 });
 const TRACK_CAM_RES = resolutionParam("trackCamRes", [1280, 720]);
 /** カメラのラベルに含まれる文字列で選ぶ（例: ?trackCam=C920） */
 const TRACK_CAM_LABEL = params.get("trackCam");
@@ -397,7 +397,7 @@ let trackerStatus: TrackerStatus = { connected: 0, locked: false };
 /** 受け取った tracked の数（HUD） */
 let trackedCount = 0;
 
-function onTracked(_serverT: number, status: TrackerStatus, players: TrackedPlayer[]) {
+function onTracked(status: TrackerStatus, players: TrackedPlayer[]) {
   trackerStatus = status;
   trackedCount++;
   const now = performance.now();
@@ -597,7 +597,7 @@ function connectTracker() {
       onState: ignore,
       onField: ignore,
       onMarkers: ignore,
-      onTracked: (_t, status) => {
+      onTracked: (status) => {
         // 所有者が切断してこちらが引き継いだ（locked が false に戻る）ら、拒否の表示を消す
         if (trackerRejected && !status.locked) trackerRejected = "";
         renderPanel();

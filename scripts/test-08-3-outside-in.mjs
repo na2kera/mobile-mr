@@ -364,6 +364,31 @@ try {
   const trackedGone = await a.waitFor((m) => m.type === "tracked" && m.tracker.connected === 0);
   check("最後のトラッカーの退室で tracked（connected=0・未確定）が届く", trackedGone && trackedGone.tracker.locked === false);
 
+  // マーカー ID の衝突（Fable レビューの指摘）: ゴーグル用の trackId は原点マーカー（room 設定の markerId）を避け、
+  // 追加マーカーの配置は TRACK_ID_FIRST 以上・割当済みの trackId と重なるものを拒否する
+  {
+    const cfgClash = { ...cfg, room: "clash", markerId: String(TRACK_ID_FIRST) };
+    const d = connect(cfgClash, "Dave");
+    const wd = await d.waitFor((m) => m.type === "welcome");
+    const e = connect(cfgClash, "Eve");
+    const we = await e.waitFor((m) => m.type === "welcome");
+    check("trackId の割当は原点マーカーの ID（markerId=10）を避ける（10 は飛ばして 11, 12）", wd && we && wd.trackId === TRACK_ID_FIRST + 1 && we.trackId === TRACK_ID_FIRST + 2, JSON.stringify({ d: wd?.trackId, e: we?.trackId }));
+    const ovc = connect({ ...cfgClash, role: "overview" });
+    await ovc.waitFor((m) => m.type === "welcome");
+    ovc.send({ type: "markers", markers: [{ id: TRACK_ID_FIRST + 1, face: "floor", pos: [0, -1.2, 1.25] }] });
+    const rejAssigned = await ovc.waitFor((m) => m.type === "rejected" && /ゴーグル/.test(m.reason));
+    ovc.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1.2, 1.25] }, { id: 20, face: "left", pos: [-1.5, 0, 1] }] });
+    await sleep(200);
+    const rejCount = ovc.msgs.filter((m) => m.type === "rejected" && /ゴーグル/.test(m.reason)).length;
+    check("割当済みの trackId（11）や TRACK_ID_FIRST 以上（20）の追加マーカーの配置は rejected で、配られない", rejAssigned !== null && rejCount === 2 && !d.msgs.some((m) => m.type === "markers"), `${rejAssigned?.reason} count=${rejCount}`);
+    ovc.send({ type: "markers", markers: [{ id: 1, face: "floor", pos: [0, -1.2, 1.25] }] });
+    const okMarkers = await d.waitFor((m) => m.type === "markers");
+    check("衝突しない配置（ID 1）は受理されて配られる", okMarkers && okMarkers.config.markers.length === 1 && okMarkers.config.markers[0].id === 1);
+    d.ws.close();
+    e.ws.close();
+    ovc.ws.close();
+  }
+
   // プロトコルバージョン / 08 のサーバーとは別パス
   const bad = connect({ ...cfg, v: "99" });
   const err = await bad.waitFor((m) => m.type === "error");

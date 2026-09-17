@@ -83,9 +83,15 @@ function isPlayer(room: Ctx, id: string): boolean {
   return !room.state.overviews.has(id) && !room.state.trackers.has(id);
 }
 
-/** 空いているマーカー ID のうち最小（入室順に 10, 11, …。退室した番号は次の人が使う） */
+/**
+ * 空いているマーカー ID のうち最小（入室順に 10, 11, …。退室した番号は次の人が使う）。
+ * 原点マーカー（room 設定の markerId）と追加マーカーの ID は避ける（衝突すると、トラッカーがそのプレイヤーのマーカーを
+ * 原点候補として消費し、永遠に「位置待ち」になる。Fable レビューの指摘）
+ */
 function allocTrackId(room: Ctx): number {
   const used = new Set(room.state.trackIds.values());
+  used.add(room.config.markerId);
+  for (const m of room.state.game.config.markers) used.add(m.id);
   let id = TRACK_ID_FIRST;
   while (used.has(id)) id++;
   return id;
@@ -312,7 +318,7 @@ export function splatoonOutsideInServer() {
           // 全員に状態を知らせる（スマホの HUD「トラッカー待ち」→「原点待ち」）
           electTracker(room);
           if (room.state.activeTracker !== id) console.log(`[splatoon-oi] ${id} tracker standby (active: ${room.state.activeTracker})`);
-          room.broadcast({ type: "tracked", t: now, tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
+          room.broadcast({ type: "tracked", tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         }
         return;
       }
@@ -362,10 +368,10 @@ export function splatoonOutsideInServer() {
             if (!pid || players.some((p) => p.player === pid)) continue;
             // 頭の位置（発射位置の検証）へは次の pose のときに反映する（game.updatePose は fist の申告も上書きするので、ここからは呼ばない）
             room.state.tracked.set(pid, { pos: e.pos, yaw: e.yaw, quality: e.quality, marker: e.id, atMs: now });
-            players.push({ ...e, player: pid, ageMs: 0 });
+            players.push({ ...e, player: pid });
           }
         }
-        room.broadcast({ type: "tracked", t: now, tracker: trackerStatus(room), players } satisfies ServerMessage);
+        room.broadcast({ type: "tracked", tracker: trackerStatus(room), players } satisfies ServerMessage);
         return;
       }
       if (msg.type === "start") {
@@ -462,7 +468,13 @@ export function splatoonOutsideInServer() {
           room.send(id, { type: "rejected", reason: "not overview" } satisfies ServerMessage);
           return;
         }
-        const invalid = validateMarkerLayout(msg.markers, room.config.markerId, game.config.floorDrop);
+        // ゴーグル用の ID（TRACK_ID_FIRST 以上・割当済みの trackId）と重なる配置は拒否する（トラッカーが原点候補として
+        // 消費してしまうため。共有の validateMarkerLayout は 08 と共用なので、ここで追加チェック。Fable レビューの指摘）
+        const assigned = new Set(room.state.trackIds.values());
+        const clash = msg.markers.find((m) => m.id >= TRACK_ID_FIRST || assigned.has(m.id));
+        const invalid =
+          validateMarkerLayout(msg.markers, room.config.markerId, game.config.floorDrop) ??
+          (clash ? `ID ${clash.id} はゴーグルのマーカー（ID ${TRACK_ID_FIRST} 以上・割当済み）と重なります` : null);
         const reason = invalid ?? (game.setMarkers(msg.markers, now) ? null : game.lastRejectReason);
         if (reason !== null) {
           // 拒否側は face が任意の文字列なので、そのままログに出さず枚数だけ
@@ -510,7 +522,7 @@ export function splatoonOutsideInServer() {
         // （スマホは最後の位置を保持し HUD に「トラッカー無し」か「原点未確定」）
         room.state.trackRate.forget(id);
         electTracker(room);
-        room.broadcast({ type: "tracked", t: now, tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
+        room.broadcast({ type: "tracked", tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         return;
       }
       room.state.game.leave(id);

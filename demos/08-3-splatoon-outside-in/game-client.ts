@@ -44,7 +44,7 @@ export type GameClientEvents = {
   /** 追加マーカーの配置が変わった（俯瞰画面の markers）。枠を作り直す（トラッカーは原点合わせの候補を作り直す） */
   onMarkers: (config: FieldConfig) => void;
   /** トラッカーの観測（全員に届く）。players は今回見えていた人だけ */
-  onTracked: (serverT: number, tracker: TrackerStatus, players: TrackedPlayer[]) => void;
+  onTracked: (tracker: TrackerStatus, players: TrackedPlayer[]) => void;
   onError: (reason: string) => void;
 };
 
@@ -128,7 +128,7 @@ export function connectGame(
         events.onMarkers(msg.config);
         break;
       case "tracked":
-        events.onTracked(msg.t, msg.tracker, msg.players);
+        events.onTracked(msg.tracker, msg.players);
         break;
       case "error":
         // バージョン・設定の不一致は再接続しても同じ結果なのでループを止める。

@@ -11,6 +11,7 @@
 //   - 発射が着弾して得点が入る（練習）。俯瞰画面の一覧に「トラッカー ID n」が出る
 //   - トラッカーがゴーグルを見失うと最後の位置を保持し HUD に "tracked (x.xs ago)"、また見えれば復帰する
 //   - 対戦開始 → 試合 → 途中終了 → 結果を閉じる（08 と同じ進行）
+//   - 原点を確定し直すと、ずらしたヨー（φ）もスナップして戻る / 再接続すると位置が届くまで案内が出て撃たない（Fable レビューの指摘）
 //   - 例外が出ていない
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -397,6 +398,57 @@ try {
   const dm1 = await readHud(p1);
   const dmOv = await readOverview();
   check("「結果を閉じる」で練習に戻る", dmOv.dismisses === 1 && dm1.phase === "practice" && dmOv.phase === "practice");
+
+  // ---- 原点を確定し直すと、位置だけでなくヨーもスナップする（Fable レビューの指摘）----
+  await p4.eval("document.querySelector('#tracker-lock').click()");
+  await sleep(1500);
+  const unlockedText = await p4.eval("document.querySelector('#tracker-lock')?.textContent");
+  const snapsBefore = await p1.eval("window.__outsideIn.yawSnaps()");
+  // 解除中（位置が来ない間）に φ を 40° ずらす。緩やかな補正（観測 1 回 10%）だけでは 1 秒で 2° 以内に戻らない
+  await p1.eval("window.__outsideIn.shiftPhiDeg(40)");
+  await sleep(300); // 次のフレームでアンカーの行列に反映される
+  const shifted = yawOf(await p1.eval("window.__outsideIn.selfForward()"));
+  let relockEnabled = await readLockButton();
+  const tRelock = Date.now();
+  while (relockEnabled !== "原点を確定" && Date.now() - tRelock < 5000) {
+    await sleep(200);
+    relockEnabled = await readLockButton();
+  }
+  await p4.eval("document.querySelector('#tracker-lock').click()");
+  await sleep(800);
+  const snapsAfter = await p1.eval("window.__outsideIn.yawSnaps()");
+  const relockYaw = yawOf(await p1.eval("window.__outsideIn.selfForward()"));
+  const relock1 = await readHud(p1);
+  check("「原点を解除」→「原点を確定」し直すと、ずらした φ（40°）が次の観測でスナップして戻る（ヨーが古いまま残らない）", unlockedText === "原点を確定" && Math.abs(shifted) > 30 && snapsAfter > snapsBefore && Math.abs(relockYaw) <= 2 && dist(relock1.self, P1_POS) < 0.05, `shifted=${shifted.toFixed(1)}° → ${relockYaw.toFixed(1)}° snaps ${snapsBefore}→${snapsAfter} ${relock1.track}`);
+
+  // ---- 再接続すると位置が届くまでアンカーを隠し、案内「位置が届くまで撃てません」を出す（Fable レビューの指摘）----
+  await p4.eval("window.__fakeTrack.hidden.add(10)");
+  const oldMe = relock1.me;
+  await p1.eval("window.__outsideIn.reconnect()");
+  const tRe = Date.now();
+  let re1 = await readHud(p1);
+  while (Date.now() - tRe < 10000 && !(re1.me.startsWith("p") && re1.me !== oldMe)) {
+    await sleep(300);
+    re1 = await readHud(p1);
+  }
+  await sleep(1500);
+  re1 = await readHud(p1);
+  const reMsg = (await p1.eval("window.__outsideIn.message()")) ?? "";
+  const reTrackId = await p1.eval("window.__outsideIn.trackId()");
+  const reSent = re1.sent;
+  console.log(`reconnect window1: ${show(re1)} trackId=${reTrackId} message=${JSON.stringify(reMsg)}`);
+  check("再接続（id が変わる）で位置が届くまで案内「ゴーグルのマーカー ID n … 届くまで撃てません」が出る（anchor が隠れる）", re1.me !== oldMe && /^waiting id=/.test(re1.track) && /ゴーグルのマーカー ID \d+/.test(reMsg) && /撃てません/.test(reMsg), `${re1.me} ${re1.track} ${JSON.stringify(reMsg)}`);
+  await sleep(1000);
+  check("位置が届くまでは撃たない（発射数が増えない）", (await readHud(p1)).sent === reSent, `${reSent}`);
+  await p4.eval("window.__fakeTrack.hidden.delete(10)");
+  const tBack = Date.now();
+  let reBack = await readHud(p1);
+  while (Date.now() - tBack < 5000 && !(reBack.trackId === reTrackId && dist(reBack.self, P1_POS) < 0.05)) {
+    await sleep(300);
+    reBack = await readHud(p1);
+  }
+  check("マーカーが見えると再接続後も位置が届いて追跡に戻る（割当 ID 10 を引き継ぐ）", reTrackId === 10 && reBack.trackId === 10 && dist(reBack.self, P1_POS) < 0.05, reBack.track);
+
   check("例外が出ていない", [p1, p2, p3, p4].every((p) => p.exceptions.length === 0), [p1, p2, p3, p4].flatMap((p) => p.exceptions).slice(0, 2).join(" | "));
   for (const l of p1.logs.filter((l) => l.startsWith("[game] joined")).slice(0, 1)) console.log(`window1 log: ${l}`);
   for (const l of p4.logs.filter((l) => l.startsWith("[tracker]")).slice(0, 3)) console.log(`tracker log: ${l}`);

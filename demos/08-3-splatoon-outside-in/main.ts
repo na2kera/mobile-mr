@@ -94,6 +94,13 @@ const TRACK_LOST_MS = numParam("trackLostMs", TRACK_STALE_MS, { min: 50, max: 30
 const YAW_MIN_QUALITY = numParam("yawQuality", 0.5, { min: 0, max: 1 });
 /** ヨーの補正の速さ（観測 1 回あたり角度差のこの割合だけ寄せる。1 で即座） */
 const YAW_SMOOTH = numParam("yawSmooth", 0.1, { min: 0.01, max: 1 });
+/**
+ * ヨーの緩やかな補正を止めるカメラのヨー角速度 [deg/s]。観測はトラッカーの検出時刻、ジャイロのヨーは受信時刻のものなので、
+ * 首を振っている間は「角速度 × 遅延」だけ目標がずれる（60°/s × 100ms ≈ 6°）。スナップには適用しない
+ */
+const YAW_MAX_RATE_DPS = numParam("yawMaxRate", 30, { min: 1, max: 3600 });
+/** 最後の発射からこの時間内は φ の緩やかな補正と見失い明けの位置スナップを保留する [ms]（08 の canSnap と同じ） */
+const SNAP_HOLD_AFTER_SHOT_MS = 300;
 
 const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
@@ -511,8 +518,19 @@ let trackedCount = 0;
 const trackedPos = new THREE.Vector3();
 /** アンカーの Y 回転 φ [rad]（ワールドでのカメラのヨー − トラッカーのヨー） */
 let anchorPhi = 0;
-/** φ を一度でも決めたか（最初の観測はスナップ、以後は緩やかに寄せる） */
+/**
+ * φ を決めたか（false の間の最初の観測はスナップ、以後は緩やかに寄せる）。初回・見失い明け・再接続（onWelcome）・
+ * 原点の確定し直し（locked の立ち上がり）で false に戻し、位置と一緒にヨーもスナップさせる
+ */
 let phiSet = false;
+/** 見失い明けの位置スナップを連射中で保留している（発射から SNAP_HOLD_AFTER_SHOT_MS 経てば次の観測でスナップ） */
+let resnapPending = false;
+/** ヨーをスナップした回数（ヘッドレス確認用） */
+let yawSnaps = 0;
+/** 直近のカメラのヨー角速度 [deg/s]（毎フレーム。急に止めても次の観測まで残るよう減衰付きのピーク値） */
+let camYawRateDps = 0;
+let prevCamYaw: number | null = null;
+let prevCamYawMs = 0;
 /** 直近の φ の補正量 [deg]（HUD の Δyaw=） */
 let lastPhiCorrectionDeg = 0;
 /** 直近のヨー補正に使った観測の品質（HUD） */
@@ -529,7 +547,24 @@ function isTracked(now: number): boolean {
   return now - lastTrackedMs <= TRACK_LOST_MS;
 }
 
-function onTracked(_serverT: number, status: TrackerStatus, players: TrackedPlayer[]) {
+/** 毎フレーム: カメラのヨー角速度（ヨーの補正を首振り中に止めるため） */
+function updateCameraYawRate(now: number) {
+  const yaw = cameraYawWorld();
+  if (prevCamYaw !== null && now > prevCamYawMs) {
+    const dt = now - prevCamYawMs;
+    const rate = THREE.MathUtils.radToDeg(Math.abs(wrapAngle(yaw - prevCamYaw))) / (dt / 1000);
+    camYawRateDps = Math.max(rate, camYawRateDps * Math.exp(-dt / 100));
+  }
+  prevCamYaw = yaw;
+  prevCamYawMs = now;
+}
+
+function onTracked(status: TrackerStatus, players: TrackedPlayer[]) {
+  // 原点を確定し直した（locked の立ち上がり）: 部屋座標系が変わり得るので、次の観測で位置もヨーもスナップする
+  if (status.locked && !oiStatus.locked) {
+    phiSet = false;
+    resnapPending = false;
+  }
   oiStatus = status;
   const me = players.find((p) => p.player === selfId);
   if (!me) return;
@@ -540,17 +575,31 @@ function onTracked(_serverT: number, status: TrackerStatus, players: TrackedPlay
   trackedTarget.pos.set(me.pos[0], me.pos[1], me.pos[2]);
   trackedTarget.yaw = me.yaw;
   trackedTarget.quality = me.quality;
-  // 見失っていた間に歩いていたら古い位置から滑らせず、その場へ置く（marker-anchor.ts の resnap と同じ考え）
-  if (first || !isTracked(now)) trackedPos.copy(trackedTarget.pos);
+  // 連射中（最後の発射から 300ms 以内）は見失い明けのスナップと φ の緩やかな補正を保留する（08 の canSnap と同じ。
+  // 撃っている最中に視界の塗りや玉が跳ねないように）。初回と原点の確定し直し（phiSet = false）は保留しない
+  const canSnap = now - lastShotMs > SNAP_HOLD_AFTER_SHOT_MS;
+  if (!first && phiSet && !isTracked(now)) resnapPending = true;
+  // 見失っていた間に歩いていたら古い位置から滑らせず、その場へ置く（marker-anchor.ts の resnap と同じ考え）。ヨーも一緒にスナップ
+  if (first || !phiSet || (resnapPending && canSnap)) {
+    trackedPos.copy(trackedTarget.pos);
+    phiSet = false;
+    resnapPending = false;
+  }
   lastTrackedMs = now;
-  // ヨー: 品質が高い観測だけ。最初はスナップ、以後はジャイロのドリフトを消すために緩やかに寄せる
-  if (me.quality >= YAW_MIN_QUALITY || !phiSet) {
-    camera.updateMatrixWorld();
+  camera.updateMatrixWorld();
+  if (!phiSet) {
+    // スナップ: 品質・角速度・連射によらず
     const target = anchorYaw(cameraYawWorld(), me.yaw);
-    const next = phiSet ? approachAngle(anchorPhi, target, YAW_SMOOTH) : target;
+    lastPhiCorrectionDeg = THREE.MathUtils.radToDeg(Math.abs(wrapAngle(target - anchorPhi)));
+    anchorPhi = target;
+    phiSet = true;
+    yawSnaps++;
+    lastYawQuality = me.quality;
+  } else if (me.quality >= YAW_MIN_QUALITY && canSnap && camYawRateDps <= YAW_MAX_RATE_DPS) {
+    // 緩やかな補正: 品質が高く、首を振っておらず、連射中でない観測だけ（ジャイロのドリフトを消す）
+    const next = approachAngle(anchorPhi, anchorYaw(cameraYawWorld(), me.yaw), YAW_SMOOTH);
     lastPhiCorrectionDeg = THREE.MathUtils.radToDeg(Math.abs(wrapAngle(next - anchorPhi)));
     anchorPhi = next;
-    phiSet = true;
     lastYawQuality = me.quality;
   }
 }
@@ -789,6 +838,11 @@ function connect(name: string) {
         oiStatus = info.tracker;
         trackedTarget = null;
         lastTrackedMs = -Infinity;
+        // 位置が届くまでは撃てない（サーバーも "not tracked yet" で拒否する）ので、アンカーを隠して案内を出す。
+        // 次の観測で位置もヨーもスナップする
+        anchor.visible = false;
+        phiSet = false;
+        resnapPending = false;
         applyFieldConfig(cfg);
         [...peers.keys()].forEach(removePeer);
         peerIds.forEach(createPeer);
@@ -1106,6 +1160,8 @@ function remainingSec(now: number): number {
   return Math.max(0, (auth.state.phaseEndsAt - auth.state.t) / 1000 - (now - auth.recvMs) / 1000);
 }
 
+/** 直近の視界内の案内（ヘッドレス確認用） */
+let messageText = "";
 function updateMessages(now: number) {
   const s = auth?.state;
   if (s) {
@@ -1184,6 +1240,7 @@ function updateMessages(now: number) {
     text = `残り ${Math.ceil(remainingSec(now))} 秒（あなたは ${myColor ? inkColorName(myColor) : "-"}）\nパーで塗る ／ グーで補充`;
     color = myColor ? `#${inkColorHex(myColor).toString(16).padStart(6, "0")}` : "#e8eaed";
   }
+  messageText = text;
   message.set(text, color);
 }
 
@@ -1425,6 +1482,20 @@ const dbgQuat = new THREE.Quaternion();
   /** ピアの表示位置（field 座標系）。id → [x, y, z]（表示中のものだけ） */
   peers: (): Record<string, V3> => Object.fromEntries([...peers].filter(([, p]) => p.group.visible).map(([id, p]) => [id, [p.group.position.x, p.group.position.y, p.group.position.z] as V3])),
   phiDeg: () => THREE.MathUtils.radToDeg(anchorPhi),
+  /** φ をずらす（原点の確定し直しでヨーがスナップすることの確認用） */
+  shiftPhiDeg: (deg: number) => {
+    anchorPhi += THREE.MathUtils.degToRad(deg);
+  },
+  yawSnaps: () => yawSnaps,
+  /** 視界内の案内の文言 */
+  message: () => messageText,
+  /** 接続を張り直す（再接続で案内が出ることの確認用。pageshow の bfcache 復帰と同じ経路） */
+  reconnect: () => {
+    const name = readPlayerName();
+    client?.dispose();
+    // サーバーが古い接続の退室を処理してから入り直す（空いたマーカー ID を引き継げるように）
+    if (name !== null) setTimeout(() => connect(name), 500);
+  },
   trackId: () => myTrackId,
 };
 
@@ -1458,6 +1529,7 @@ renderer.setAnimationLoop(() => {
     }
   }
   camera.updateMatrixWorld();
+  updateCameraYawRate(now);
   updateAnchor(now);
   const tracking = anchor.visible && isTracked(now);
   // 枠の色: トラッカーに追跡されている間は青、見失っている間は赤（08 の「使っているマーカー」の区別は無い）
