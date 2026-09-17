@@ -25,3 +25,5 @@ dist-ssr
 
 # MediaPipe のモデル（npm run fetch:models で取得。バイナリなので管理しない）
 public/models/*.task
+# AprilTag の WASM 検出器（npm run fetch:apriltag で取得。demos/08-5-splatoon-apriltag）
+public/vendor/apriltag/
