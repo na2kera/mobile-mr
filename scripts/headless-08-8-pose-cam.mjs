@@ -125,7 +125,7 @@ class Page {
     });
   }
   async eval(expr) {
-    const r = await this.send("Runtime.evaluate", { expression: expr, returnByValue: true });
+    const r = await this.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
     return r.result?.result?.value ?? null;
   }
 }
@@ -329,6 +329,8 @@ try {
   // ---- トラッカーのウィンドウ（俯瞰画面 + ?tracker=1&fakecam=1&fakeBodies=）----
   const p4 = await newWindow("tracker");
   await p4.send("Page.navigate", { url: TRACKER });
+  // 遅い PC の再現: CPU_THROTTLE=15 等で、スマホ 2・俯瞰・トラッカーのページの CPU を遅くする（検出の間隔が 0.5 秒を超えても割当が外れないことの確認）
+  if (Number(process.env.CPU_THROTTLE) > 1) for (const p of [p1, p2, p3, p4]) await p.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.CPU_THROTTLE) });
   const readPose = async () => parsePoseHud((await p4.eval("document.querySelector('#hud')?.textContent")) ?? "");
   let tOv = await waitUntil(async () => {
     const o = await readOverview(p4);
@@ -377,11 +379,22 @@ try {
   };
 
   // ---- 体 0 が手を挙げる → 1 人目に割り当たる。2 人目はまだ ----
-  await p4.eval("window.__fakePose.bodies[0].raised = true");
-  await sleep(250);
-  const early = await readPose();
+  // 挙げる → HUD に挙手（:up）が出たらすぐ読んで下ろす、をページの中で行う（負荷で CDP の評価が遅れても挙げている時間が延びないように）
+  const early = parsePoseHud(
+    (await p4.eval(`new Promise((resolve) => {
+      const t0 = performance.now();
+      window.__fakePose.bodies[0].raised = true;
+      const poll = () => {
+        const t = document.querySelector('#hud')?.textContent ?? "";
+        if (/persons=\\S*:up/.test(t) || performance.now() - t0 > 3000) {
+          window.__fakePose.bodies[0].raised = false;
+          resolve(t);
+        } else setTimeout(poll, 10);
+      };
+      poll();
+    })`)) ?? "",
+  );
   check("手を挙げて 0.5 秒経つまでは割り当てない", early.assigns === 0 && early.persons.some((p) => p.raised), JSON.stringify(early));
-  await p4.eval("window.__fakePose.bodies[0].raised = false");
   await sleep(300);
   const a1 = await raise(0);
   check("体 0 が手を挙げ続けると入室順の 1 人目に割り当たり、次は 2 人目", a1 && a1.assigns === 1 && a1.persons.filter((p) => p.player === me1).length === 1 && a1.next === me2, JSON.stringify(a1));
@@ -433,12 +446,41 @@ try {
   check("トラッカーの送る観測にプレイヤーと番号が付いている（local= の players）", tOv2.local.includes(`${h1.me}:10:`) && tOv2.local.includes(`${h2.me}:11:`), tOv2.local);
 
   // ---- 短い隠れ（0.3 秒）: 割当は残り、見えればそのまま追跡が続く（復帰は 0.5 秒以内だけ）----
-  await p4.eval("window.__fakePose.hidden.add(1)");
-  await sleep(250);
-  await p4.eval("window.__fakePose.hidden.delete(1)");
-  await sleep(800);
-  const short = await readPose();
-  check("0.3 秒隠れても割当は残る（再び見えた人物に同じプレイヤーが付いたまま）", short.persons.length === 2 && short.persons.some((p) => p.player === me2) && short.next === "none", JSON.stringify(short));
+  // 隠す・戻すはページの中で検出の回数を見て行う（CDP の評価を 2 回に分けると負荷で遅れる）。隠している間に 2 回以上検出を回し、
+  // 「最後に映った検出」から「戻した後の最初の検出」までの時間を実測する。負荷でメインスレッドが詰まってこれが 0.5 秒を超えると
+  // 仕様どおり割当が外れるので、その試行は数えずに挙げ直してやり直す（最大 5 回）
+  const shortHide = () =>
+    p4.eval(`new Promise((resolve) => {
+      const fp = window.__fakePose;
+      const wait = (cond, then) => { const loop = () => (cond() ? then() : setTimeout(loop, 2)); loop(); };
+      const n0 = fp.frame.n;
+      wait(() => fp.frame.n > n0, () => {
+        const seenAt = fp.frame.atMs;
+        const n1 = fp.frame.n;
+        fp.hidden.add(1);
+        wait(() => fp.frame.n >= n1 + 2 && performance.now() - seenAt >= 250, () => {
+          fp.hidden.delete(1);
+          const n2 = fp.frame.n;
+          wait(() => fp.frame.n > n2, () => resolve({ spanMs: Math.round(fp.frame.atMs - seenAt), hiddenFrames: n2 - n1 }));
+        });
+      });
+    })`);
+  const keptMe2 = (h) => h.persons.length === 2 && h.persons.some((p) => p.player === me2) && h.next === "none";
+  let short = null;
+  let shortInfo = null;
+  const shortTries = [];
+  for (let i = 0; i < 5; i++) {
+    shortInfo = await shortHide();
+    short = await waitUntil(async () => {
+      const h = await readPose();
+      return keptMe2(h) ? h : null;
+    }, 1500, 100);
+    short = short ?? (await readPose());
+    shortTries.push(`${shortInfo?.spanMs}ms/${shortInfo?.hiddenFrames}f:${keptMe2(short) ? "kept" : "released"}`);
+    if (shortInfo && shortInfo.spanMs <= 500) break;
+    if (!keptMe2(short)) await raise(1);
+  }
+  check("0.3 秒隠れても割当は残る（隠している間に検出を 2 回以上回し、最後に映ってから 0.5 秒以内に戻す。再び見えた人物に同じプレイヤーが付いたまま）", shortInfo && shortInfo.spanMs <= 500 && shortInfo.hiddenFrames >= 2 && keptMe2(short), `${JSON.stringify(short)} tries=${shortTries.join(",")}`);
 
   // ---- 長い隠れ（3 秒）: 割当は外れ、スマホは最後の位置を表示に保持するが撃てない → 見えても自動では戻らず、手を挙げると戻る ----
   await p4.eval("window.__fakePose.hidden.add(1)");

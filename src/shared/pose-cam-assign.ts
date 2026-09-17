@@ -1,8 +1,14 @@
 // 08-8（PC カメラ + MediaPipe Pose）の「誰がどのプレイヤーか」の対応づけ。three.js に依存しない（Node の回帰テストから import する）。
 // マーカーが無いので、入室した順に俯瞰画面で「次の人は手を挙げてください」→ 手を挙げた人物にその順のプレイヤーを割り当てる。
 // 人物の見た目は区別できないので、取り違えるくらいなら割当を外して手を挙げ直してもらう（安全側。Codex / Fable レビューの指摘）:
-//   1. 期限切れ（lostMs 見えなかった）の人物は、対応づけの**前**に消す（古い割当・挙手の状態が新しい検出に引き継がれない）
-//   2. 割当済みの人物が reacquireMs を超えて見えなかったら、対応づけの前に割当を外す（戻ってきても自動では戻さない。手を挙げ直す）
+//   1. 期限切れ（lostMs 見えなかった）の人物は一覧から消す（古い割当・挙手の状態が新しい検出に引き継がれない）
+//   2. 割当済みの人物が reacquireMs を超えて見えなかったら、割当を外す（戻ってきても自動では戻さない。手を挙げ直す）。
+//      1・2 の「見えなかった」は、推論（update）で実際に映っていなかったこと: 対応しなかった更新の時点で、最後に見えてから
+//      lostMs / reacquireMs を超えていて、かつ続けて MIN_MISSED_UPDATES 回以上対応していない。判定は対応づけの後（映らなかった更新）で行う。
+//      推論が遅い端末・メインスレッドが詰まって更新の間隔が reacquireMs を超えても、毎回の推論に映っている人の割当は外さない
+//      （以前は対応づけの前に「最後に見えてからの経過時間」だけで外していたので、負荷で更新が 0.5 秒空くと映っている人の割当が外れていた）。
+//      更新そのものが止まっていた（原点の解除・トラッカーの停止。interrupt()）後の最初の更新だけは、従来どおり対応づけの**前**に
+//      経過時間だけで外す・消す（止まっている間に人が入れ替わり得るため）
 //   3. 同じ人物の重複検出（位置が mergeM 以内）は 1 つにまとめる（可視性の合計 score が大きい方を残す）
 //   4. 対応づけ: 各人物の「速度で予測した位置」と検出の距離が近い組から貪欲に取る。距離の上限は経過時間に比例
 //      （matchM は 66ms あたりの基準）。対応が付かない検出は新しい人物（未割当）
@@ -41,6 +47,8 @@ export type PersonTrack<T extends PersonDetection> = {
   /** 直近の検出 */
   det: T;
   lastSeenMs: number;
+  /** 続けて対応しなかった更新の回数（見えたら 0。interrupt() で Infinity = 次の更新の対応づけの前に経過時間だけで判定） */
+  missed: number;
   /** 速度 [m/ms]（予測用。見失いが reacquireMs を超えたら 0 から） */
   vel: V3;
   /** 割り当てたプレイヤー id（未割当なら null） */
@@ -60,6 +68,12 @@ export type AssignEvent =
 const MATCH_BASE_MS = 66;
 /** 距離の上限の経過時間の下限 [ms]（間隔が短いときに上限が小さくなりすぎないように） */
 const MATCH_MIN_MS = 33;
+/**
+ * 見失い（割当を外す・一覧から消す）とみなすのに要る「続けて対応しなかった更新」の回数。
+ * 通常の間隔（66ms）では 2 回 = 約 0.13 秒で、経過時間（0.5 秒・2 秒）の方が先に効く。推論が遅い（間隔が 0.5 秒を超える）ときは
+ * 1 回の検出漏れでは外さず、2 回続けて映っていなかったら外す（ただし interrupt() の後は回数を問わない）
+ */
+export const MIN_MISSED_UPDATES = 2;
 
 type Snapshot = { pos: V3; vel: V3; atMs: number };
 type Pair<T extends PersonDetection> = { a: PersonTrack<T>; b: PersonTrack<T>; snapA: Snapshot; snapB: Snapshot };
@@ -85,10 +99,10 @@ export class PoseAssigner<T extends PersonDetection> {
   update(detections: readonly T[], now: number, players: readonly string[]): AssignEvent[] {
     const o = this.opts;
     const events: AssignEvent[] = [];
-    // 1. 期限切れの人物を先に消す（対応づけで古い人物が拾われないように）
+    // 1. 更新が止まっていた（interrupt）後は、期限切れの人物を対応づけの前に消す（古い人物が拾われないように）
     for (let i = this.tracks.length - 1; i >= 0; i--) {
       const tr = this.tracks[i];
-      if (now - tr.lastSeenMs > o.lostMs) {
+      if (tr.missed === Infinity && this.isExpired(tr, now)) {
         this.releaseWithPartners(tr, events, "lost");
         this.tracks.splice(i, 1);
       }
@@ -96,12 +110,9 @@ export class PoseAssigner<T extends PersonDetection> {
     // 居なくなったプレイヤーの割当を外す
     const present = new Set(players);
     for (const tr of this.tracks) if (tr.player !== null && !present.has(tr.player)) this.releaseWithPartners(tr, events, null);
-    // 2. 見失いが reacquireMs を超えた割当を、対応づけの前に外す（戻ってきても自動では戻さない）。
+    // 2. 更新が止まっていた（interrupt）後は、止まっていた時間が reacquireMs を超えた割当を対応づけの前に外す（戻ってきても自動では戻さない）。
     //    要確認の相手も外す（どちらが誰か分からないまま片方が消えたので）
-    for (const tr of this.tracks) {
-      if (tr.player === null || now - tr.lastSeenMs <= o.reacquireMs) continue;
-      this.releaseWithPartners(tr, events, "lost");
-    }
+    for (const tr of this.tracks) if (tr.missed === Infinity && this.isLost(tr, now)) this.releaseWithPartners(tr, events, "lost");
     // 3. 重複検出をまとめる
     const dets = dedupe(detections, o.mergeM);
     // 4. 予測位置との距離で対応づけ
@@ -129,8 +140,16 @@ export class PoseAssigner<T extends PersonDetection> {
     }
     dets.forEach((det, di) => {
       if (usedD.has(di)) return;
-      this.tracks.push({ key: this.nextKey++, det, lastSeenMs: now, vel: [0, 0, 0], player: null, raisedSinceMs: det.raised ? now : null, pending: false });
+      this.tracks.push({ key: this.nextKey++, det, lastSeenMs: now, missed: 0, vel: [0, 0, 0], player: null, raisedSinceMs: det.raised ? now : null, pending: false });
     });
+    // 対応しなかった人物: 回数を数え、見失い（割当を外す）・期限切れ（一覧から消す）を判定する。要確認の相手も外す
+    for (let i = this.tracks.length - 1; i >= 0; i--) {
+      const tr = this.tracks[i];
+      if (tr.lastSeenMs === now) continue;
+      tr.missed++;
+      if (this.isLost(tr, now)) this.releaseWithPartners(tr, events, "lost");
+      if (this.isExpired(tr, now)) this.tracks.splice(i, 1);
+    }
     // 5. 要確認: 既存の組を解消し、新しく近づいた・融合した組を足す
     this.resolvePairs(now, events);
     this.detectPairs(now, before);
@@ -160,6 +179,24 @@ export class PoseAssigner<T extends PersonDetection> {
   /** プレイヤーの人物（割当が無ければ null） */
   trackOf(player: string): PersonTrack<T> | null {
     return this.tracks.find((t) => t.player === player) ?? null;
+  }
+
+  /**
+   * 更新が止まっていた（原点の解除・トラッカーの停止など、推論を回していなかった）ことを知らせる。
+   * 次の更新では対応づけの前に、「続けて対応しなかった回数」を問わず経過時間だけで見失い・期限切れを判定する（止まっている間に人が入れ替わり得るため）
+   */
+  interrupt() {
+    for (const tr of this.tracks) tr.missed = Infinity;
+  }
+
+  /** lostMs を超えて・MIN_MISSED_UPDATES 回以上続けて見えていない（一覧から消す） */
+  private isExpired(tr: PersonTrack<T>, now: number): boolean {
+    return now - tr.lastSeenMs > this.opts.lostMs && tr.missed >= MIN_MISSED_UPDATES;
+  }
+
+  /** 割当済みで、reacquireMs を超えて・MIN_MISSED_UPDATES 回以上続けて見えていない */
+  private isLost(tr: PersonTrack<T>, now: number): boolean {
+    return tr.player !== null && now - tr.lastSeenMs > this.opts.reacquireMs && tr.missed >= MIN_MISSED_UPDATES;
   }
 
   /** 割当をやり直す（全員を未割当に戻す。人物の追跡は続ける）。いま挙げている手は数えない */
@@ -209,6 +246,7 @@ export class PoseAssigner<T extends PersonDetection> {
     }
     tr.det = det;
     tr.lastSeenMs = now;
+    tr.missed = 0;
     if (!det.raised) tr.raisedSinceMs = null;
     else if (tr.raisedSinceMs === null) tr.raisedSinceMs = now;
   }

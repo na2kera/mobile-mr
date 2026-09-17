@@ -83,6 +83,8 @@ export type TrackerOptions = {
      * モデルの読み込み・推論の呼び出し・例外処理の経路を PC で通すため。観測は合成の体のまま
      */
     useModel: boolean;
+    /** 合成の体で人物の検出（割当の更新）を 1 回回すたびに呼ぶ（ヘッドレス確認が「何回の検出で隠れていたか」を数える） */
+    onFrame?: (atMs: number) => void;
   } | null;
   /** 検出のたびに呼ぶ（locked と観測。観測は原点が確定していて、割当のある人物だけ） */
   onTrack: (locked: boolean, entries: TrackEntry[]) => void;
@@ -219,6 +221,8 @@ export function createTracker(opts: TrackerOptions): Tracker {
       stream?.getTracks().forEach((t) => t.stop());
       stream = null;
       self.running = false;
+      // 止めている間は推論しないので、再開後は経過時間だけで見失いを判定する（止まっている間に人が入れ替わり得る）
+      assigner.interrupt();
       self.info = "stopped";
       opts.onChange();
     },
@@ -236,6 +240,8 @@ export function createTracker(opts: TrackerOptions): Tracker {
     unlock() {
       camToField = null;
       self.locked = false;
+      // 原点を解除している間は人物の推論を回さないので、確定し直した後は経過時間だけで見失いを判定する（0.5 秒を超えていれば挙げ直し）
+      assigner.interrupt();
       self.lastEntries = [];
       opts.onChange();
     },
@@ -430,6 +436,7 @@ export function createTracker(opts: TrackerOptions): Tracker {
         }
       }
       result = fakePoses();
+      opts.fake.onFrame?.(now);
       inputW = FAKE_W;
       inputH = FAKE_H;
       detMs = poseTracker?.lastMs ?? 0;

@@ -596,7 +596,9 @@ let trackerRejected = "";
 let assignsDone = 0;
 /** フェイクカメラの合成の体（ヘッドレス確認から window.__fakePose.bodies[i].raised で手を挙げ、hidden（体の index）で隠す） */
 const fakePoseHidden = new Set<number>();
-if (FAKE_CAM) (window as unknown as { __fakePose: unknown }).__fakePose = { bodies: FAKE_BODIES, hidden: fakePoseHidden };
+/** 合成の体での人物の検出の回数と直近の時刻（performance.now()。ヘッドレス確認が隠している間の検出を数える） */
+const fakePoseFrame = { n: 0, atMs: 0 };
+if (FAKE_CAM) (window as unknown as { __fakePose: unknown }).__fakePose = { bodies: FAKE_BODIES, hidden: fakePoseHidden, frame: fakePoseFrame };
 
 /** 入室順のプレイヤーと番号（peers は welcome の peers → join の順に作られる = 入室順） */
 function trackerPlayers(): { id: string; trackId: number }[] {
@@ -683,7 +685,19 @@ async function startTracker() {
     raiseHoldMs: RAISE_HOLD_MS,
     players: trackerPlayers,
     playerLabel: playerName,
-    fake: FAKE_CAM ? { bodies: FAKE_BODIES, cam: FAKE_TRACK_CAM, hidden: fakePoseHidden, goggles: FAKE_GOGGLES, useModel: FAKE_POSE_MODEL } : null,
+    fake: FAKE_CAM
+      ? {
+          bodies: FAKE_BODIES,
+          cam: FAKE_TRACK_CAM,
+          hidden: fakePoseHidden,
+          goggles: FAKE_GOGGLES,
+          useModel: FAKE_POSE_MODEL,
+          onFrame: (atMs) => {
+            fakePoseFrame.n++;
+            fakePoseFrame.atMs = atMs;
+          },
+        }
+      : null,
     onTrack: (locked, entries: TrackEntry[]) => {
       if (trackerClient?.sendTrack(locked, entries)) tracksSent++;
       // 拒否されていた（2 台目）なら、次の応答で状態が変わるまで表示は残す（onRejected / onTracked で更新）

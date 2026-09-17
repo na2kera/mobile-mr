@@ -256,6 +256,7 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
   check("見失い: 0.5 秒を超えると p1 の割当が外れる（released lost。次は p1）", a.trackOf("p1") === null && a.nextPlayer(players) === "p1" && rel.some((e) => e.kind === "released" && e.player === "p1" && e.reason === "lost"), JSON.stringify(rel));
   a.update([P(0.54, false, 2.5), P(-0.5)], leftAt + 700, players);
   check("見失い: 0.5 秒を超えてから同じ場所に戻っても自動では割り当たらない", a.trackOf("p1") === null);
+  a.update([P(-0.5)], leftAt + 1500, players);
   a.update([P(-0.5)], leftAt + 2800, players);
   check("見失い: lostMs（2 秒）を超えた人物は一覧から消える", a.tracks.length === 1);
   // 1. 期限切れの人物は対応づけの前に消す（古い「挙げ始めた時刻」が新しい検出に引き継がれない）
@@ -264,8 +265,65 @@ const L_SH = 11, R_SH = 12, L_EAR = 7, R_EAR = 8, NOSE = 0, L_EYE = 2, R_EYE = 5
     e.update([P(0, true)], 0, []);
     e.update([P(0, true)], 100, []);
     const oldKey = e.tracks[0].key;
+    e.update([], 1000, []);
+    e.update([], 2000, []);
+    e.update([], 3150, []);
     const got = e.update([P(0, true)], 3200, ["p1"]);
     check("期限切れ: 3 秒途切れた後に同じ場所の検出は新しい人物（古い挙手の時刻を引き継がず、すぐには割り当たらない）", got.length === 0 && e.tracks.length === 1 && e.tracks[0].key !== oldKey && e.tracks[0].raisedSinceMs === 3200, JSON.stringify({ got, keys: e.tracks.map((x) => x.key) }));
+  }
+  // 推論が遅い（更新の間隔が reacquireMs を超える）: 毎回映っている人の割当は外さない。見失いは「経過時間」かつ「2 回続けて映っていない」
+  {
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+    s.update([P(0, true)], 0, ["p1"]);
+    let evs = [];
+    for (let i = 1; i <= 5; i++) evs = evs.concat(s.update([P(0.01 * i)], 800 * i, ["p1"]));
+    check("遅い推論: 更新が 0.8 秒おきでも毎回映っていれば割当は外れない", s.trackOf("p1") !== null && s.tracks.length === 1 && evs.length === 0, JSON.stringify(evs));
+    evs = s.update([], 4800, ["p1"]);
+    check("遅い推論: 1 回だけ映らなかった（0.8 秒）ではまだ外さない", s.trackOf("p1") !== null && evs.length === 0, JSON.stringify(evs));
+    evs = s.update([P(0.05)], 5600, ["p1"]);
+    check("遅い推論: 1 回の検出漏れの後に映れば同じ人物に復帰する", s.trackOf("p1") !== null && s.tracks.length === 1 && evs.length === 0, JSON.stringify(evs));
+    s.update([], 6400, ["p1"]);
+    evs = s.update([], 7200, ["p1"]);
+    check("遅い推論: 2 回続けて映らなければ外す（released lost）", s.trackOf("p1") === null && evs.some((e) => e.kind === "released" && e.reason === "lost"), JSON.stringify(evs));
+    evs = s.update([P(0.05)], 8000, ["p1"]);
+    check("遅い推論: 外れた後に映っても自動では戻らない", s.trackOf("p1") === null && evs.length === 0, JSON.stringify(evs));
+    s.update([], 8800, ["p1"]);
+    s.update([], 9600, ["p1"]);
+    s.update([], 10400, ["p1"]);
+    check("遅い推論: lostMs を超えて 2 回以上映らなかった人物は消える", s.tracks.length === 0, JSON.stringify(s.tracks.map((x) => x.key)));
+  }
+  {
+    // 普通の間隔（66ms）では回数の条件はすぐ満たされるので、従来どおり 0.5 秒で外れる
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+    s.update([P(0, true)], 0, ["p1"]);
+    let ev = [];
+    for (let tt = 66; tt <= 462; tt += 66) ev = ev.concat(s.update([], tt, ["p1"]));
+    const keptAt462 = s.trackOf("p1") !== null;
+    ev = ev.concat(s.update([], 528, ["p1"]));
+    check("見失い: 66ms おきの更新では 0.5 秒以内は残り、0.5 秒を超えた更新で外れる", keptAt462 && s.trackOf("p1") === null && ev.some((e) => e.kind === "released" && e.player === "p1"), JSON.stringify(ev));
+  }
+  {
+    // 短い見失い（0.3 秒ぶん映らない）の直後に更新が詰まって、次に映ったのが最後に見えてから 0.5 秒超え: 映らなかった更新は 0.3 秒ぶんなので外さない
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+    s.update([P(0, true)], 0, ["p1"]);
+    s.update([], 150, ["p1"]);
+    s.update([], 300, ["p1"]);
+    const ev = s.update([P(0)], 900, ["p1"]);
+    check("見失い: 映らなかった更新が 0.3 秒ぶんで、次の更新が詰まって 0.9 秒後に映ったら割当は残る", s.trackOf("p1") !== null && ev.length === 0, JSON.stringify(ev));
+  }
+  {
+    // interrupt（原点の解除・トラッカーの停止で推論が止まっていた）: 回数を問わず経過時間で外す
+    const s = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
+    s.update([P(0, true)], 0, ["p1"]);
+    s.interrupt();
+    const quick = s.update([P(0)], 400, ["p1"]);
+    check("interrupt: 止まっていたのが 0.5 秒以内なら割当は残る", s.trackOf("p1") !== null && quick.length === 0, JSON.stringify(quick));
+    s.interrupt();
+    const late = s.update([P(0)], 1000, ["p1"]);
+    check("interrupt: 0.5 秒を超えて止まっていたら、映っていても割当を外す（止まっている間に入れ替わり得る）", s.trackOf("p1") === null && late.some((e) => e.kind === "released" && e.reason === "lost"), JSON.stringify(late));
+    s.interrupt();
+    s.update([P(0)], 3100, ["p1"]);
+    check("interrupt: lostMs を超えて止まっていたら人物も作り直す", s.tracks.length === 1 && s.tracks[0].missed === 0 && s.tracks[0].key !== 1, JSON.stringify(s.tracks.map((x) => x.key)));
   }
   // 割当のやり直し・退室
   const c = new PoseAssigner({ matchM: 0.6, lostMs: 2000, raiseHoldMs: 0 });
