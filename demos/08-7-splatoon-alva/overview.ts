@@ -991,7 +991,7 @@ function renderPanel() {
         .sort((a, b) => (s.scores[b.id] ?? 0) - (s.scores[a.id] ?? 0))
         .map((p) => {
           const peer = peers.get(p.id);
-          const marker = !peer || peer.lastPoseMs === -Infinity || now - peer.lastPoseMs > PEER_STALE_MS ? "-" : !peer.tracking ? "ロスト（最後の姿勢を維持）" : peer.markerIds.length > 0 ? peer.markerIds.join("+") : "?";
+          const marker = !peer || peer.lastPoseMs === -Infinity || now - peer.lastPoseMs > PEER_STALE_MS ? "-" : !peer.tracking ? "ロスト（最後の姿勢を維持）" : peer.markerIds.length > 0 ? peer.markerIds.join("+") : "SLAM"; // 08-7: 追跡中でマーカー ID が無い = SLAM で位置を動かしている
           return { p, pct: (((s.scores[p.id] ?? 0) / total) * 100).toFixed(1), ink: s.ink[p.id] ?? 1, win: s.winners?.includes(p.id), marker };
         })
     : [];
@@ -1072,7 +1072,7 @@ function renderHud() {
   const s = auth?.state;
   const now = performance.now();
   const text = s
-    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} resets=${resetsSent} dismisses=${dismissesSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "?" : "lost"}`).join(",")}`
+    ? `overview: room=${ROOM} me=${selfId} ws=${netStatus} phase=${s.phase} left=${remainingSec(now).toFixed(0)}s players=${s.players.map((p) => `${p.id}:${p.color}`).join(",")} scores=${s.players.map((p) => `${p.id}:${s.scores[p.id] ?? 0}`).join(",")} total=${s.totalCells} field=${fieldCfg.wallW}x${fieldCfg.wallH}x${fieldCfg.floorDepth}/${fieldCfg.floorDrop} markers=${describeMarkers(fieldCfg.markers ?? [])} live=${shots.size} seq=${s.seq} starts=${startsSent} stops=${stopsSent} resets=${resetsSent} dismisses=${dismissesSent} fields=${fieldsSent} markersSent=${markersSent} markerDrags=${markerDrags} peerMarkers=${[...peers].map(([id, p]) => `${id}:${p.tracking ? p.markerIds.join("+") || "SLAM" : "lost"}`).join(",")}`
     : `overview: room=${ROOM} ws=${netStatus}`;
   if (text !== lastHudText) {
     lastHudText = text;

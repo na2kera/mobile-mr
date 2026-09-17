@@ -8,6 +8,8 @@
 //     API: `await AlvaAR.Initialize(width, height, fov = 45)` → `alva.findCameraPose(imageData)`（Float32Array(16) の姿勢 or null）
 //   - dist/alva_ar_three.js: 姿勢を Three.js のカメラに当てる例（x 反転の四元数 / y・z 反転の位置）。座標系の確認用に置くだけで読まない
 //   - LICENSE: GPLv3 の全文
+//   - SOURCE.txt（このスクリプトが書き出す）: 対応ソースの入手先（リポジトリ・固定コミットのソースアーカイブ・ビルド手順の場所）。
+//     `vite build` で dist/vendor/alva/ に 3 ファイルと一緒に入るので、公開ビルドにもソースの案内が付く
 // 完全性: 3 ファイルとも SHA-256 を下に固定し、既存ファイルも新規ダウンロードも照合する（不一致なら取り直し、それでも不一致ならエラー終了）
 // ライセンス: **GPLv3**（AlvaAR 本体、および元になった OV²SLAM / ORB-SLAM2 も GPLv3）。
 //   このデモ（実験）限定で使い、Mobile MR SDK には入れない。配布（ビルド成果物の公開）をするなら GPLv3 の義務（ソースの提供等）が
@@ -28,6 +30,37 @@ const dir = fileURLToPath(new URL("../public/vendor/alva/", import.meta.url));
 await mkdir(dir, { recursive: true });
 
 const sha256Of = (buf) => createHash("sha256").update(buf).digest("hex");
+
+// GPLv3 の対応ソースの案内（公開ビルドに必ず LICENSE と同じ場所に置く。README の GPLv3 の節）
+const SOURCE_TXT = `AlvaAR — Corresponding Source / 対応ソースの入手先
+
+このディレクトリの alva_ar.js（WebAssembly を埋め込んだビルド済みファイル）と alva_ar_three.js は、
+AlvaAR（https://github.com/alanross/AlvaAR）のコミット ${COMMIT} の dist/ をそのまま配布しています（改変なし）。
+AlvaAR は GNU General Public License v3（GPLv3）で配布されています。ライセンス全文は同じディレクトリの LICENSE を参照してください。
+AlvaAR は OV²SLAM（https://github.com/ov2slam/ov2slam）と ORB-SLAM2（https://github.com/raulmur/ORB_SLAM2）を元にしており、これらも GPLv3 です。
+
+対応ソース（このビルド済みファイルを生成したソース一式）:
+  - リポジトリ: https://github.com/alanross/AlvaAR
+  - 固定コミット: ${COMMIT}
+  - ソースアーカイブ: https://github.com/alanross/AlvaAR/archive/${COMMIT}.zip
+                      https://github.com/alanross/AlvaAR/archive/${COMMIT}.tar.gz
+  - ビルド手順: 上記コミットの README.md の「Build」節
+      https://github.com/alanross/AlvaAR/blob/${COMMIT}/README.md#build
+    （Emscripten で src/libs/build.sh → src/slam で emcmake cmake .. / emmake make install。依存ライブラリは src/libs/ に同梱）
+
+This directory redistributes, unmodified, dist/alva_ar.js and dist/alva_ar_three.js of AlvaAR at commit ${COMMIT},
+licensed under GPLv3 (see LICENSE). The complete corresponding source is available at the URLs above.
+`;
+{
+  const dest = dir + "SOURCE.txt";
+  const existing = await readFile(dest, "utf8").catch(() => null);
+  if (existing === SOURCE_TXT) {
+    console.log("skip: SOURCE.txt は最新");
+  } else {
+    await writeFile(dest, SOURCE_TXT);
+    console.log("saved: public/vendor/alva/SOURCE.txt（GPLv3 の対応ソースの入手先）");
+  }
+}
 
 for (const { file, url, sha256 } of FILES) {
   const dest = dir + file;

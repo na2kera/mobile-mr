@@ -57,14 +57,13 @@ import type { Pose, Similarity } from "./slam-fusion";
 //   - 原点・スケール・向き（ヨー）は 08 と同じマーカー（createMarkerAnchor。既存ファイルは変更しない）で決める
 //   - マーカーが見えている間: 「field 座標系でのカメラの姿勢（マーカー + ジャイロ）」と「AlvaAR の姿勢」の組を集め、
 //     SLAM → field の相似変換（回転 + スケール + 平行移動）を推定し続ける（slam-fusion.ts）
-//   - マーカーが見えない間: SLAM の位置をその変換で field に写し、アンカーの位置だけを動かす（08 は最後の姿勢のまま止まる）。
+//   - マーカーが見えない間: 見失った瞬間の SLAM の位置とアンカーの位置を基準に、SLAM の位置の**増分**を変換の回転・スケールで
+//     field に写してアンカーの位置だけを動かす（切り替えで飛ばない。08 は最後の姿勢のまま止まる）。
 //     回転は 08 と同じジャイロ（DeviceOrientationControls）で、SLAM の回転は HUD の診断にだけ出す
 //   - AlvaAR が無い・初期化に失敗・例外が続いた・?slam=0 のときは 08 と同じ「マーカーのみ」
 //   - 追加の URL パラメータ（他は 08 と同名・同義）:
 //     ?slam=0（SLAM を使わない）&slamW=360（SLAM の入力画像の長辺 [px]。マーカーの detW とは別）&slamIntervalMs=50（間引き）
-//     &slamMaxFail=30（例外がこの回数続いたら止める）&slamLostMs=500（この時間姿勢が出なければロスト）
-//     &slamMinBaseline=0.15（変換の推定に要る基線 [m]。マーカーを見ながらこれだけ動くと SLAM が使えるようになる）
-//     &slamPairs=150（推定に使う組の数）&slamPairMs=100（組を足す間隔）&slamPairAgeMs=150（マーカーの採用からこの時間以内のフレームだけ組にする）
+//     &slamMinBaseline=0.15（変換の推定に要る動き = 軌道の直径 [m]。マーカーを見ながらこれだけ動くと SLAM が使えるようになる）
 //     &slamPairMaxCorr=0.08（マーカーの補正量 Δ がこれ以下 = アンカーが追いついているときだけ組にする [m]）
 //     &slamSmooth=0.5（SLAM で動かすアンカーの平滑化）
 //     PC 確認用: ?fakeslam=1（fakecam と併用。AlvaAR を読まず、合成カメラの姿勢に既知の別原点・スケール・回転を掛けてノイズを足した
@@ -205,12 +204,18 @@ const SLAM_ENABLED = params.get("slam") !== "0";
 const FAKE_SLAM = params.get("fakeslam") === "1";
 const SLAM_W = Math.round(numParam("slamW", 360, { min: 64, max: 1920 }));
 const SLAM_INTERVAL_MS = numParam("slamIntervalMs", 50, { min: 0, max: 2000 });
-const SLAM_MAX_FAIL = Math.round(numParam("slamMaxFail", 30, { min: 1, max: 10000 }));
-const SLAM_LOST_MS = numParam("slamLostMs", 500, { min: 50, max: 10000 });
+/** 例外がこの回数続いたら SLAM を止める */
+const SLAM_MAX_FAIL = 30;
+/** この時間 SLAM の姿勢が出なければロスト [ms] */
+const SLAM_LOST_MS = 500;
+/** 変換の推定に要る軌道の直径 [m]（「マーカーを見ながら 15cm 動けば較正」） */
 const SLAM_MIN_BASELINE = numParam("slamMinBaseline", 0.15, { min: 0.01, max: 10 });
-const SLAM_PAIRS = Math.round(numParam("slamPairs", 150, { min: 2, max: 5000 }));
-const SLAM_PAIR_MS = numParam("slamPairMs", 100, { min: 0, max: 5000 });
-const SLAM_PAIR_AGE_MS = numParam("slamPairAgeMs", 150, { min: 0, max: 5000 });
+/** 推定に使う組の数（古いものから捨てる） */
+const SLAM_PAIRS = 150;
+/** 組を足す最小間隔 [ms] */
+const SLAM_PAIR_MS = 100;
+/** マーカーの採用からこの時間以内のフレームだけ組にする [ms] */
+const SLAM_PAIR_AGE_MS = 150;
 /**
  * 組にするのは、直近のマーカーの採用でアンカーがほぼ動かなかった（補正量 Δ がこれ以下の）ときだけ [m]。
  * アンカーは lerp で遅れて追いつくので、動いている最中の組は「SLAM は新しい位置・マーカーは古い位置」になりスケールが縮む
@@ -605,6 +610,9 @@ let fusionResets = 0;
 let lastSlamResetLogMs = -Infinity;
 /** いまマーカーの代わりに SLAM でアンカーの位置を動かしているか */
 let slamDriving = false;
+/** SLAM で動かし始めた瞬間の SLAM の位置（three 流儀、SLAM 座標系）とアンカーの位置。以後は増分で動かす */
+let slamDriveStartPos: [number, number, number] | null = null;
+const slamDriveAnchorPos = new THREE.Vector3();
 /** マーカーが見えている間の「マーカーで出したカメラの位置」と「SLAM を写した位置」の差 [m]（HUD の off=） */
 let slamOffM: number | null = null;
 /** 直近の SLAM の向きを field に写したものと、マーカー + ジャイロのカメラの向きの差 [deg]（診断用。回転は SLAM から採らない） */
@@ -626,8 +634,8 @@ const FAKE_FIELD_TO_SLAM: Similarity = {
   ),
   trans: [0.7, -0.3, 1.6],
 };
-/** ヘッドレス確認用: throw = true で findCameraPose 相当が例外を投げる、lost = true で姿勢を返さない */
-const fakeSlamState = { throw: false, lost: false };
+/** ヘッドレス確認用: throw = true で findCameraPose 相当が例外を投げる、lost = true で姿勢を返さない、delayMs で処理時間を模擬（同期で待つ） */
+const fakeSlamState = { throw: false, lost: false, delayMs: 0 };
 if (FAKE_SLAM) (window as unknown as { __fakeSlam: unknown }).__fakeSlam = fakeSlamState;
 if (FAKE_SLAM) (window as unknown as { __slamFusion: unknown }).__slamFusion = fusion;
 const fakeSlamMatrix = new THREE.Matrix4();
@@ -637,6 +645,12 @@ function gaussian(): number {
 }
 /** 合成カメラの姿勢（fakeCamToField）→ 別の座標系に写してノイズを足し、AlvaAR と同じ形式（OpenCV 流儀の Twc）にする */
 function fakeSlamPose(): number[] | null {
+  if (fakeSlamState.delayMs > 0) {
+    const until = performance.now() + fakeSlamState.delayMs;
+    while (performance.now() < until) {
+      // 実機の重い findCameraPose と同じくメインスレッドを塞ぐ
+    }
+  }
   if (fakeSlamState.throw) throw new Error("fake SLAM exception (__fakeSlam.throw)");
   if (fakeSlamState.lost || !fakeCamToField) return null;
   fakeSlamMatrix.fromArray(fakeCamToField);
@@ -654,7 +668,6 @@ const slamCamField = new THREE.Matrix4();
 const slamFieldPos = new THREE.Vector3();
 const slamFieldQuat = new THREE.Quaternion();
 const slamFieldScale = new THREE.Vector3();
-const slamCamWorld = new THREE.Vector3();
 const slamTarget = new THREE.Vector3();
 const slamMappedQuat = new THREE.Quaternion();
 
@@ -677,7 +690,7 @@ function updateSlam(now: number, markerTracking: boolean) {
       console.log(`[slam] リセット（${slam.resets} 回目）→ 変換の推定を捨ててマーカーで取り直す`);
     }
   }
-  if (slam.state === "failed") {
+  if (slam.state === "failed" || slam.state === "stopped") {
     if (fusion.estimate || fusion.pairs.length > 0) fusion.clear();
     slamDriving = false;
     return;
@@ -714,23 +727,31 @@ function updateSlam(now: number, markerTracking: boolean) {
   const est = fusion.estimate;
   if (markerTracking || !est || !slam.isTracking(now, SLAM_LOST_MS)) {
     slamDriving = false;
+    slamDriveStartPos = null;
     return;
   }
   if (!pose) return; // 新しい姿勢が無いフレームは位置をそのまま（slamDriving は維持）
-  const f = applySimilarity(est.sim, pose.pos);
-  // カメラのワールド位置 = アンカーの位置 + R_anchor · f なので、アンカーの位置 = カメラのワールド位置 − R_anchor · f
-  camera.getWorldPosition(slamCamWorld);
-  slamTarget.set(f[0], f[1], f[2]).applyQuaternion(anchor.quaternion);
-  slamTarget.subVectors(slamCamWorld, slamTarget);
-  if (slamDriving) anchor.position.lerp(slamTarget, SLAM_SMOOTH);
-  else anchor.position.copy(slamTarget);
-  slamDriving = true;
+  if (!slamDriving || !slamDriveStartPos) {
+    // 見失った瞬間: いまの SLAM の位置とアンカーの位置を基準にする（このフレームでは動かさない = 切り替えで飛ばない）
+    slamDriveStartPos = [pose.pos[0], pose.pos[1], pose.pos[2]];
+    slamDriveAnchorPos.copy(anchor.position);
+    slamDriving = true;
+    return;
+  }
+  // カメラのワールド位置 = アンカーの位置 + R_anchor · f（f = field でのカメラの位置）。カメラのワールド位置は動かないので、
+  // f が Δf = s·R·(p_slam − p_slam0) だけ動けばアンカーは −R_anchor·Δf 動く。変換の平行移動には依存しない
+  const d: [number, number, number] = [pose.pos[0] - slamDriveStartPos[0], pose.pos[1] - slamDriveStartPos[1], pose.pos[2] - slamDriveStartPos[2]];
+  const df = applySimilarity({ scale: est.sim.scale, quat: est.sim.quat, trans: [0, 0, 0] }, d);
+  slamTarget.set(df[0], df[1], df[2]).applyQuaternion(anchor.quaternion);
+  slamTarget.subVectors(slamDriveAnchorPos, slamTarget);
+  anchor.position.lerp(slamTarget, SLAM_SMOOTH);
 }
 
 /** HUD の slam= 行の状態 */
 function slamStateText(): string {
   if (!slam) return `off(${slamOffReason})`;
   if (slam.state === "failed") return `failed(${slam.reason.slice(0, 80)})`;
+  if (slam.state === "stopped") return `stopped(${slam.reason.slice(0, 80)})`;
   return `${slam.state}${slamDriving ? "+drive" : ""}${slam.failures > 0 ? `(exc×${slam.failures})` : ""}`;
 }
 
@@ -1526,7 +1547,7 @@ function renderHud() {
     hudState.wake && `wake=${hudState.wake}`,
     `marker=${markerAnchor?.info ?? "-"}${markerAnchor?.everDetected && !markerAnchor.isTracking(now, MARKER_LOST_MS) ? (slamDriving ? " (slam)" : " (holding last pose)") : ""} layout=${describeMarkers(fieldCfg.markers ?? [])} self=${lastSelfPos ? `(${lastSelfPos.map((v) => v.toFixed(2)).join(",")})` : "-"}`,
     // 08-7: SLAM の状態（t=処理時間、off=マーカーで出した位置との差、fix=SLAM → field の変換の推定、rot=SLAM の向き（診断用）、n=呼び出し回数）
-    `slam=${slamStateText()} t=${slam ? slam.lastMs.toFixed(0) : "-"}ms off=${slamOffM === null ? "-" : `${slamOffM.toFixed(2)}m`} fix=${fusion.describe()} rot=${slamYpr ? `(${slamYpr.map((v) => v.toFixed(0)).join(",")})` : "-"}${slamRotErrDeg === null ? "" : ` rotErr=${slamRotErrDeg.toFixed(1)}deg`} n=${slam?.calls ?? 0} resets=${slam?.resets ?? 0}${slam?.focalPx ? ` f=${slam.focalPx.toFixed(0)}px` : ""}`,
+    `slam=${slamStateText()} t=${slam ? slam.lastMs.toFixed(0) : "-"}ms every ${slam ? slam.effectiveIntervalMs.toFixed(0) : "-"}ms off=${slamOffM === null ? "-" : `${slamOffM.toFixed(2)}m`} fix=${fusion.describe()} rot=${slamYpr ? `(${slamYpr.map((v) => v.toFixed(0)).join(",")})` : "-"}${slamRotErrDeg === null ? "" : ` rotErr=${slamRotErrDeg.toFixed(1)}deg`} n=${slam?.calls ?? 0} resets=${slam?.resets ?? 0}${slam?.focalPx ? ` f=${slam.focalPx.toFixed(0)}px` : ""}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,

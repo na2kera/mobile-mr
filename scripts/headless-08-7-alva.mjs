@@ -5,10 +5,10 @@
 //     マーカーが見えている間に合成カメラを動かして変換を推定させ（スケールが 1/fakeSlamScale に近い・off= が小さい）、
 //     原点マーカーを隠してから合成カメラを動かすと、field 上の自分の位置（self=）が合成カメラに追従する
 //   - ウィンドウ B（?slam=0。08 と同じ）: 同じ動きで、マーカーを隠している間は位置が止まる（holding last pose）
-//   - ウィンドウ A の例外の経路: window.__fakeSlam.throw で例外を出し続けると、slamMaxFail 回で SLAM が止まり（slam=failed）、
+//   - ウィンドウ A の例外の経路: window.__fakeSlam.throw で例外を出し続けると、30 回（定数）で SLAM が止まり（slam=failed）、
 //     マーカーのみに落ちて描画も発射も続く
 //   - ウィンドウ C（実 AlvaAR。public/vendor/alva/ が要る）: チェッカーボードのフェイクカメラ映像で、初期化が通り findCameraPose が呼べる
-//     （姿勢は null でもよい）。未取得（npm run fetch:alva していない）なら FAIL にする
+//     （姿勢は null でもよい）。未取得（npm run fetch:alva していない）なら C だけ SKIP にし、他の確認は走らせる
 //   - ウィンドウ D（alva_ar.js の読み込みを CDP でブロック）: HUD に読み込み失敗が出て、マーカーのみで入室・発射できる
 //   - 俯瞰画面（overview.html）が開けて全員が見えている / 例外が出ていない
 import { spawn } from "node:child_process";
@@ -33,10 +33,8 @@ if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);
   process.exit(0);
 }
-if (!existsSync(new URL("../public/vendor/alva/alva_ar.js", import.meta.url))) {
-  console.log("FAIL: public/vendor/alva/alva_ar.js が無い（npm run fetch:alva を先に実行）");
-  process.exit(1);
-}
+const HAS_ALVA = existsSync(new URL("../public/vendor/alva/alva_ar.js", import.meta.url));
+if (!HAS_ALVA) console.log("SKIP(C): public/vendor/alva/alva_ar.js が無いので実 AlvaAR の確認は飛ばす（npm run fetch:alva で取得）。フェイクの SLAM の確認は走らせる");
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -139,6 +137,7 @@ function parseHud(hud) {
     slamLine,
     slamState: slamLine.match(/^slam=(\S+?)(?:\s|$)/)?.[1] ?? "",
     slamMs: Number(slamLine.match(/ t=([\d.]+)ms/)?.[1] ?? NaN),
+    slamEvery: Number(slamLine.match(/ every ([\d.]+)ms/)?.[1] ?? NaN),
     slamOff: Number(slamLine.match(/ off=([\d.]+)m/)?.[1] ?? NaN),
     slamScale: Number(slamLine.match(/ fix=s=([\d.]+)/)?.[1] ?? NaN),
     slamCalls: Number(slamLine.match(/ n=(\d+) resets=/)?.[1] ?? -1),
@@ -185,18 +184,19 @@ try {
     const t = (await cdpJson("/json")).find((x) => x.id === created.result.targetId);
     return openPage(t, name);
   }
-  await pA.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Alva&fakeslam=1&slamMinBaseline=0.06` });
+  await pA.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Alva&fakeslam=1` });
   const pB = await newWindow("B");
   await pB.send("Page.navigate", { url: `${BASE}?${COMMON}&name=NoSlam&slam=0` });
-  const pC = await newWindow("C");
-  await pC.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Real` });
+  const pC = HAS_ALVA ? await newWindow("C") : null;
+  if (pC) await pC.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Real` });
   const pD = await newWindow("D");
   await pD.send("Network.enable");
   await pD.send("Network.setBlockedURLs", { urls: ["*alva_ar.js*"] });
   await pD.send("Page.navigate", { url: `${BASE}?${COMMON}&name=Blocked` });
   const pO = await newWindow("O");
   await pO.send("Page.navigate", { url: `${BASE}overview.html?room=${ROOM}&waitSec=1&markerMm=${MARKER_MM}` });
-  const pages = [pA, pB, pC, pD, pO];
+  const pages = [pA, pB, pC, pD, pO].filter(Boolean);
+  const players = [pA, pB, pC, pD].filter(Boolean);
 
   const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
   const setCam = (p, pos) => p.eval(`window.__fakeMarkers.camPos = ${JSON.stringify(pos)}; true`);
@@ -205,11 +205,11 @@ try {
   // 全員の入室とマーカーの検出を待つ
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
-    const hs = await Promise.all([pA, pB, pC, pD].map(readHud));
+    const hs = await Promise.all(players.map(readHud));
     if (hs.every((h) => h.me.startsWith("p") && h.marker.startsWith("id="))) break;
     await sleep(500);
   }
-  console.log(`4 ウィンドウの入室 + マーカー検出まで ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  console.log(`${players.length} ウィンドウの入室 + マーカー検出まで ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   await sleep(6000);
 
   // ---- 練習（08 と同じく塗れる）----
@@ -220,11 +220,13 @@ try {
   check("A・B が練習で連射が受理され得点している（08 と同じ仕様）", a0.phase === "practice" && a0.accepted >= 2 && b0.accepted >= 2 && (a0.scores[a0.me] ?? 0) > 0 && (b0.scores[b0.me] ?? 0) > 0, `${a0.accepted}/${b0.accepted} ${JSON.stringify(a0.scores)}`);
   check("A: フェイクの SLAM が追跡中", a0.slamState.startsWith("tracking"), a0.slamLine);
   check("B（?slam=0）: SLAM は off", b0.slamState === "off(?slam=0)", b0.slamLine);
+  check("A: HUD の slam= 行に実効の周期 every NNms が出る（既定 50ms 以上）", Number.isFinite(a0.slamEvery) && a0.slamEvery >= 50, a0.slamLine);
 
   // ---- マーカーを見ながら動いて変換を推定させる ----
   // マーカーの視軸からの角度は 5° 前後に抑える（それ以上横にずれると単一マーカーの POSIT が鏡像のヨーを拾い、
   // マーカー側の姿勢が 30° 回って組が壊れる。08 の既知の弱点（issue #54 / #55）で、この確認の対象ではない）。
-  // 距離は 0.5〜0.8m（フェイクカメラの 100mm マーカーは 0.9m 以上で小さすぎて検出されない）。基線が短いので A は slamMinBaseline=0.06
+  // 距離は 0.5〜0.8m（フェイクカメラの 100mm マーカーは 0.9m 以上で小さすぎて検出されない）。軌道の直径は約 0.31m で、
+  // 既定の slamMinBaseline=0.15（直径）で較正される（上書きしない）
   const calib = [[0, 0, 0.5], [0, 0.04, 0.8], [0.04, -0.03, 0.55], [-0.04, 0.03, 0.8], [0, -0.04, 0.6], [0.03, 0.03, 0.5], [0, 0, 0.74]];
   // 各位置で 3 秒止まる（アンカーは lerp で追いつくまで 0.5 秒ほど補正量 Δ が大きく、その間は組にしない。slamPairMaxCorr）
   for (const pos of calib) {
@@ -246,7 +248,10 @@ try {
   // ---- 原点マーカーを隠して歩く ----
   await Promise.all([pA.eval("window.__fakeMarkers.hidden.add(0); true"), pB.eval("window.__fakeMarkers.hidden.add(0); true")]);
   await sleep(1000);
-  const acceptedBeforeWalk = (await readHud(pA)).accepted;
+  const aHidden = await readHud(pA);
+  console.log(`hidden A: ${show(aHidden)} self=${JSON.stringify(aHidden.self)}`);
+  check("切り替え: マーカーを隠して SLAM で動かし始めた瞬間に位置が飛ばない（self= が原点の正面 ±3cm のまま）", /\(slam\)/.test(aHidden.markerLine) && dist(aHidden.self, START_POS) < 0.03, `self=${JSON.stringify(aHidden.self)} | ${aHidden.slamLine}`);
+  const acceptedBeforeWalk = aHidden.accepted;
   const walk = [[0.4, 0.1, 1.2], [-0.3, -0.1, 1.6]];
   for (const [i, pos] of walk.entries()) {
     await Promise.all([setCam(pA, pos), setCam(pB, pos)]);
@@ -257,6 +262,13 @@ try {
     check(`歩行 ${i + 1}: A はマーカーが見えない間 SLAM で動いている（marker 行が (slam)、slam=tracking+drive）`, /\(slam\)/.test(a.markerLine) && a.slamState === "tracking+drive", `${a.markerLine} | ${a.slamLine}`);
     check(`歩行 ${i + 1}: A の field 上の自分の位置 self= が合成カメラに追従する（±10cm）`, dist(a.self, pos) < 0.1, `self=${JSON.stringify(a.self)} 正解=${JSON.stringify(pos)} 差=${dist(a.self, pos).toFixed(3)}m`);
     check(`歩行 ${i + 1}: B（08 と同じ）はロスト中に位置が止まる（holding last pose、self が動かない）`, /holding last pose/.test(b.markerLine) && dist(b.self, bSelfBefore) < 0.02, `self=${JSON.stringify(b.self)} before=${JSON.stringify(bSelfBefore)}`);
+  }
+  {
+    // 俯瞰画面: SLAM で動いている A はマーカー ID の代わりに SLAM と出る（08 のコピーでは "?"）
+    const ov = (await pO.eval("document.querySelector('#hud')?.textContent")) ?? "";
+    const pm = ov.match(/peerMarkers=(\S*)/)?.[1] ?? "";
+    const rank = (await pO.eval("document.body.innerText")) ?? "";
+    check("俯瞰画面: SLAM で動いている間は ? ではなく SLAM と表示される", new RegExp(`\\b${aHidden.me}:SLAM\\b`).test(pm) && /位置合わせ: マーカー SLAM/.test(rank), `peerMarkers=${pm}`);
   }
   const aWalk = await readHud(pA);
   check("A: SLAM で動いている間も連射が受理され続ける", aWalk.accepted > acceptedBeforeWalk, `${acceptedBeforeWalk} → ${aWalk.accepted}`);
@@ -269,6 +281,21 @@ try {
   console.log(`back A: ${show(a2)} self=${JSON.stringify(a2.self)}`);
   check("A: マーカーが見えるとマーカーの追跡に戻る（drive が外れ、self が原点の正面 ±5cm）", a2.marker.startsWith("id=") && !/\(slam\)/.test(a2.markerLine) && a2.slamState === "tracking" && dist(a2.self, START_POS) < 0.05, `${a2.markerLine} | ${a2.slamLine}`);
 
+  // ---- 処理が間隔を超える端末: 次の実行は終了時刻から、間隔は処理時間の 2 倍に延びる ----
+  {
+    const n0 = (await readHud(pA)).slamCalls;
+    await pA.eval("window.__fakeSlam.delayMs = 80; true");
+    const t0 = Date.now();
+    await sleep(3000);
+    const aSlow = await readHud(pA);
+    const rate = (aSlow.slamCalls - n0) / ((Date.now() - t0) / 1000);
+    await pA.eval("window.__fakeSlam.delayMs = 0; true");
+    console.log(`slow A: ${show(aSlow)} calls/s=${rate.toFixed(1)}`);
+    // 80ms の処理 + 160ms の休み = 240ms 周期 → 毎秒 4 回強（連続占有なら 12 回）
+    check("遅い端末: 処理 80ms なら実効の周期が 2 倍（every≈160ms）になり、呼び出しは毎秒 6 回未満（休みが入る）", aSlow.slamEvery >= 155 && rate < 6, `t=${aSlow.slamMs}ms every=${aSlow.slamEvery}ms calls/s=${rate.toFixed(1)}`);
+    await sleep(1000);
+  }
+
   // ---- 例外が続いたら SLAM を止めてマーカーのみに落ちる ----
   await pA.eval("window.__fakeSlam.throw = true; true");
   const tf = Date.now();
@@ -278,7 +305,7 @@ try {
     aFail = await readHud(pA);
   }
   console.log(`failed A: ${show(aFail)} (${((Date.now() - tf) / 1000).toFixed(1)}s)`);
-  check("A: 例外が slamMaxFail（30）回続くと SLAM を止める（slam=failed、理由付き）", aFail.slamState.startsWith("failed") && /30 回続いた/.test(aFail.slamLine), aFail.slamLine);
+  check("A: 例外が 30 回続くと SLAM を止める（slam=failed、理由付き）", aFail.slamState.startsWith("failed") && /30 回続いた/.test(aFail.slamLine), aFail.slamLine);
   await pA.eval("window.__fakeMarkers.hidden.add(0); true");
   await setCam(pA, [0.4, 0, 1.2]);
   await sleep(2000);
@@ -288,6 +315,9 @@ try {
   check("A: SLAM を止めた後も描画ループと発射が続く", a3.accepted > aFail.accepted, `${aFail.accepted} → ${a3.accepted}`);
 
   // ---- 実 AlvaAR（チェッカーボードの映像）----
+  if (!pC) {
+    console.log("SKIP(C): 実 AlvaAR の確認（alva_ar.js が無い）");
+  } else {
   const tc = Date.now();
   let c = await readHud(pC);
   while (Date.now() - tc < 30000 && !(c.slamCalls > 5)) {
@@ -301,6 +331,8 @@ try {
   const expectedF = 360 / 2 / Math.tan((68 * Math.PI) / 360);
   check("C: AlvaAR に渡した焦点距離がマーカー検出と同じ換算（長辺 360px / 水平 68° → ±2px）", Math.abs(c.slamFocal - expectedF) <= 2, `f=${c.slamFocal} 期待=${expectedF.toFixed(1)}`);
   check("C: 実 AlvaAR と同居しても入室・マーカー・発射は動く", c.marker.startsWith("id=") && c.accepted >= 1, `${c.marker} shots=${c.sent}/${c.accepted}`);
+  check("C: 実 AlvaAR の実効の周期 every が出て、処理時間が間隔を超えたら 2 倍に延びている", Number.isFinite(c.slamEvery) && (c.slamMs <= 51 ? c.slamEvery >= 50 : c.slamEvery >= 2 * c.slamMs - 2), `t=${c.slamMs}ms every=${c.slamEvery}ms`);
+  }
 
   // ---- alva_ar.js が無い（読み込みをブロック）----
   const d = await readHud(pD);
@@ -311,7 +343,7 @@ try {
   // ---- 俯瞰画面 ----
   const ov = (await pO.eval("document.querySelector('#hud')?.textContent")) ?? "";
   const ovPlayers = (ov.match(/players=(\S*)/)?.[1] ?? "").split(",").filter(Boolean);
-  check("俯瞰画面が開けて 4 人が見えている", /ws=open/.test(ov) && ovPlayers.length === 4, ov.split("\n")[0]);
+  check(`俯瞰画面が開けて ${players.length} 人が見えている`, /ws=open/.test(ov) && ovPlayers.length === players.length, ov.split("\n")[0]);
 
   const exceptions = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("例外が出ていない", exceptions.length === 0, exceptions.slice(0, 2).join(" | "));

@@ -4,13 +4,18 @@
 //   2. 合成の往復: 正解の軌道 → 別の原点・スケール・回転の SLAM 軌道（+ ノイズ）→ 最初の数フレームの対応から推定 →
 //      残りのフレーム（遠くまで歩いた先）が正解に戻る
 //   3. SlamFusion（組の間引き・窓・clear）
+//   4. 狂った変換を弾く: 鏡像 1 組は外れ値として除く / マーカーの遅れ・反射相当は採用しない / スケールの急変は採用しない /
+//      基線の閾値は軌道の直径（15cm 動けば較正）
 // テストフレームワークは使わない（他の test-*.mjs と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import {
+  ACCEPT_MAX_RESIDUAL_RATIO,
+  SCALE_RELOCK_STREAK,
   SlamFusion,
   alvaPoseToThree,
   applySimilarity,
   estimateSimilarity,
   invertSimilarity,
+  robustEstimate,
   mapSlamPose,
   quatAngleDeg,
   quatMul,
@@ -175,7 +180,8 @@ function roundTrip({ seed, slamNoiseM, fieldNoiseM, yawNoiseDeg, calibFrames }) 
 
 // ---- 3. SlamFusion ----
 {
-  const fusion = new SlamFusion({ minBaselineM: 0.1, maxPairs: 5, minPairIntervalMs: 100 });
+  // 採用条件の組の数は 4 節で確かめるので、ここでは 2 組から採用する
+  const fusion = new SlamFusion({ minBaselineM: 0.1, maxPairs: 5, minPairIntervalMs: 100, minPairs: 2, smoothing: 1 });
   const pair = (x) => ({ slam: { pos: [x * 2, 0, 0], quat: [0, 0, 0, 1] }, field: { pos: [x, 1, 0], quat: [0, 0, 0, 1] } });
   check("SlamFusion: 最初の組は足す", fusion.add(pair(0), 0));
   check("SlamFusion: 間隔が短い組は足さない", !fusion.add(pair(0.5), 50));
@@ -187,6 +193,115 @@ function roundTrip({ seed, slamNoiseM, fieldNoiseM, yawNoiseDeg, calibFrames }) 
   check("SlamFusion: describe に s= が出る", /^s=0\.50 res=0\.000m/.test(fusion.describe()), fusion.describe());
   fusion.clear();
   check("SlamFusion: clear で推定が消える（SLAM のリセット時）", fusion.estimate === null && fusion.pairs.length === 0);
+}
+
+// ---- 4. 狂った変換を弾く ----
+{
+  // 正解の変換（field → slam）で作った組。lag = マーカー側が lag フレーム前の位置（アンカーの遅れ相当）
+  const fieldToSlam = { scale: 0.37, quat: quatNormalize(quatMul(axisAngle([0.2, 1, 0.1], 140), axisAngle([1, 0, 0], 20))), trans: [0.8, -0.4, 1.9] };
+  const truthScale = 1 / 0.37;
+  function makePairs({ n = 20, seed = 1, lag = 0, fieldNoiseM = 0.005, slamNoiseM = 0.001, reflect = false }) {
+    const rand = rng(seed);
+    const gauss = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const truth = [];
+    for (let i = 0; i < n; i++) {
+      // マーカーの前で左右・上下・前後に揺れる（基線 RMS 約 0.2m）
+      const pos = [0.25 * Math.sin(i * 0.5), 1.5 + 0.06 * Math.sin(i * 0.9), 1.2 + 0.12 * Math.cos(i * 0.4)];
+      const quat = quatNormalize(quatMul(axisAngle([0, 1, 0], 40 * Math.sin(i * 0.1)), axisAngle([1, 0, 0], -15 * Math.cos(i * 0.13))));
+      truth.push({ pos, quat });
+    }
+    return truth.map((t, i) => {
+      const sp = applySimilarity(fieldToSlam, t.pos).map((v) => v + slamNoiseM * gauss());
+      if (reflect) sp[0] = -sp[0]; // 反射（det = -1 の対応。回転では表せない）
+      const slam = alvaPoseToThree(threePoseToAlva({ pos: sp, quat: quatMul(fieldToSlam.quat, t.quat) }));
+      const src = truth[Math.max(0, i - lag)];
+      return { slam, field: { pos: src.pos.map((v) => v + fieldNoiseM * gauss()), quat: t.quat } };
+    });
+  }
+  const feed = (pairs, opts = {}) => {
+    const fusion = new SlamFusion({ minBaselineM: 0.15, maxPairs: 150, minPairIntervalMs: 0, ...opts });
+    pairs.forEach((p, i) => fusion.add(p, i));
+    return fusion;
+  };
+
+  // 正常: 採用され、残差 / 基線は閾値より十分小さい
+  const good = makePairs({});
+  const gEst = robustEstimate(good, { minBaselineM: 0.15 });
+  check("採用(正常 20 組): 残差 / 基線が閾値 0.35 未満", gEst !== null && gEst.residualM / gEst.baselineM < ACCEPT_MAX_RESIDUAL_RATIO, gEst ? `res/base=${(gEst.residualM / gEst.baselineM).toFixed(3)}` : "null");
+  const gF = feed(good);
+  check("採用(正常 20 組): SlamFusion が採用しスケールが正解の 5% 以内", gF.estimate !== null && Math.abs(gF.estimate.sim.scale / truthScale - 1) < 0.05 && gF.lastRejection === null, gF.describe());
+
+  // 正しい 19 組 + 鏡像 1 組（マーカーの位置が原点まわりに 90° 回った場所に出る）
+  const mirrored = makePairs({ seed: 2 });
+  const m = mirrored[5];
+  mirrored[5] = { slam: m.slam, field: { pos: rotateVec(axisAngle([0, 1, 0], 90), m.field.pos), quat: m.field.quat } };
+  const plain = estimateSimilarity(mirrored, { minBaselineM: 0.15 });
+  check("外れ値(19 組 + 鏡像 1 組): 除かないとスケールが 20% 以上狂う（テスト自体が汚染を再現している）", plain !== null && Math.abs(plain.sim.scale / truthScale - 1) > 0.2, plain ? `s=${plain.sim.scale.toFixed(2)} 正解=${truthScale.toFixed(2)}` : "null");
+  const robust = robustEstimate(mirrored, { minBaselineM: 0.15 });
+  check("外れ値(19 組 + 鏡像 1 組): 外れ値を除くとスケールが正解の 5% 以内", robust !== null && Math.abs(robust.sim.scale / truthScale - 1) < 0.05 && robust.outliers >= 1, robust ? `s=${robust.sim.scale.toFixed(3)} outliers=${robust.outliers} count=${robust.count}` : "null");
+  const mF = feed(mirrored);
+  check("外れ値(19 組 + 鏡像 1 組): SlamFusion の採用したスケールも 5% 以内", mF.estimate !== null && Math.abs(mF.estimate.sim.scale / truthScale - 1) < 0.05, mF.describe());
+
+  // 3 フレーム遅れ（全部の組が遅れている）は採用しない
+  const lagged = makePairs({ lag: 3, seed: 3 });
+  const lEst = robustEstimate(lagged, { minBaselineM: 0.15 });
+  const lF = feed(lagged);
+  check("遅れ(3 フレーム): 採用されない（rejected）", lF.estimate === null && lF.lastRejection !== null, `${lF.describe()} res/base=${lEst ? (lEst.residualM / lEst.baselineM).toFixed(2) : "null"}`);
+
+  // 反射相当は採用しない
+  const reflected = makePairs({ reflect: true, seed: 4 });
+  const rEst = robustEstimate(reflected, { minBaselineM: 0.15 });
+  const rF = feed(reflected);
+  check("反射: 採用されない（rejected）", rF.estimate === null && rF.lastRejection !== null, `${rF.describe()} res/base=${rEst ? (rEst.residualM / rEst.baselineM).toFixed(2) : "null"}`);
+
+  // 組の数が 10 未満は採用しない
+  const few = feed(makePairs({ n: 8, seed: 5 }));
+  check("組の数: 8 組では採用されない（rejected(n)）", few.estimate === null && few.lastRejection === "n", few.describe());
+
+  // 採用後に SLAM の縮尺が 1.5 倍に変わった組ばかりになる → 直ちには採用しない（scale）。続けば取り直す
+  {
+    const fusion = feed(makePairs({ n: 40, seed: 6 }), { maxPairs: 40 });
+    const before = fusion.estimate?.sim.scale ?? NaN;
+    const scaled = makePairs({ n: 40, seed: 7 }).map((p) => ({ slam: { pos: p.slam.pos.map((v) => v * 1.5), quat: p.slam.quat }, field: p.field }));
+    let t = 100;
+    for (const p of scaled.slice(0, 40)) fusion.add(p, t++);
+    check("スケールの急変: 前回から 20% を超える推定は採用せず前回を維持（rejected(scale)）", fusion.lastRejection === "scale" && Math.abs((fusion.estimate?.sim.scale ?? NaN) / before - 1) < 0.05, `${fusion.describe()} before=${before.toFixed(3)}`);
+    for (let i = 0; i < SCALE_RELOCK_STREAK; i++) fusion.add(scaled[i % scaled.length], t++);
+    const after = fusion.estimate?.sim.scale ?? NaN;
+    check(`スケールの急変: 同じ推定が ${SCALE_RELOCK_STREAK} 回続けば取り直す（正解 / 1.5 の 5% 以内）`, Math.abs(after / (truthScale / 1.5) - 1) < 0.05, fusion.describe());
+  }
+
+  // 採用した回転・スケールは EMA で寄せる（1 回の採用では新しい推定まで飛ばない）
+  {
+    const fusion = new SlamFusion({ minBaselineM: 0.15, maxPairs: 20, minPairIntervalMs: 0, smoothing: 0.3 });
+    makePairs({ n: 20, seed: 8, fieldNoiseM: 0, slamNoiseM: 0 }).forEach((p, i) => fusion.add(p, i));
+    const s0 = fusion.estimate?.sim.scale ?? NaN;
+    // 縮尺を 1.1 倍（20% 以内）にした組で窓を全部入れ替える
+    const scaled = makePairs({ n: 20, seed: 9, fieldNoiseM: 0, slamNoiseM: 0 }).map((p) => ({ slam: { pos: p.slam.pos.map((v) => v * 1.1), quat: p.slam.quat }, field: p.field }));
+    scaled.forEach((p, i) => fusion.add(p, 100 + i));
+    const target = truthScale / 1.1;
+    const s1 = fusion.estimate?.sim.scale ?? NaN;
+    check("EMA: スケールは新しい推定へ寄るが一気には飛ばない（s0 と目標の間）", Math.abs(s0 - truthScale) < 1e-6 && s1 < s0 - 0.01 && s1 > target + 0.01, `s0=${s0.toFixed(4)} s1=${s1.toFixed(4)} 目標=${target.toFixed(4)}`);
+    // 写像は重心で一致させる: 最後の組の重心付近で写した位置がずれない
+    const pairs = fusion.pairs;
+    const cs = [0, 1, 2].map((k) => pairs.reduce((a, p) => a + p.slam.pos[k], 0) / pairs.length);
+    const cf = [0, 1, 2].map((k) => pairs.reduce((a, p) => a + p.field.pos[k], 0) / pairs.length);
+    const mapped = fusion.toField(cs);
+    check("EMA: 平滑化しても重心どうしは一致する（平行移動を出し直している）", mapped !== null && Math.hypot(...mapped.map((v, k) => v - cf[k])) < 1e-9, mapped ? fmt(mapped) : "null");
+  }
+
+  // 基線の閾値は直径: 前後に 15cm 動けば較正され（RMS は約 0.05m）、10cm では較正されない
+  const line = (len) =>
+    Array.from({ length: 20 }, (_, i) => {
+      const pos = [0, 1.5, 1.0 + (len * i) / 19];
+      const quat = [0, 0, 0, 1];
+      return { slam: alvaPoseToThree(threePoseToAlva({ pos: applySimilarity(fieldToSlam, pos), quat: quatMul(fieldToSlam.quat, quat) })), field: { pos, quat } };
+    });
+  const e15 = estimateSimilarity(line(0.16), { minBaselineM: 0.15 });
+  check("基線: 前後に 16cm 動けば既定 0.15 で推定される（直径で判定。RMS なら 0.05 未満）", e15 !== null && e15.spanM >= 0.15 && e15.baselineM < 0.06, e15 ? `span=${e15.spanM.toFixed(3)} rms=${e15.baselineM.toFixed(3)}` : "null");
+  check("基線: 10cm では推定されない", estimateSimilarity(line(0.1), { minBaselineM: 0.15 }) === null);
+  const lineF = feed(line(0.16));
+  check("基線: 前後に 16cm 動いた 20 組は SlamFusion でも採用される", lineF.estimate !== null && Math.abs(lineF.estimate.sim.scale / truthScale - 1) < 0.01, lineF.describe());
 }
 
 const failed = results.filter(([, ok]) => !ok);

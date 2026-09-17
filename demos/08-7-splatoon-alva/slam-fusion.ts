@@ -17,6 +17,10 @@
 //     s: 重心からの変位の最小二乗 s = Σ d_field·(R d_slam) / Σ |d_slam|²（歩いた距離 = 基線が要る。基線が短いと null）
 //     T: 重心どうしを合わせる T = c_field − s·R·c_slam
 //   Umeyama（位置だけで回転も出す）は、ゴーグルを付けて横に数十 cm 動く程度の「ほぼ直線の軌道」では回転が決まらないので使わない
+// ■ 採用の判定（SlamFusion.add）: 推定 → 各組の残差が中央値の 3 倍を超える組を除いて 1 回だけ推定し直す（robustEstimate）→
+//   「残差 ≤ 0.35 × 基線（RMS）」「組の数 ≥ 10」「前回採用からのスケールの変化 ≤ 20%（初回を除く）」を満たしたら採用し、
+//   スケールと回転は前回から EMA で寄せる。満たさなければ前回の推定を維持する（HUD に rejected(res|n|scale)）。
+//   正常なら 残差 / 基線 ≈ 0.2、マーカーの遅れ・鏡像・反射相当では 0.5〜1.0 に分かれる（scripts/test-08-7-alva.mjs）
 export type V3 = [number, number, number];
 /** 四元数 [x, y, z, w]（three.js の Quaternion と同じ並び） */
 export type Quat = [number, number, number, number];
@@ -37,10 +41,19 @@ export type SimilarityEstimate = {
   sim: Similarity;
   /** 推定に使った組での位置の残差の RMS [m]（field 座標系） */
   residualM: number;
-  /** field 側の基線（重心からの距離の RMS）[m] */
+  /** field 側の基線（重心からの距離の RMS）[m]。採用条件の残差の比の分母 */
   baselineM: number;
-  /** 使った組の数 */
+  /** field 側の軌道の最大点間距離（直径）[m]。minBaselineM と比べる（「これだけ動けば較正」と一致させる） */
+  spanM: number;
+  /** 使った組の数（外れ値を除いた後） */
   count: number;
+  /** 外れ値として除いた組の数 */
+  outliers: number;
+  /** 各組の位置の残差 [m]（推定に使った組の順） */
+  residuals: number[];
+  /** 重心（field / SLAM）。平滑化した回転・スケールから平行移動を出し直すのに使う */
+  centroidField: V3;
+  centroidSlam: V3;
 };
 
 // ---- 四元数・ベクトルの小道具 ----
@@ -169,7 +182,7 @@ export function mapSlamPose(sim: Similarity, p: Pose): Pose {
 }
 
 export type EstimateOptions = {
-  /** field 側の基線（重心からの距離の RMS）がこれ未満ならスケールが決まらないとして null [m] */
+  /** field 側の軌道の最大点間距離（直径）がこれ未満ならスケールが決まらないとして null [m]（「これだけ動けば較正」） */
   minBaselineM: number;
 };
 
@@ -213,34 +226,118 @@ export function estimateSimilarity(pairs: readonly Correspondence[], opts: Estim
     df.push(f);
   }
   const baselineM = Math.sqrt(fieldSq / n);
-  if (baselineM < opts.minBaselineM || den <= 1e-12) return null;
+  // 直径（最大点間距離）。n ≤ 数百なので O(n²) で足りる
+  let spanSq = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pairs[i].field.pos;
+    for (let j = i + 1; j < n; j++) {
+      const b = pairs[j].field.pos;
+      spanSq = Math.max(spanSq, (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+    }
+  }
+  const spanM = Math.sqrt(spanSq);
+  if (spanM < opts.minBaselineM || den <= 1e-12) return null;
   const scale = num / den;
   if (!(scale > 0) || !Number.isFinite(scale)) return null;
   const rc = rotateVec(quat, cs);
   const trans: V3 = [cf[0] - scale * rc[0], cf[1] - scale * rc[1], cf[2] - scale * rc[2]];
   let res = 0;
+  const residuals: number[] = [];
   for (let i = 0; i < n; i++) {
-    res += (scale * ds[i][0] - df[i][0]) ** 2 + (scale * ds[i][1] - df[i][1]) ** 2 + (scale * ds[i][2] - df[i][2]) ** 2;
+    const r2 = (scale * ds[i][0] - df[i][0]) ** 2 + (scale * ds[i][1] - df[i][1]) ** 2 + (scale * ds[i][2] - df[i][2]) ** 2;
+    res += r2;
+    residuals.push(Math.sqrt(r2));
   }
-  return { sim: { scale, quat, trans }, residualM: Math.sqrt(res / n), baselineM, count: n };
+  return {
+    sim: { scale, quat, trans },
+    residualM: Math.sqrt(res / n),
+    baselineM,
+    spanM,
+    count: n,
+    outliers: 0,
+    residuals,
+    centroidField: cf,
+    centroidSlam: cs,
+  };
 }
+
+/** 外れ値とみなす残差 = 中央値のこの倍数を超える組 */
+export const OUTLIER_MEDIAN_FACTOR = 3;
+/** 外れ値の閾値の下限 [m]（ノイズが無いと中央値がほぼ 0 になり、正しい組まで外れ値になるのを防ぐ） */
+export const OUTLIER_FLOOR_M = 0.002;
+
+/**
+ * estimateSimilarity → 各組の残差が中央値の 3 倍（下限 OUTLIER_FLOOR_M）を超える組を除いて 1 回だけ推定し直す。
+ * 除いた後に推定できなければ（基線不足など）最初の推定を返す（採用の判定で弾かれる）
+ */
+export function robustEstimate(pairs: readonly Correspondence[], opts: EstimateOptions): SimilarityEstimate | null {
+  const first = estimateSimilarity(pairs, opts);
+  if (!first) return null;
+  const sorted = [...first.residuals].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const limit = Math.max(OUTLIER_MEDIAN_FACTOR * median, OUTLIER_FLOOR_M);
+  const inliers = pairs.filter((_, i) => first.residuals[i] <= limit);
+  if (inliers.length === pairs.length) return first;
+  const second = estimateSimilarity(inliers, opts);
+  if (!second) return first;
+  return { ...second, outliers: pairs.length - inliers.length };
+}
+
+/** 採用条件: 残差（RMS）≤ この比 × 基線（RMS） */
+export const ACCEPT_MAX_RESIDUAL_RATIO = 0.35;
+/** 採用条件: 外れ値を除いた組の数の下限 */
+export const ACCEPT_MIN_PAIRS = 10;
+/** 採用条件: 前回採用したスケールからの変化率の上限（初回を除く） */
+export const ACCEPT_MAX_SCALE_CHANGE = 0.2;
+/**
+ * スケールの変化だけで弾かれた推定がこの回数続いたら、前回の採用の方が誤っていたとみなして新しい推定をそのまま採用する
+ * （初回に少しずれた推定を採用すると、以後の正しい推定を全部弾き続けるのを防ぐ。組を足すのは 100ms 間隔なので約 3 秒）
+ */
+export const SCALE_RELOCK_STREAK = 30;
+/** 採用した推定のスケールと回転を前回から寄せる割合（EMA。1 で寄せない = 新しい推定そのまま） */
+export const ADOPT_SMOOTHING = 0.3;
+
+export type RejectReason = "res" | "n" | "scale";
 
 export type FusionOptions = EstimateOptions & {
   /** 保持する組の数（古いものから捨てる） */
   maxPairs: number;
   /** 組を足す最小の間隔 [ms]（止まっている間に同じ点で埋まらないように） */
   minPairIntervalMs: number;
+  /** 以下は省略時に上の定数 */
+  maxResidualRatio?: number;
+  minPairs?: number;
+  maxScaleChange?: number;
+  smoothing?: number;
 };
+
+/** 四元数の正規化線形補間（a から b へ t。符号を揃える） */
+function quatNlerp(a: Quat, b: Quat, t: number): Quat {
+  const sign = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3] < 0 ? -1 : 1;
+  return quatNormalize([
+    a[0] + t * (sign * b[0] - a[0]),
+    a[1] + t * (sign * b[1] - a[1]),
+    a[2] + t * (sign * b[2] - a[2]),
+    a[3] + t * (sign * b[3] - a[3]),
+  ]);
+}
 
 /**
  * 組を溜めて相似変換を更新する。SLAM がリセットされたら（座標系が変わる）clear() する。
- * 位置の推定値（sim）は、組が足りなくなっても直前のものを残す（clear() で消える）
+ * 位置の推定値（estimate）は、採用条件を満たした推定だけで更新し、弾いたときや組が足りなくなったときは直前のものを残す（clear() で消える）
  */
 export class SlamFusion {
   readonly opts: FusionOptions;
   pairs: Correspondence[] = [];
+  /** 採用した推定（スケール・回転は EMA 済み） */
   estimate: SimilarityEstimate | null = null;
+  /** 直近の推定を弾いた理由（直近で採用した・推定できなかったときは null） */
+  lastRejection: RejectReason | null = null;
+  /** 採用した回数 */
+  adopted = 0;
   private lastAddMs = -Infinity;
+  private scaleRejectStreak = 0;
 
   constructor(opts: FusionOptions) {
     this.opts = opts;
@@ -252,15 +349,59 @@ export class SlamFusion {
     this.lastAddMs = nowMs;
     this.pairs.push(pair);
     if (this.pairs.length > this.opts.maxPairs) this.pairs.splice(0, this.pairs.length - this.opts.maxPairs);
-    const e = estimateSimilarity(this.pairs, this.opts);
-    if (e) this.estimate = e;
+    this.update();
     return true;
+  }
+
+  private update() {
+    const e = robustEstimate(this.pairs, this.opts);
+    if (!e) {
+      this.lastRejection = null;
+      return;
+    }
+    const maxRatio = this.opts.maxResidualRatio ?? ACCEPT_MAX_RESIDUAL_RATIO;
+    const minPairs = this.opts.minPairs ?? ACCEPT_MIN_PAIRS;
+    const maxScaleChange = this.opts.maxScaleChange ?? ACCEPT_MAX_SCALE_CHANGE;
+    const alpha = this.opts.smoothing ?? ADOPT_SMOOTHING;
+    const prev = this.estimate;
+    let reason: RejectReason | null = null;
+    if (e.residualM > maxRatio * e.baselineM) reason = "res";
+    else if (e.count < minPairs) reason = "n";
+    else if (prev && Math.abs(e.sim.scale / prev.sim.scale - 1) > maxScaleChange) reason = "scale";
+    if (reason === "scale" && ++this.scaleRejectStreak >= SCALE_RELOCK_STREAK) {
+      // 同じ向きに外れた推定が続く = 前回の採用の方が誤り。平滑化せずに取り直す
+      this.scaleRejectStreak = 0;
+      this.estimate = e;
+      this.lastRejection = null;
+      this.adopted++;
+      return;
+    }
+    if (reason) {
+      if (reason !== "scale") this.scaleRejectStreak = 0;
+      this.lastRejection = reason;
+      return;
+    }
+    this.scaleRejectStreak = 0;
+    this.lastRejection = null;
+    this.adopted++;
+    if (!prev) {
+      this.estimate = e;
+      return;
+    }
+    // スケールと回転は前回から寄せ、平行移動はその回転・スケールで今回の重心どうしを合わせ直す（写像を重心で一致させる）
+    const scale = prev.sim.scale + alpha * (e.sim.scale - prev.sim.scale);
+    const quat = quatNlerp(prev.sim.quat, e.sim.quat, alpha);
+    const rc = rotateVec(quat, e.centroidSlam);
+    const cf = e.centroidField;
+    this.estimate = { ...e, sim: { scale, quat, trans: [cf[0] - scale * rc[0], cf[1] - scale * rc[1], cf[2] - scale * rc[2]] } };
   }
 
   clear() {
     this.pairs = [];
     this.estimate = null;
+    this.lastRejection = null;
     this.lastAddMs = -Infinity;
+    this.scaleRejectStreak = 0;
   }
 
   /** SLAM の位置（three 流儀）→ field 座標系。まだ推定できていなければ null */
@@ -268,10 +409,11 @@ export class SlamFusion {
     return this.estimate ? applySimilarity(this.estimate.sim, slamPos) : null;
   }
 
-  /** HUD 用（"s=2.70 res=0.012m base=0.21m n=40" / "calib n=3"） */
+  /** HUD 用（"s=2.70 res=0.012m base=0.21m span=0.62m n=40(-1)" / "calib n=3"。弾いたら末尾に " rejected(res)"） */
   describe(): string {
     const e = this.estimate;
-    if (!e) return `calib n=${this.pairs.length}`;
-    return `s=${e.sim.scale.toFixed(2)} res=${e.residualM.toFixed(3)}m base=${e.baselineM.toFixed(2)}m n=${e.count}`;
+    const rej = this.lastRejection ? ` rejected(${this.lastRejection})` : "";
+    if (!e) return `calib n=${this.pairs.length}${rej}`;
+    return `s=${e.sim.scale.toFixed(2)} res=${e.residualM.toFixed(3)}m base=${e.baselineM.toFixed(2)}m span=${e.spanM.toFixed(2)}m n=${e.count}${e.outliers ? `(-${e.outliers})` : ""}${rej}`;
   }
 }
