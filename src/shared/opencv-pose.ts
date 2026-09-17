@@ -13,8 +13,10 @@ import {
   markerErrorsL1,
   matrixToRodrigues,
   meanSidePx,
+  mirrorPoseGuess,
   reprojectionErrorPx,
   rodriguesToMatrix,
+  rotationDiffDeg,
 } from "./pnp-board.ts";
 import type { Board, MarkerDetection } from "./pnp-board.ts";
 
@@ -236,6 +238,54 @@ export function solveSingleMarker(
     if (!near) return ippe;
     if (!ippe) return near;
     return near.errPx <= ippe.errPx * 1.5 ? near : ippe;
+  } finally {
+    obj.delete();
+    img.delete();
+    kMat.delete();
+    dist.delete();
+    rvec.delete();
+    tvec.delete();
+  }
+}
+
+/**
+ * 1 枚のマーカーの 2 解（board と独立）: IPPE_SQUARE の最良解と、その鏡像（pnp-board.ts の mirrorPoseGuess を初期値にした ITERATIVE）。
+ * 鏡像が最良解と同じ局所解に落ちた（回転差 < 1°）なら mirror は null。解が無ければ null、OpenCV.js の例外は throw
+ */
+export function solveSingleMarkerPair(
+  cv: OpenCv,
+  corners: readonly [number, number][],
+  markerSizeM: number,
+  K: readonly number[],
+): { best: SinglePose; mirror: SinglePose | null } | null {
+  const local = markerCorners(markerSizeM);
+  const obj = cv.matFromArray(4, 3, cv.CV_32F, local.flat());
+  const img = cv.matFromArray(4, 2, cv.CV_32F, corners.flat());
+  const kMat = cv.matFromArray(3, 3, cv.CV_64F, K);
+  const dist = cv.Mat.zeros(4, 1, cv.CV_64F);
+  const rvec = cv.Mat.zeros(3, 1, cv.CV_64F);
+  const tvec = cv.Mat.zeros(3, 1, cv.CV_64F);
+  try {
+    const solve = (flags: number, useGuess: boolean): (SinglePose & { R: number[]; t: V3 }) | null => {
+      const ok = cv.solvePnP(obj, img, kMat, dist, rvec, tvec, useGuess, flags);
+      if (!ok) return null;
+      const rv = Array.from(rvec.data64F) as V3;
+      const tv = Array.from(tvec.data64F) as V3;
+      if (rv.length !== 3 || tv.length !== 3 || !rv.every(Number.isFinite) || !tv.every(Number.isFinite)) return null;
+      const R = rodriguesToMatrix(rv);
+      const errPx = reprojectionErrorPx(local.flat(), corners.flat(), R, tv, K);
+      if (!Number.isFinite(errPx)) return null;
+      const error = markerErrorsL1(local.flat(), corners.flat(), [meanSidePx(corners)], R, tv, K)[0];
+      return { cameraMatrix: cvPoseToCameraMatrix(R, tv), errPx, error, R, t: tv };
+    };
+    const ippe = solve(cv.SOLVEPNP_IPPE_SQUARE, false);
+    if (!ippe) return null;
+    rvec.data64F.set(matrixToRodrigues(mirrorPoseGuess(ippe.R, ippe.t)));
+    tvec.data64F.set(ippe.t);
+    const m = solve(cv.SOLVEPNP_ITERATIVE, true);
+    const strip = (x: SinglePose & { R: number[]; t: V3 }): SinglePose => ({ cameraMatrix: x.cameraMatrix, errPx: x.errPx, error: x.error });
+    const mirror = m && rotationDiffDeg(m.cameraMatrix, ippe.cameraMatrix) >= 1 ? strip(m) : null;
+    return { best: strip(ippe), mirror };
   } finally {
     obj.delete();
     img.delete();

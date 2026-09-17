@@ -245,6 +245,59 @@ export function markerErrorsL1(
   return out;
 }
 
+/**
+ * 1 枚の平面マーカーの姿勢の「鏡像」側の初期値（OpenCV の規約。R は行優先 9）。IPPE の 2 解は、マーカーの法線を
+ * 視線（カメラ → マーカー中心）で鏡映した関係にある。視線 v まわりの 180° 回転 Q = 2vvᵀ − I で法線を鏡映し、
+ * 面内の向き（Q で 180° 回ってしまう）は マーカーの Z 軸まわりの 180°（右から diag(−1,−1,1)）で戻す。中心の位置 t は視線上なので変わらない。
+ * これを初期値に ITERATIVE で解くと鏡像の局所解に収束する（OpenCV.js に solvePnPGeneric が無いため）
+ */
+export function mirrorPoseGuess(R: readonly number[], t: V3): number[] {
+  const n = Math.hypot(t[0], t[1], t[2]) || 1;
+  const v = [t[0] / n, t[1] / n, t[2] / n];
+  const out: number[] = [];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      let qr = 0;
+      for (let k = 0; k < 3; k++) qr += (2 * v[r] * v[k] - (r === k ? 1 : 0)) * R[k * 3 + c];
+      out.push(c < 2 ? -qr : qr);
+    }
+  }
+  return out;
+}
+
+/** 2 つの姿勢（列優先 4x4）の回転の角度差 [deg] */
+export function rotationDiffDeg(a: readonly number[], b: readonly number[]): number {
+  const tr = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[4] * b[4] + a[5] * b[5] + a[6] * b[6] + a[8] * b[8] + a[9] * b[9] + a[10] * b[10];
+  return (Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2))) * 180) / Math.PI;
+}
+
+/**
+ * 1 枚の IPPE の 2 解（最良解と鏡像）の再投影誤差の比がこれ以上なら「明確」として誤差の小さい方を採る（board は見ない）。
+ * 根拠（README の既知の制約の実測。150mm を 1.5m から 24 試行）: 13° / 45° の斜めでは比の中央値が 6 倍台で、取り違えると
+ * 位置が数十 cm〜2m 飛ぶ。正面付近では 1.1〜1.5 倍の僅差で、ここで誤差だけで選ぶと鏡像を拾う（ヘッドレスの 100mm 正面で spread 0.16m）。
+ * 2 倍はその間（僅差の側は board に近い方で選ぶ）
+ */
+export const SINGLE_AMBIGUITY_RATIO = 2;
+
+/**
+ * 1 枚ずつの単体解の選び方（spread の診断用）。2 解の誤差の比が SINGLE_AMBIGUITY_RATIO 以上なら誤差の小さい方、
+ * 僅差なら reference（board の解から予測したこのマーカーの姿勢）に回転が近い方。reference が無ければ誤差の小さい方。
+ * 鏡像の差は主にヨー（数十度の回転）に出て、配置の誤り（位置が数十 cm ずれる）とは性質が違うので、どちらを選んでも配置の誤りは spread に残る
+ */
+export function chooseSingleSolution<T extends { cameraMatrix: number[]; errPx: number }>(
+  best: T,
+  mirror: T | null,
+  reference: readonly number[] | null,
+  ratio = SINGLE_AMBIGUITY_RATIO,
+): { pick: T; ambiguous: boolean } {
+  if (!mirror) return { pick: best, ambiguous: false };
+  const [lo, hi] = mirror.errPx < best.errPx ? [mirror, best] : [best, mirror];
+  const ambiguous = hi.errPx < lo.errPx * ratio;
+  if (!ambiguous || !reference) return { pick: lo, ambiguous };
+  const pick = rotationDiffDeg(best.cameraMatrix, reference) <= rotationDiffDeg(mirror.cameraMatrix, reference) ? best : mirror;
+  return { pick, ambiguous };
+}
+
 /** ?maxReprojPx= の基準の検出画像の長辺 [px]（08 の既定 detW）。上限はこの解像度での px として指定する */
 export const REPROJ_REFERENCE_LONG_PX = 960;
 /**

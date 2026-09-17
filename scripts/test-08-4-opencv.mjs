@@ -20,6 +20,9 @@ import {
   cameraMatrixToCvPose,
   cvPoseToCameraMatrix,
   DEFAULT_MAX_REPROJ_PX,
+  SINGLE_AMBIGUITY_RATIO,
+  chooseSingleSolution,
+  mirrorPoseGuess,
   focalPxOf,
   isCoplanar,
   markerCorners,
@@ -141,6 +144,25 @@ const fakeMarker = (p) => ({ id: p.id, bits: bitsOf(p.id), toField: markerToFiel
     shifted[1] -= 1;
     const e1 = markerErrorsL1(obj, shifted, [40], R0, [0, 0, 1], K0);
     check("markerErrorsL1（手計算）: 投影どおりなら 0、1 隅を (3, −1)px ずらすと (3+1)/40 = 0.1（08 の POSIT の err= と同じ尺度）", near(e0[0], 0, 1e-9) && near(e1[0], 0.1, 1e-9), `${e0[0]} ${e1[0]}`);
+  }
+  // 単体解の 2 解の選び方
+  {
+    const frontR = [1, 0, 0, 0, -1, 0, 0, 0, -1];
+    check("mirrorPoseGuess: 視線上で正対したマーカーの鏡像は自分自身（法線が視線と平行）", nearV(mirrorPoseGuess(frontR, [0, 0, 1]), frontR, 1e-12));
+    // 右 30° から見た（マーカーの法線がカメラの視線に対して傾いた）姿勢の鏡像は、法線の傾きが反対側になる
+    const yawed = rodriguesToMatrix([0, (30 * Math.PI) / 180, 0]).map((v, i) => [1, 1, 1, -1, -1, -1, -1, -1, -1][i] * v);
+    const m = mirrorPoseGuess(yawed, [0, 0, 1.5]);
+    const nOf = (R) => [R[2], R[5], R[8]];
+    check("mirrorPoseGuess: 視線 Z に対して法線の X 成分が反転し、Z 成分は同じ（視線で鏡映）", near(nOf(m)[0], -nOf(yawed)[0], 1e-12) && near(nOf(m)[2], nOf(yawed)[2], 1e-12), `${nOf(yawed)} → ${nOf(m)}`);
+    const pose = (yawDeg, errPx) => ({ cameraMatrix: cvPoseToCameraMatrix(rodriguesToMatrix([0, (yawDeg * Math.PI) / 180, 0]).map((v, i) => [1, 1, 1, -1, -1, -1, -1, -1, -1][i] * v), [0, 0, 1.5]), errPx });
+    const best = pose(20, 0.3);
+    const mirror = pose(-20, 0.4);
+    const ref = pose(-18, 0).cameraMatrix;
+    const c1 = chooseSingleSolution(best, mirror, ref);
+    check(`chooseSingleSolution: 誤差の比が ${SINGLE_AMBIGUITY_RATIO} 倍未満（僅差）なら board の予測に回転が近い方（誤差が大きくても鏡像側）`, c1.ambiguous && c1.pick === mirror);
+    const c2 = chooseSingleSolution(best, pose(-20, 0.9), ref);
+    check(`chooseSingleSolution: 比が ${SINGLE_AMBIGUITY_RATIO} 倍以上（明確）なら board を見ずに誤差の小さい方`, !c2.ambiguous && c2.pick === best);
+    check("chooseSingleSolution: board が無い・鏡像が無いなら誤差の小さい方", chooseSingleSolution(best, mirror, null).pick === best && chooseSingleSolution(best, null, ref).pick === best);
   }
   check("reprojLimitPx: ?maxReprojPx= は検出画像の長辺 960px 基準（既定 4 → 640px では 2.67px、1920px では 8px）", DEFAULT_MAX_REPROJ_PX === 4 && near(reprojLimitPx(4, 640), 8 / 3, 1e-9) && near(reprojLimitPx(4, 1920), 8));
   const back = cameraMatrixToCvPose(camThree);
@@ -414,7 +436,7 @@ if (!existsSync(opencvPath)) {
     const THREE = await import("three");
     const { createOpenCvMarkerAnchor, OPENCV_MAX_CONSECUTIVE_ERRORS } = await import("../src/shared/marker-anchor-opencv.ts");
     const extraOf = (p) => ({ id: p.id, toAnchor: new THREE.Matrix4().fromArray(markerToFieldMatrix(p)) });
-    async function makeAnchor(extras, cvImpl = cv) {
+    async function makeAnchor(extras, cvImpl = cv, markerSizeM = MARKER_M) {
       const video = { readyState: 4, currentTime: 0, videoWidth: W, videoHeight: H };
       const anchor = new THREE.Object3D();
       const a = createOpenCvMarkerAnchor({
@@ -427,7 +449,7 @@ if (!existsSync(opencvPath)) {
         video,
         camera: new THREE.PerspectiveCamera(),
         anchor,
-        markerSizeM: MARKER_M,
+        markerSizeM,
         markerId: 0,
         extraMarkers: () => extras,
         maxPoseError: 0.5,
@@ -466,8 +488,21 @@ if (!existsSync(opencvPath)) {
       console.log(`inconsistent layout: ref=${ref.a.info} / bad=${bad.a.info} moved=${(moved * 100).toFixed(2)}cm`);
       check("配置の不整合（0.6m ずれ）: 原点マーカー単体のアンカーは真値に 3cm 以内（基準の確認）", ref.a.backend === "opencv" && dist3(refPos, truth) < 0.03, `${(dist3(refPos, truth) * 100).toFixed(2)}cm`);
       check("配置の不整合（0.6m ずれ）: アンカーが原点マーカー単体の位置から 2cm 以上動かない（1 枚ずつの平均に落ちない）", bad.a.everDetected && moved < 0.02, `moved=${(moved * 100).toFixed(2)}cm`);
-      check("配置の不整合: usedIds は実際に寄与した原点だけ、HUD に inconsistent と spread（独立の 1 枚ずつの解のばらつき ≈ 0.6m）が出る", bad.a.usedIds.join("+") === "0" && /inconsistent/.test(bad.a.info) && bad.a.spreadM > 0.45 && bad.a.spreadM < 0.75, `usedIds=${bad.a.usedIds} spread=${bad.a.spreadM.toFixed(2)} info=${bad.a.info}`);
+      check("配置の不整合: usedIds は実際に寄与した原点だけ、HUD に inconsistent と spread（board と独立の 2 解から選んだ単体解のばらつき ≈ 0.6m。鏡像の選び方で配置の誤りは消えない）が出る", bad.a.usedIds.join("+") === "0" && /inconsistent/.test(bad.a.info) && bad.a.spreadM > 0.45 && bad.a.spreadM < 0.75, `usedIds=${bad.a.usedIds} spread=${bad.a.spreadM.toFixed(2)} info=${bad.a.info}`);
       img.delete();
+    }
+    // 配置が合っている 2 枚（ヘッドレスと同じ幾何: 100mm の原点 + 右 0.25m の ID 5 をほぼ正面から）: 単体解の鏡像で spread が膨らまない
+    {
+      const size = 0.1;
+      const d = (size * FOCAL) / (0.8 * 80);
+      const wall = { id: 5, face: "wall", pos: [0.25, 0, 0] };
+      const markers = [{ id: 0, bits: bitsOf(0), toField: markerToFieldMatrix(ORIGIN) }, { id: 5, bits: bitsOf(5), toField: markerToFieldMatrix(wall) }];
+      const t = await makeAnchor([extraOf(wall)], cv, size);
+      const r = renderImage(markers, fakeCameraToField([0, 0, d], 0, 0), size);
+      for (let i = 0; i < 3; i++) t.step(r.img);
+      console.log(`consistent 2 markers (headless geometry): ${t.a.info}`);
+      check("配置が合っている 2 枚（原点 + 右 0.25m、100mm 正面）: board で 2 枚とも使い、inconsistent 無しで spread < 0.05m", t.a.usedIds.length === 2 && !/inconsistent/.test(t.a.info) && t.a.spreadM < 0.05, `spread=${t.a.spreadM.toFixed(3)} ${t.a.info}`);
+      r.img.delete();
     }
     // 原点が見えないときの不整合: 直前の姿勢を維持（lastAcceptedMs を進めない。ロストではなく inconsistent と出す）
     {

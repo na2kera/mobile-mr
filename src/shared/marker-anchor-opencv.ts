@@ -8,7 +8,9 @@
 //     1 枚の平面 4 点の不良条件（issue #54 / #55）が「複数枚の合成」に変わる
 //   - 重力での水平化（worldUp）は 08 と同じ考え方で残す（PnP の傾きも信用しない場合の保険。?gravityAlign=0 で切れる）。
 //     位置は「見えているマーカーの中心の平均 − R_level・(その平均のアンカー座標)」（08 の「マーカー中心 − R・pos」の複数枚版）
-//   - 1 枚ずつの姿勢（SOLVEPNP_IPPE_SQUARE。board を初期値にしない独立の解）も診断用に出し、08 と同じ定義の spread（候補の位置の最大距離）を返す
+//   - 1 枚ずつの姿勢も診断用に出し、08 と同じ定義の spread（候補の位置の最大距離）を返す。単体解は board と独立に IPPE の最良解と鏡像の 2 解を作り、
+//     誤差の比が明確（2 倍以上）なら誤差の小さい方、僅差なら board の姿勢に回転が近い方を採る（pnp-board.ts の chooseSingleSolution）。
+//     鏡像（ヨーの曖昧さ）で spread が膨らまず、配置の誤り（位置のずれ）は spread に残る
 //   - board が解けたが再投影誤差が大きい（複数枚の配置と観測が合わない = 配置の入力ミス・貼りズレ）ときは、同じ不正な配置で原点に直す
 //     1 枚ずつの平均は使わず、原点マーカーが見えていれば原点だけで解き、見えていなければ直前の姿勢を維持する（HUD に inconsistent spread=…m）
 //   - usedIds は最終の姿勢に実際に寄与した ID だけ（board なら全枚、原点だけで解いたら原点、single なら誤差で捨てなかった候補）
@@ -22,9 +24,9 @@ import { fusePoseCandidates, levelRotation, tiltDegOf } from "./marker-layout";
 import type { PoseCandidate } from "./marker-layout";
 import { loadOpenCv } from "./opencv-loader";
 import type { CvMat, OpenCv } from "./opencv-loader";
-import { createArucoDetector, detectMarkers, guessFromCameraMatrix, solveBoardPnP, solveSingleMarker } from "./opencv-pose";
+import { createArucoDetector, detectMarkers, guessFromCameraMatrix, solveBoardPnP, solveSingleMarkerPair } from "./opencv-pose";
 import type { ArucoDetectorLike, PnpGuess, PnpMethod, PnpResult } from "./opencv-pose";
-import { buildBoard, cameraMatrix, focalPxOf, meanV3, reprojLimitPx } from "./pnp-board";
+import { buildBoard, cameraMatrix, chooseSingleSolution, focalPxOf, meanV3, reprojLimitPx } from "./pnp-board";
 import type { Board, MarkerDetection } from "./pnp-board";
 import type { V3 } from "./surface";
 
@@ -90,6 +92,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
   const markerWorld = new THREE.Matrix4();
   const markerCenter = new THREE.Vector3();
   const anchorOffset = new THREE.Vector3();
+  const predictedMarker = new THREE.Matrix4();
   const identity = new THREE.Matrix4();
   const inverseCache = new WeakMap<THREE.Matrix4, THREE.Matrix4>();
   function inverseOf(m: THREE.Matrix4): THREE.Matrix4 {
@@ -212,17 +215,25 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     }
   }
 
-  /** 1 枚ずつ独立に解いた姿勢（board を初期値にしない IPPE_SQUARE。08 の POSIT と同じ「1 枚ずつ」）をアンカーの候補にしたもの */
+  /** 1 枚ずつ解いた姿勢（board と独立の 2 解から選ぶ。08 の POSIT と同じ「1 枚ずつ」）をアンカーの候補にしたもの */
   type SingleCandidate = PoseCandidate & { id: number; error: number; tilt: number };
 
   /** 1 枚ずつの姿勢 → アンカーの候補（08 の apply と同じ式。水平化するなら「マーカー中心 − R_level・pos」） */
-  function singleCandidates(detections: readonly MarkerDetection[], board: Board, K: number[], upArr: V3 | null): SingleCandidate[] {
+  /** @param boardCam board の解（アンカー → three.js カメラの 4x4）。2 解が僅差のときだけ、これから予測したマーカーの姿勢に近い方を選ぶのに使う */
+  function singleCandidates(detections: readonly MarkerDetection[], board: Board, K: number[], upArr: V3 | null, boardCam: readonly number[] | null): SingleCandidate[] {
     const out: SingleCandidate[] = [];
     for (const d of detections) {
       const toAnchor = toAnchorOf(d.id);
       if (!toAnchor || !board.ids.includes(d.id) || out.some((c) => c.id === d.id)) continue;
-      const single = solveSingleMarker(cv!, d.corners, opts.markerSizeM, K);
-      if (!single) continue;
+      const pair = solveSingleMarkerPair(cv!, d.corners, opts.markerSizeM, K);
+      if (!pair) continue;
+      let reference: number[] | null = null;
+      if (boardCam) {
+        objToCam.fromArray(boardCam);
+        predictedMarker.multiplyMatrices(objToCam, toAnchor);
+        reference = predictedMarker.elements;
+      }
+      const single = chooseSingleSolution(pair.best, pair.mirror, reference).pick;
       const sidePx = board.sidesPx[board.ids.indexOf(d.id)];
       objToCam.fromArray(single.cameraMatrix);
       markerWorld.multiplyMatrices(camera.matrixWorld, objToCam);
@@ -292,18 +303,22 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       lost(now);
       return;
     }
-    // ---- 1 枚ずつ独立に解いた候補（board を初期値にしない）。spread（08 と同じ「候補の原点の位置のばらつき」）と ?pose=single に使う ----
-    const singles = singleCandidates(detections, board, K, upArr);
-    const goodSingles = singles.filter((c) => Number.isFinite(c.error) && c.error <= opts.maxPoseError);
-    const fused = fusePoseCandidates(goodSingles);
-    const spreadM = fused?.spread ?? 0;
+    // ---- 1 枚ずつの候補。spread（08 と同じ「候補の原点の位置のばらつき」）と ?pose=single に使う ----
+    const singlesWith = (boardCam: readonly number[] | null) => {
+      const goodSingles = singleCandidates(detections, board, K, upArr, boardCam).filter((c) => Number.isFinite(c.error) && c.error <= opts.maxPoseError);
+      const fused = fusePoseCandidates(goodSingles);
+      return { goodSingles, fused, spreadM: fused?.spread ?? 0 };
+    };
 
     let usedIds: number[] = [];
     let errText = "";
     let tilt = 0;
     let inconsistent = false;
+    let spreadM = 0;
     if (opts.poseSource === "single") {
-      // single: 08 と同じ重み付き平均（POSIT を IPPE_SQUARE に替えただけ。誤差の大きい候補は 1 枚ずつ捨てる）
+      // single: 08 と同じ重み付き平均（POSIT を IPPE_SQUARE に替えただけ。誤差の大きい候補は 1 枚ずつ捨てる）。board が無いので 2 解は誤差の小さい方
+      const { goodSingles, fused } = singlesWith(null);
+      spreadM = fused?.spread ?? 0;
       if (!fused) {
         lost(now);
         return;
@@ -329,6 +344,8 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       }
       self.reprojPx = result.errPx;
       self.pnpUsed = result.method;
+      // 単体解の 2 解が僅差のときは、棄却される board でも（姿勢は解けているので）それに近い方を選ぶ。配置の誤りは位置のずれとして spread に残る
+      spreadM = singlesWith(result.cameraMatrix).spreadM;
       let solvedBoard = board;
       if (!boardOk(result, limitPx)) {
         if (board.ids.length < 2) {

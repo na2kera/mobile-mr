@@ -402,9 +402,8 @@ try {
   check("反映で全員に配置（床 1・正面 5）が届く（HUD の layout / 俯瞰画面の markers）", mk1.layout === "1:floor,5:wall" && mk2.layout === "1:floor,5:wall" && mkOv.markers === "1:floor,5:wall" && mkOv.markersSent === 1, `${mk1.layout} / ${mk2.layout} / ${mkOv.markers}`);
   check("サーバーが markers → 1:floor,5:wall を記録している", serverLines.some((l) => /markers → 1:floor,5:wall/.test(l)));
   check("ウィンドウ 1 は原点と ID 5 の 2 枚を同時に使って位置合わせしている", mk1.markerIds.size === 2 && mk1.markerIds.has(0) && mk1.markerIds.has(5), mk1.marker);
-  // spread は board を初期値にしない独立の 1 枚ずつの IPPE_SQUARE から出す（08 と同じ意味）。この幾何（100mm をほぼ正面から）では
-  // 1 枚の IPPE の 2 解（鏡像）の誤差が僅差で ID 5 が鏡像を拾い 0.16m 前後になる（08 の POSIT は 5cm 未満）。配置の一致は reproj と inconsistent が出ないことで見る
-  check("2 枚が配置どおり（board の reproj < 2px・inconsistent 無し）で、独立の 1 枚ずつの spread は 0.2m 未満（鏡像の揺れの範囲。配置ずれの 0.6m とは区別できる）", mk1.markerIds.size === 2 && mk1.reproj < 2 && !/inconsistent/.test(mk1.hudLine) && mk1.spread < 0.2, `spread=${mk1.spread} reproj=${mk1.reproj}`);
+  // spread は board と独立に作った単体解の 2 解（IPPE の最良解と鏡像）から選ぶ（僅差なら board に近い方）ので、正面の小さい 1 枚の鏡像で膨らまない
+  check("2 枚から出した原点の位置のばらつき（spread）が 5cm 未満（配置と合成カメラの幾何が一致）", mk1.markerIds.size === 2 && mk1.spread < 0.05 && !/inconsistent/.test(mk1.hudLine), `spread=${mk1.spread} reproj=${mk1.reproj}`);
   check("配置を配っても塗りは消えず、練習のまま連射が受理され続けている", mk1.phase === "practice" && mk1.accepted > sz1.accepted && (mk1.scores[mk1.me] ?? 0) >= (sz1.scores[sz1.me] ?? 0), `${sz1.accepted} → ${mk1.accepted}`);
   check("俯瞰画面の一覧に各プレイヤーが使っているマーカーが出る（p1 は 0+5、p2 は 0）", /^(0\+5|5\+0)$/.test(mkOv.peerMarkers[mk1.me] ?? "") && mkOv.peerMarkers[mk2.me] === "0", JSON.stringify(mkOv.peerMarkers));
   const markerListText = await p3.eval("document.querySelector('#players')?.textContent");
@@ -508,7 +507,7 @@ try {
   const shifted1 = await readHud(p1);
   const draggedDist = Math.hypot(afterGrab[0] - 0.25, afterGrab[1], afterGrab[2]);
   console.log(`dragged window1: marker=${shifted1.marker} spread=${shifted1.spread} (moved ${draggedDist.toFixed(3)}m)`);
-  // board が再投影誤差の上限内なら 2 枚のまま、超えたら「配置不整合」で原点だけで解く（1 枚ずつの平均には落とさない）。どちらでも spread は独立の 1 枚ずつの解から出す
+  // board が再投影誤差の上限内なら 2 枚のまま、超えたら「配置不整合」で原点だけで解く（1 枚ずつの平均には落とさない）。どちらでも spread は board と独立の 2 解から選んだ単体解から出す
   const shiftedInconsistent = /inconsistent/.test(shifted1.hudLine ?? "");
   check("配置を実際と違う位置に動かすと、ウィンドウ 1 の spread がずれのぶん大きくなる（診断表示。不整合と判定したら原点だけで解いて inconsistent と出す）", draggedDist > 0.02 && shifted1.spread > draggedDist * 0.5 && (shifted1.markerIds.size === 2 || (shiftedInconsistent && shifted1.markerIds.size === 1 && shifted1.markerIds.has(0))), `spread=${shifted1.spread} moved=${draggedDist.toFixed(3)} ids=${[...shifted1.markerIds]} inconsistent=${shiftedInconsistent}`);
   // 元の位置（右 0.25m）に戻して以降の確認を続ける
@@ -517,7 +516,7 @@ try {
   await p3.eval("document.querySelector('#apply-markers').click()");
   await sleep(2500);
   const restored1 = await readHud(p1);
-  check("配置を元に戻すと 2 枚の board に戻り（inconsistent が消える）、spread が小さく戻る（< 0.2m）", restored1.markerIds.size === 2 && !/inconsistent/.test(restored1.hudLine) && restored1.spread < 0.2, `spread=${restored1.spread} ${restored1.hudLine}`);
+  check("配置を元に戻すと spread が小さく戻る（2 枚の board に戻り inconsistent が消える）", restored1.markerIds.size === 2 && !/inconsistent/.test(restored1.hudLine) && restored1.spread < 0.05, `spread=${restored1.spread} ${restored1.hudLine}`);
 
   // 原点マーカーを隠す → ID 5 だけで追跡が続き、位置（self）は変わらない
   await p1.eval("window.__fakeMarkers.hidden.add(0)");
