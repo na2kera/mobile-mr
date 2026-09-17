@@ -60,7 +60,7 @@ WASM を取得していなくてもページは開け、HUD に `apriltag=error:
 
 ```sh
 npm run test:splatoon-apriltag    # Node: tag36h11 の絵柄が公式画像と一致 / 姿勢の変換の往復（角の順序込み）/ 変換の取り違えを検出できること
-npm run check:splatoon-apriltag   # ヘッドレス Chrome: 検出器の比較 + 入室 → 練習 → 対戦 → 結果（PORT 5198 / CDP 9345）
+npm run check:splatoon-apriltag   # ヘッドレス Chrome: 検出器の比較 + 入室 → 練習 → 対戦 → 結果（PORT 5205 / CDP 9346）
 npm run test:splatoon && npm run check:splatoon   # 08 を壊していないこと
 ```
 

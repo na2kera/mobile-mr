@@ -16,9 +16,9 @@ import { join } from "node:path";
 import WebSocket from "ws";
 
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-// 他の headless-*.mjs と被らない値（同時に走らせたとき相手のサーバーに繋がらないように）
-const PORT = Number(process.env.PORT ?? "") || 5198;
-const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9345;
+// 並行する 08 系の比較デモと被らない固定値（08 本体 5189/9336、08-2 5197/9342、08-3 5201/9344・5198、08-4 5203/9345、08-6 5211/9351）
+const PORT = Number(process.env.PORT ?? "") || 5205;
+const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9346;
 /** 入室後に練習の HUD を読むまでの待ち [s] */
 const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 12;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s] */
