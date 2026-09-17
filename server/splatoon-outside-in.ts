@@ -5,7 +5,11 @@
 //   - プレイヤーごとにゴーグルへ貼るマーカーの ID（trackId）を入室順に割り当て、welcome / join で全員に伝える
 //   - track を受けたら、マーカーの ID をプレイヤーに引き当てて tracked として全員に配る（スマホは自分の位置をここから受け取る）
 //   - プレイヤーの pose はこれまでどおり受け取る（手の 21 点が要る）が、pos はトラッカーの直近の測定値で上書きして配り、
-//     発射位置の検証（「頭から 1.2m 以内」）もその値で行う。トラッカーが見失って TRACK_STALE_MS 過ぎたら自己申告に戻す
+//     発射位置の検証（「頭から 1.2m 以内」）もその値で行う。自己申告の位置は使わない: 一度も測定されていないプレイヤーの
+//     pose は配らず、発射は "not tracked yet" で拒否する。見失った後（TRACK_STALE_MS 超過）も最後の測定位置を基準にする
+//     （Codex レビューの指摘: 未測定でも自己申告の pose で射撃できた）
+//   - トラッカーは 1 台だけ有効（最初に接続した tracker が所有者。2 台目は接続できるが track は "not active tracker" で
+//     拒否され、所有者が切断したら引き継ぐ。Codex レビューの指摘: 複数トラッカーが locked と位置を競合する）
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -17,7 +21,6 @@ import {
   SPLATOON_OUTSIDE_IN_PROTOCOL_VERSION,
   TRACK_ID_FIRST,
   TRACK_RATE_PER_SEC,
-  TRACK_STALE_MS,
   type ClientMessage,
   type ClientRole,
   type PlayerPose,
@@ -55,6 +58,8 @@ type State = {
   trackRate: RateLimiter;
   overviews: Set<string>;
   trackers: Set<string>;
+  /** 有効なトラッカー（最初に接続した tracker。track を受け付けるのはこれだけ）。居なければ null */
+  activeTracker: string | null;
   /** プレイヤー id → ゴーグルのマーカー ID */
   trackIds: Map<string, number>;
   /** プレイヤー id → 直近の観測 */
@@ -90,14 +95,22 @@ function trackerStatus(room: Ctx): TrackerStatus {
   return { connected: room.state.trackers.size, locked: room.state.locked };
 }
 
+/** 所有者が居なければ、接続順で次のトラッカーを所有者にする（原点は未確定に戻る） */
+function electTracker(room: Ctx) {
+  if (room.state.activeTracker && room.state.trackers.has(room.state.activeTracker)) return;
+  const next = [...room.state.trackers][0] ?? null;
+  room.state.activeTracker = next;
+  room.state.locked = false;
+  if (next) console.log(`[splatoon-oi] ${next} is now the active tracker`);
+}
+
 function trackIdsRecord(room: Ctx): Record<string, number> {
   return Object.fromEntries(room.state.trackIds);
 }
 
-/** 直近の観測が新しければ返す（TRACK_STALE_MS を過ぎたら null） */
-function freshTracked(room: Ctx, id: string, now: number): Tracked | null {
-  const t = room.state.tracked.get(id);
-  return t && now - t.atMs <= TRACK_STALE_MS ? t : null;
+/** 直近の観測（見失っていても最後の測定値。一度も測定されていなければ null） */
+function lastTracked(room: Ctx, id: string): Tracked | null {
+  return room.state.tracked.get(id) ?? null;
 }
 
 function parseClientMessage(data: RawData): ClientMessage | null {
@@ -262,6 +275,7 @@ export function splatoonOutsideInServer() {
       trackRate: new RateLimiter(TRACK_RATE_PER_SEC),
       overviews: new Set(),
       trackers: new Set(),
+      activeTracker: null,
       trackIds: new Map(),
       tracked: new Map(),
       locked: false,
@@ -294,8 +308,10 @@ export function splatoonOutsideInServer() {
         } satisfies ServerMessage);
         console.log(`[splatoon-oi] ${id} ${role} joined`);
         if (role === "tracker") {
-          // トラッカーが（再）接続した: 原点は未確定から。全員に状態を知らせる（スマホの HUD「トラッカー待ち」→「原点待ち」）
-          room.state.locked = false;
+          // トラッカーが（再）接続した: 所有者が居なければこれが所有者（原点は未確定から）。居れば待機（track は拒否される）。
+          // 全員に状態を知らせる（スマホの HUD「トラッカー待ち」→「原点待ち」）
+          electTracker(room);
+          if (room.state.activeTracker !== id) console.log(`[splatoon-oi] ${id} tracker standby (active: ${room.state.activeTracker})`);
           room.broadcast({ type: "tracked", t: now, tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         }
         return;
@@ -331,6 +347,11 @@ export function splatoonOutsideInServer() {
           return;
         }
         if (!room.state.trackRate.allow(id, now)) return;
+        if (room.state.activeTracker !== id) {
+          // 2 台目のトラッカー: 位置と locked を競合させない（所有者が切断したら引き継ぐ）
+          room.send(id, { type: "rejected", reason: "not active tracker" } satisfies ServerMessage);
+          return;
+        }
         room.state.locked = msg.locked;
         const byMarker = new Map<number, string>();
         for (const [pid, mid] of room.state.trackIds) byMarker.set(mid, pid);
@@ -456,13 +477,19 @@ export function splatoonOutsideInServer() {
       if (!isPlayer(room, id)) return; // 俯瞰画面・トラッカーは pose / shot を送らない（送ってきても捨てる）
       if (msg.type === "pose") {
         if (!room.state.poseRate.allow(id, now)) return;
-        // 位置はトラッカーの測定値で上書きする（自己申告は使わない）。見失って TRACK_STALE_MS 過ぎたら自己申告のまま
-        const t = freshTracked(room, id, now);
-        const pos = t ? t.pos : msg.pos;
-        game.updatePose(id, pos, now, msg.fist === true);
+        // 位置は常にトラッカーの測定値（見失っていても最後の値）。自己申告の pos は使わず、一度も測定されていなければ配らない
+        // （頭の位置も更新しない = 発射は "not tracked yet" で拒否される）
+        const t = lastTracked(room, id);
+        if (!t) return;
+        game.updatePose(id, t.pos, now, msg.fist === true);
         const { type: _type, ...pose } = msg;
-        room.broadcast({ type: "pose", id, ...pose, pos } satisfies ServerMessage, id);
+        room.broadcast({ type: "pose", id, ...pose, pos: t.pos } satisfies ServerMessage, id);
       } else if (msg.type === "shot") {
+        if (!lastTracked(room, id)) {
+          // 未測定のプレイヤーは撃てない（自己申告の頭位置で検証させない）
+          room.send(id, { type: "rejected", reason: "not tracked yet" } satisfies ServerMessage);
+          return;
+        }
         const shot = game.shoot(id, msg.pos, msg.vel, msg.radius, now);
         if (shot) {
           room.broadcast({ type: "shot", shot, t: now } satisfies ServerMessage);
@@ -479,9 +506,10 @@ export function splatoonOutsideInServer() {
     onLeave(room: Ctx, id, now) {
       if (room.state.overviews.delete(id)) return; // 俯瞰画面の退室は誰にも関係ない
       if (room.state.trackers.delete(id)) {
-        // トラッカーが居なくなった: 全員に知らせる（スマホは最後の位置を保持し HUD に「トラッカー無し」）
+        // トラッカーが居なくなった: 所有者なら次のトラッカーが引き継ぐ（原点は未確定から）。全員に知らせる
+        // （スマホは最後の位置を保持し HUD に「トラッカー無し」か「原点未確定」）
         room.state.trackRate.forget(id);
-        if (room.state.trackers.size === 0) room.state.locked = false;
+        electTracker(room);
         room.broadcast({ type: "tracked", t: now, tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         return;
       }

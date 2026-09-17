@@ -20,8 +20,8 @@ import WebSocket from "ws";
 
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 // 別の worktree で同時に走らせるときは PORT / CDP_PORT で変える
-const PORT = Number(process.env.PORT ?? "") || 5197;
-const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9342;
+const PORT = Number(process.env.PORT ?? "") || 5201;
+const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9344;
 /** 原点を確定してから練習の HUD を読むまでの待ち [s]（発射 2〜3 回） */
 const WAIT_SEC = Number(process.env.WAIT_SEC ?? "") || 12;
 /** 対戦開始を押してから試合中の HUD を読むまでの待ち [s] */

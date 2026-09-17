@@ -558,6 +558,8 @@ let tracker: Tracker | null = null;
 let trackerClient: GameClient | null = null;
 let trackerNet = "idle";
 let tracksSent = 0;
+/** サーバーが track を拒否した理由（2 台目のトラッカーは "not active tracker"。所有者が切断すると引き継いで消える） */
+let trackerRejected = "";
 /** フェイクカメラで隠すマーカー（ヘッドレス確認から window.__fakeTrack.hidden で切り替えて、見失い → 保持を見る） */
 const fakeTrackHidden = new Set<number>();
 if (FAKE_CAM) (window as unknown as { __fakeTrack: unknown }).__fakeTrack = { hidden: fakeTrackHidden };
@@ -587,11 +589,19 @@ function connectTracker() {
       onPeerLeave: ignore,
       onPeerPose: ignore,
       onShot: ignore,
-      onRejected: (reason) => console.warn(`[tracker] rejected by server: ${reason}`),
+      onRejected: (reason) => {
+        if (trackerRejected !== reason) console.warn(`[tracker] rejected by server: ${reason}`);
+        trackerRejected = reason;
+        renderPanel();
+      },
       onState: ignore,
       onField: ignore,
       onMarkers: ignore,
-      onTracked: ignore,
+      onTracked: (_t, status) => {
+        // 所有者が切断してこちらが引き継いだ（locked が false に戻る）ら、拒否の表示を消す
+        if (trackerRejected && !status.locked) trackerRejected = "";
+        renderPanel();
+      },
     },
     "tracker",
   );
@@ -616,6 +626,7 @@ async function startTracker() {
     fake: FAKE_CAM ? { players: FAKE_PLAYERS, cam: FAKE_TRACK_CAM, hidden: fakeTrackHidden } : null,
     onTrack: (locked, entries: TrackEntry[]) => {
       if (trackerClient?.sendTrack(locked, entries)) tracksSent++;
+      // 拒否されていた（2 台目）なら、次の応答で状態が変わるまで表示は残す（onRejected / onTracked で更新）
     },
     onChange: renderPanel,
   });
@@ -1145,7 +1156,7 @@ function renderPanel() {
     ? `未起動（サーバー: トラッカー ${trackerStatus.connected} 台${trackerStatus.locked ? "・原点確定" : ""}）`
     : [
         tracker.error ? `カメラを開けません: ${tracker.error}` : tracker.info,
-        `ws=${trackerNet} sent=${tracksSent}`,
+        `ws=${trackerNet} sent=${tracksSent}${trackerRejected ? `（サーバーが拒否: ${trackerRejected === "not active tracker" ? "別のトラッカーが有効。切断されたら引き継ぎます" : trackerRejected}）` : ""}`,
         !tracker.locked ? (tracker.originVisible(now) ? "原点マーカーが見えています → 「原点を確定」" : `原点マーカー（ID ${MARKER_ID} か配置の追加マーカー）をカメラに映してください`) : "原点は確定済み（カメラを動かしたら「原点を解除」→ 確定し直す）",
       ].join("\n");
   const total = Math.max(1, s?.totalCells ?? 1);

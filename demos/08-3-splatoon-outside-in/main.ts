@@ -1143,13 +1143,14 @@ function updateMessages(now: number) {
   } else if (!passthrough) {
     text = "カメラを起動中…";
   } else if (!anchor.visible) {
-    // 位置はトラッカー（PC の Web カメラ）から来る。まだ来ていない理由を順に出す
+    // 位置はトラッカー（PC の Web カメラ）から来る。来るまでは撃てない（サーバーも "not tracked yet" で拒否する）。
+    // まだ来ていない理由を順に出す
     text =
       oiStatus.connected === 0
-        ? "トラッカー（俯瞰画面の Web カメラ）を待っています"
+        ? "トラッカー（俯瞰画面の Web カメラ）を待っています\n位置が届くまで撃てません"
         : !oiStatus.locked
-          ? "俯瞰画面で「原点を確定」してください"
-          : `ゴーグルのマーカー ID ${myTrackId ?? "?"} を\nPC のカメラに向けてください`;
+          ? "俯瞰画面で「原点を確定」してください\n位置が届くまで撃てません"
+          : `ゴーグルのマーカー ID ${myTrackId ?? "?"} を\nPC のカメラに向けてください（届くまで撃てません）`;
     color = "#fdd663";
   } else if (trackerStatus.startsWith("error")) {
     text = "手の検出に失敗しました\n画面を押している間、視界の中央へ連射";
