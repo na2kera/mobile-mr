@@ -18,17 +18,17 @@
 
 | ファイル | 08 との関係 |
 | --- | --- |
-| `main.ts` | 08 のコピー。差し替えた節: import（`createMarkerAnchor` → `createDetectorAnchor` + AprilTag）、冒頭コメント、パラメータ（`?detector=` `?aprilDecimate=` `?aprilSigma=`）、`fakeWorld()`（絵柄を検出器に合わせる）、`startCameraAndMarker`（WASM を先に読んでから検出器を決め、カメラとアンカーを作る。読めなければ js-aruco2 に落とす）、HUD（`marker=` の行が `april=`、1 行目に `detector=` `apriltag=`）。ゲーム・手・インク・ピア・俯瞰画面は無変更 |
+| `main.ts` | 08 のコピー。差し替えた節: import（`createMarkerAnchor` → `createDetectorAnchor` + AprilTag）、冒頭コメント、パラメータ（`?detector=` `?aprilDecimate=` `?aprilSigma=`）、`fakeWorld()`（絵柄を検出器に合わせる）、`startCameraAndMarker`（WASM を先に読んでから検出器を決め、カメラとアンカーを作る。読めなければ js-aruco2 に落とす。検出中の例外が連続 30 回でも js-aruco2 に落とす）、HUD（`marker=` の行が `april=`、1 行目に `detector=` `apriltag=`）。ゲーム・手・インク・ピア・俯瞰画面は無変更 |
 | `apriltag-detector.ts` | 新規。WASM の読み込み（`<script>` 差し込み + `AprilTagWasm({locateFile})`）と cwrap 呼び出し、RGBA → グレースケール、JSON → `MarkerObservation`（08 の `MarkerDetector` と同じ形）。誤差は AprilTag の `e` ではなく 08 と同じ正規化再投影誤差を自前で計算 |
 | `apriltag-pose.ts` | 新規。AprilTag の R, t → 08 の Matrix4 の純粋な変換と再投影（three.js 非依存。Node のテストから import） |
-| `marker-anchor-apriltag.ts` | 新規。`src/shared/marker-anchor.ts` の `createMarkerAnchor` の写しで、検出器を引数で受ける（`fusePoseCandidates` / `levelRotation` / `tiltDegOf` は shared から import） |
+| `marker-anchor-apriltag.ts` | 新規。`src/shared/marker-anchor.ts` の `createMarkerAnchor` の写しで、検出器を引数で受ける（`fusePoseCandidates` / `levelRotation` / `tiltDegOf` は shared から import）。加えて検出器の例外を止める（そのフレームはロスト扱い・ログは間引き・連続したら `fallbackDetector` に切り替え） |
 | `tag36h11.ts` | 新規。tag36h11 の符号表（0〜249）と bit の座標、絵柄（6×6 のビット / ASCII / 印刷用 SVG）。公式 PNG と一致することをテスト |
 | `fake-apriltags.ts` | 新規。フェイクカメラの tag36h11 描画（ピンホール投影と塗りは `src/shared/fake-markers.ts` を import） |
 | `markers.html` / `markers.ts` | 08 のコピー。SVG を `tag36h11Svg` から生成。文言を tag36h11 に |
 | `index.html` / `overview.html` | 08 のコピー。タイトルと案内（方式の説明・固有パラメータ）だけ変更。レイアウト・色は同じ |
 | `overview.ts` `game-client.ts` `ink-tank.ts` `ink-view.ts` `splat-sound.ts` `fake-splat-hand.ts` | 08 のコピーのまま（無変更） |
-| `scripts/fetch-apriltag.mjs` | 新規。WASM を `public/vendor/apriltag/` に取得（`.gitignore` 済み） |
-| `scripts/test-08-5-apriltag.mjs` | 新規。純粋な数学の回帰テスト |
+| `scripts/fetch-apriltag.mjs` | 新規。WASM・2 つのライセンス・照合用の `tag36h11.c` を `public/vendor/apriltag/` に取得（`.gitignore` 済み）。5 ファイルとも SHA-256 を固定して検証 |
+| `scripts/test-08-5-apriltag.mjs` | 新規。純粋な数学の回帰テスト + 符号表 250 件と upstream `tag36h11.c` の照合（未取得なら SKIP）+ 検出器が例外を投げてもアンカーの `update` が例外を外に出さないこと |
 | `scripts/headless-splatoon-apriltag.mjs` | 新規。`headless-splatoon.mjs` をもとにした、検出器の比較 + ゲームの流れ |
 
 `src/shared/` と `server/` は変更していない（サーバーは 08 と同じ `server/splatoon.ts`、同じ `SPLATOON_PATH`。room 名で分かれる）。
@@ -44,7 +44,7 @@
 | `aprilSigma` | `0` | AprilTag の `quad_sigma`（分割前のガウスぼかし [px]）。実カメラでノイズが多いときに 0.8 程度 |
 | `camFov` | ラベルから | 焦点距離の換算に使う水平 FOV（08 と同じ） |
 
-HUD: 1 行目に `detector=apriltag apriltag=ready decimate=2 sigma=0`（WASM が読めなければ `apriltag=error: …` と `detector=aruco2`）。位置合わせの行は `april=id=0 err=0.01 tilt=1deg Δ=0.00m 12ms layout=- self=(…)`（末尾の ms が検出 1 回の処理時間。aruco2 のときは `marker=`）。
+HUD: 1 行目に `detector=apriltag apriltag=ready decimate=2 sigma=0`（WASM が読めなければ `apriltag=error: …` と `detector=aruco2`）。位置合わせの行は `april=id=0 err=0.01 tilt=1deg Δ=0.00m 12ms layout=- self=(…)`（末尾の ms が検出 1 回の処理時間。aruco2 のときは `marker=`）。検出中に WASM が例外を投げたフレームはロスト扱いで、この行に `error(3x)=RuntimeError: …` と出る。連続 30 回で js-aruco2 に切り替わり、1 行目が `detector=aruco2 apriltag=error: detect threw 30x (…)` になる。
 
 ## セットアップ
 
@@ -117,4 +117,7 @@ HUD を 20 回読んで、追跡中だった割合（検出率）・`self=`（�
 
 - [arenaxr/apriltag-js-standalone](https://github.com/arenaxr/apriltag-js-standalone)（`apriltag_wasm.js` / `.wasm`）: **BSD-3-Clause**（Copyright (c) 2020, The CONIX Research Center）。コミット `f0fe55676265a1251ad36f18bac9939206a59e19` の `html/` 配下のビルド済みを `scripts/fetch-apriltag.mjs` で取得（LICENSE も同じ場所に置く）
 - 中の [AprilRobotics/apriltag](https://github.com/AprilRobotics/apriltag)（C ライブラリ。WiseLabCMU の fork をサブモジュールで取り込んだもの）: **BSD-2-Clause**（Copyright (C) 2013-2016, The Regents of The University of Michigan）。`tag36h11.ts` の符号表と bit の座標はその `tag36h11.c` から写した
-- どちらも再配布時に著作権表示と免責の記載が要る（`public/vendor/apriltag/LICENSE` と、この節）
+- どちらも再配布時に著作権表示と免責の記載が要る。`scripts/fetch-apriltag.mjs` が全文を配布物と同じ場所に置く:
+  - `public/vendor/apriltag/LICENSE` — apriltag-js-standalone の BSD-3-Clause 全文（コミット `f0fe556` の `LICENSE`）
+  - `public/vendor/apriltag/LICENSE.apriltag` — apriltag C ライブラリの BSD-2-Clause 全文（同コミットのサブモジュール `apriltag` が指すコミット `4cdba6a8c6cf4efeb032fa5542da927d4677c035` の `LICENSE.md`）
+- 同じサブモジュールのコミットの `tag36h11.c` も `public/vendor/apriltag/` に取得する（テストで `tag36h11.ts` の全 250 件と照合するため）

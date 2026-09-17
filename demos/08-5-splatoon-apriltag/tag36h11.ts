@@ -6,6 +6,7 @@
 //   - bit i の位置は (bit_x[i], bit_y[i])。黒枠の外側の左上を (0,0) とする 8×8 のセル座標（x 右・y 下）で 1〜6 が中身
 //   - 幾何は width_at_border = 8（黒い正方形 = 8 セル）、total_width = 10（外側に白い余白 1 セル）。
 //     ARUCO_MIP_36h12（08）と同じ「余白 1 + 黒枠 1 + 中身 6 + 黒枠 1 + 余白 1」なので、fake-markers.ts の投影（10 セル格子）がそのまま使える
+// 全 250 件は upstream の tag36h11.c（npm run fetch:apriltag で取得）と突き合わせるテストがある。
 // ID 0 / 1 / 5 が公式の画像（AprilRobotics/apriltag-imgs の tag36h11/tag36_11_0000N.png、10×10 px）とセル単位で一致することを確認済み
 // （scripts/test-08-5-apriltag.mjs に期待パターンとして残してある）。three.js に依存させない（Node のテストから import するため）
 

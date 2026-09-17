@@ -5,6 +5,10 @@
 // 観測 → アンカーの数学（重力での水平化・複数マーカーの重み付き平均・スナップ / lerp）は 08 と同じ
 // （marker-layout.ts の fusePoseCandidates / levelRotation / tiltDegOf を import。既存ファイルは変更しない）。
 // 違いは検出器だけ、が比較の前提なのでここは 08 の写しに留める（差分は info の先頭に検出器名を出すことと、詳細な時間の内訳だけ）
+// もう 1 つの差分: 検出器の例外をここで止める。WASM の実行時例外（WebAssembly.RuntimeError / RangeError）が update() から
+// three.js の描画コールバックまで伝播すると次のフレームが予約されず、画面・HUD・通信が全部止まる。例外が出たフレームは
+// ロスト扱いにし（info に error を出す = HUD の april= の行）、ログは間引く。同じ失敗が maxConsecutiveFailures 回続いたら
+// fallbackDetector（js-aruco2）に切り替える
 import * as THREE from "three";
 import type { MarkerDetector, MarkerObservation } from "../../src/shared/marker-detector";
 import type { MarkerAnchor, MarkerAnchorOptions } from "../../src/shared/marker-anchor";
@@ -14,15 +18,33 @@ import type { PoseCandidate } from "../../src/shared/marker-layout";
 export type DetectorAnchorOptions = Omit<MarkerAnchorOptions, "markerSizeM"> & {
   /** 検出器（AprilTag か js-aruco2）。detect(image, focalPx) の形は 08 の MarkerDetector と同じ */
   detector: MarkerDetector;
+  /** detect() が連続でこの回数だけ例外を投げたら fallbackDetector に切り替える（既定 30） */
+  maxConsecutiveFailures?: number;
+  /** 切り替え先の検出器を作る（js-aruco2）。無ければ切り替えずに毎フレームロスト扱いを続ける */
+  fallbackDetector?: () => MarkerDetector;
+  /** fallbackDetector に切り替えた直後に呼ばれる（main.ts が HUD の detector= / apriltag= を更新する） */
+  onFallback?: (lastError: string, failures: number) => void;
 };
 
 export type DetectorAnchor = MarkerAnchor & {
   /** 直近の検出で受け取った観測の数（姿勢の検証で捨てる前） */
   readonly lastObservedCount: number;
+  /** 直近の検出の例外（成功したら空に戻る） */
+  readonly lastDetectError: string;
+  /** detect() が連続で例外を投げた回数（成功したら 0） */
+  readonly consecutiveFailures: number;
+  /** fallbackDetector に切り替え済みか */
+  readonly fellBack: boolean;
 };
 
+/** 例外ログの間引き [ms] */
+const ERROR_LOG_INTERVAL_MS = 2000;
+
 export function createDetectorAnchor(opts: DetectorAnchorOptions): DetectorAnchor {
-  const { video, camera, anchor, detector } = opts;
+  const { video, camera, anchor } = opts;
+  let detector = opts.detector;
+  const maxFailures = opts.maxConsecutiveFailures ?? 30;
+  let lastErrorLogMs = -Infinity;
   const detCanvas = document.createElement("canvas");
   const detCtx = detCanvas.getContext("2d", { willReadFrequently: true })!;
 
@@ -57,6 +79,9 @@ export function createDetectorAnchor(opts: DetectorAnchorOptions): DetectorAncho
     tiltDeg: 0,
     correctionM: 0,
     lastObservedCount: 0,
+    lastDetectError: "",
+    consecutiveFailures: 0,
+    fellBack: false,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
     },
@@ -82,12 +107,56 @@ export function createDetectorAnchor(opts: DetectorAnchorOptions): DetectorAncho
       const image = detCtx.getImageData(0, 0, w, h);
       // 焦点距離 [px] は長辺から換算（08 と同じ。iOS はデバイス回転で縦横が入れ替わる）
       const focalPx = Math.max(w, h) / 2 / Math.tan(THREE.MathUtils.degToRad(opts.camHFovDeg()) / 2);
-      const observations = detector.detect(image, focalPx);
+      let observations: MarkerObservation[];
+      try {
+        observations = detector.detect(image, focalPx);
+      } catch (e: unknown) {
+        self.detMs = performance.now() - t0;
+        onDetectError(e, now);
+        return;
+      }
       self.detMs = performance.now() - t0;
       self.lastObservedCount = observations.length;
+      self.consecutiveFailures = 0;
+      if (self.lastDetectError) {
+        self.lastDetectError = "";
+        // 例外の表示を消す（検出済みなら apply が info を書き直す）
+        if (!self.everDetected) self.info = "searching";
+      }
       apply(observations, now);
     },
   };
+
+  /** 検出器が例外を投げたフレーム: ロスト扱い（観測 0 と同じ）にして、info に error を足す。連続したら fallbackDetector へ */
+  function onDetectError(e: unknown, now: number) {
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    self.consecutiveFailures++;
+    self.lastDetectError = msg;
+    self.lastObservedCount = 0;
+    if (now - lastErrorLogMs > ERROR_LOG_INTERVAL_MS) {
+      console.warn(`[marker] detect threw (${self.consecutiveFailures} in a row): ${msg}`);
+      lastErrorLogMs = now;
+    }
+    apply([], now);
+    // 未検出のときは apply が info を書き直さないので、前回の error 表示に重ねないよう基準を戻す
+    const base = self.everDetected ? self.info : "searching";
+    const failures = self.consecutiveFailures;
+    if (failures >= maxFailures && opts.fallbackDetector && !self.fellBack) {
+      try {
+        detector = opts.fallbackDetector();
+      } catch (e2: unknown) {
+        console.warn(`[marker] fallback detector could not be created: ${e2 instanceof Error ? e2.message : String(e2)}`);
+        return;
+      }
+      self.fellBack = true;
+      self.consecutiveFailures = 0;
+      console.warn(`[marker] detect threw ${failures} times in a row; switched to fallback detector: ${msg}`);
+      self.info = `${base} error(${failures}x → fallback)=${msg}`;
+      opts.onFallback?.(msg, failures);
+      return;
+    }
+    self.info = `${base} error(${failures}x)=${msg}`;
+  }
 
   function toAnchorOf(id: number): THREE.Matrix4 | null {
     if (id === opts.markerId) return identity;

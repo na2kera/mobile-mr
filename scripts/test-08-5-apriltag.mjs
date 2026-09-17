@@ -3,8 +3,15 @@
 //   2. apriltag-pose.ts — AprilTag の R, t（カメラ X 右・Y 下・Z 前 / タグ X 右・Y 下・Z 奥）→ 08 の Matrix4（three.js カメラ / マーカー Y 上・+Z 視点側）の
 //      往復: 合成の姿勢 → AprilTag の流儀で 4 隅を投影 → 変換した Matrix4 で 4 隅を投影、が角の順序込みで一致する。
 //      変換を間違えた（js-aruco2 の F = diag(1,1,-1) を使った）場合は再投影誤差が大きくなることも見る（テストが間違いを検出できる証拠）
+//   3. tag36h11.ts の符号表 250 件すべてが upstream の tag36h11.c（npm run fetch:apriltag が public/vendor/apriltag/ に置く。
+//      apriltag-js-standalone のサブモジュールが指すコミットのもの）と一致する。C の codes[] / bit_x[] / bit_y[] を正規表現で読み、
+//      tag36h11Bits の 6×6 から 36 bit 符号を組み直して突き合わせる（bit の座標も同時に検証）。ファイルが無ければ SKIP
+//   4. marker-anchor-apriltag.ts — 検出器が例外（WASM の RuntimeError / RangeError）を投げても update() が例外を外に出さず、
+//      そのフレームはロスト扱い・info に error・ログは間引き・連続 N 回で fallbackDetector に切り替わる
 // テストフレームワークは使わない（既存の scripts/test-*.mjs と同じ素の assert）。Node 22.18+ は .ts をそのまま import できる
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { register } from "node:module";
 import { TAG36H11_COUNT, tag36h11Ascii, tag36h11Bits, tag36h11Svg } from "../demos/08-5-splatoon-apriltag/tag36h11.ts";
 import {
   applyMatrix,
@@ -21,6 +28,16 @@ let passed = 0;
 function test(name, fn) {
   try {
     fn();
+    passed++;
+    console.log(`PASS: ${name}`);
+  } catch (e) {
+    console.log(`FAIL: ${name}\n  ${e.message ?? e}`);
+    process.exitCode = 1;
+  }
+}
+async function testAsync(name, fn) {
+  try {
+    await fn();
     passed++;
     console.log(`PASS: ${name}`);
   } catch (e) {
@@ -166,5 +183,210 @@ test("変換を間違えると再投影誤差が大きい（js-aruco2 の F = di
 test("焦点距離の換算は 08 の marker-anchor.ts と同じ（640px・68° → 474.4px）", () => {
   near(focalPxFromFov(640, 68), 640 / 2 / Math.tan((68 * Math.PI) / 360), 1e-9);
 });
+
+// ---- 3. 符号表 250 件を upstream の tag36h11.c と照合 ----
+const UPSTREAM_C = new URL("../public/vendor/apriltag/tag36h11.c", import.meta.url);
+if (!existsSync(UPSTREAM_C)) {
+  console.log("SKIP: tag36h11: 符号表 250 件と upstream の tag36h11.c の照合（public/vendor/apriltag/tag36h11.c が無い。npm run fetch:apriltag で取得）");
+} else {
+  test("tag36h11: 符号表 0〜249 の全件と bit の座標が upstream の tag36h11.c（サブモジュールの固定コミット）と一致する", () => {
+    const c = readFileSync(UPSTREAM_C, "utf8");
+    const codes = new Map();
+    for (const m of c.matchAll(/tf->codes\[(\d+)\]\s*=\s*0x([0-9a-fA-F]+)UL\s*;/g)) codes.set(Number(m[1]), BigInt(`0x${m[2]}`));
+    const readBits = (name) => {
+      const arr = [];
+      for (const m of c.matchAll(new RegExp(`tf->${name}\\[(\\d+)\\]\\s*=\\s*(\\d+)\\s*;`, "g"))) arr[Number(m[1])] = Number(m[2]);
+      return arr;
+    };
+    const bitX = readBits("bit_x");
+    const bitY = readBits("bit_y");
+    assert.equal(Number(c.match(/tf->ncodes\s*=\s*(\d+)/)?.[1]), 587, "ncodes");
+    assert.equal(codes.size, 587, "codes[] を全部読めた");
+    assert.equal(Number(c.match(/tf->nbits\s*=\s*(\d+)/)?.[1]), 36, "nbits");
+    assert.equal(bitX.filter(Number.isFinite).length, 36, "bit_x を全部読めた");
+    assert.equal(bitY.filter(Number.isFinite).length, 36, "bit_y を全部読めた");
+    // bit_x / bit_y は黒枠の左上を (0,0) とするセル座標で中身は 1〜6（tag36h11.ts のコメントと同じ）なので -1 して 6×6 の添字にする
+    let checked = 0;
+    for (let id = 0; id < TAG36H11_COUNT; id++) {
+      const bits = tag36h11Bits(id);
+      let code = 0n;
+      for (let i = 0; i < 36; i++) code = (code << 1n) | (bits[bitY[i] - 1][bitX[i] - 1] ? 1n : 0n);
+      assert.equal(code, codes.get(id), `ID ${id}: ours 0x${code.toString(16)} vs upstream 0x${codes.get(id)?.toString(16)}`);
+      checked++;
+    }
+    assert.equal(checked, 250);
+  });
+}
+
+// ---- 4. 検出器の例外でアンカーの update が止まらない ----
+// marker-anchor-apriltag.ts は src/shared を拡張子なしで import する（Vite の流儀）。Node の型除去はそれを解決しないので、
+// 解決に失敗したら .ts を足して再試行するフックを入れる（追加依存なし）
+register(
+  "data:text/javascript," +
+    encodeURIComponent(`export async function resolve(specifier, context, next) {
+  try { return await next(specifier, context); }
+  catch (e) {
+    if ((specifier.startsWith(".") || specifier.startsWith("/")) && !/\\.[cm]?[jt]s$/.test(specifier)) return next(specifier + ".ts", context);
+    throw e;
+  }
+}`),
+);
+// DOM の最小限のスタブ（検出用 canvas と readyState の定数だけ使う）
+globalThis.HTMLMediaElement ??= { HAVE_CURRENT_DATA: 2 };
+globalThis.document ??= {
+  createElement: () => ({
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage() {}, getImageData: (_x, _y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }) }),
+  }),
+};
+const THREE = await import("three");
+const { createDetectorAnchor } = await import("../demos/08-5-splatoon-apriltag/marker-anchor-apriltag.ts");
+
+function makeAnchor(detector, extra = {}) {
+  const video = { readyState: 4, currentTime: 0, videoWidth: 640, videoHeight: 480 };
+  const a = createDetectorAnchor({
+    detector,
+    video,
+    camera: new THREE.PerspectiveCamera(60, 4 / 3, 0.01, 100),
+    anchor: new THREE.Object3D(),
+    markerId: 0,
+    maxPoseError: 0.3,
+    detW: 640,
+    smooth: 0.5,
+    minIntervalMs: 0,
+    camHFovDeg: () => 68,
+    resnapAfterMs: 2000,
+    snapDistanceM: 0.3,
+    ...extra,
+  });
+  let now = 1000;
+  /** 1 フレーム進めて update（動画の時刻も進める） */
+  const step = (dtMs = 33) => {
+    now += dtMs;
+    video.currentTime += dtMs / 1000;
+    a.update(now);
+    return now;
+  };
+  return { a, step, now: () => now };
+}
+/** 正面 1m の原点マーカーの観測 */
+const goodObservation = () => [
+  { id: 0, corners: [{ x: 300, y: 260 }, { x: 340, y: 260 }, { x: 340, y: 220 }, { x: 300, y: 220 }], matrix: new THREE.Matrix4().makeTranslation(0, 0, -1), error: 0.01, sidePx: 40 },
+];
+/** console.warn を数えながら黙らせる */
+async function withWarns(fn) {
+  const orig = console.warn;
+  const warns = [];
+  console.warn = (...args) => warns.push(args.join(" "));
+  try {
+    await fn(warns);
+  } finally {
+    console.warn = orig;
+  }
+}
+
+await testAsync("検出器が WebAssembly.RuntimeError / RangeError を投げても update() は例外を外に出さず、そのフレームはロスト扱いで info に error が出る", () =>
+  withWarns((warns) => {
+    let mode = "ok";
+    const detector = {
+      detect() {
+        if (mode === "wasm") throw new WebAssembly.RuntimeError("memory access out of bounds");
+        if (mode === "range") throw new RangeError("offset is out of bounds");
+        return goodObservation();
+      },
+    };
+    const { a, step } = makeAnchor(detector);
+    const t0 = step();
+    assert.ok(a.everDetected && a.isTracking(t0, 500), `最初は検出できる: ${a.info}`);
+    const acceptedAt = a.lastAcceptedMs;
+    mode = "wasm";
+    for (let i = 0; i < 20; i++) assert.doesNotThrow(() => step(), `RuntimeError のフレーム ${i}`);
+    assert.equal(a.lastAcceptedMs, acceptedAt, "例外のフレームは受理されない");
+    assert.ok(!a.isTracking(step(), 500), "ロスト扱い");
+    assert.match(a.info, /^lost \(.*\) error\(\d+x\)=RuntimeError: memory access out of bounds$/, a.info);
+    mode = "range";
+    assert.doesNotThrow(() => step());
+    assert.match(a.info, /error\(22x\)=RangeError: offset is out of bounds/, a.info);
+    assert.equal(a.consecutiveFailures, 22);
+    assert.equal(a.lastObservedCount, 0);
+    // 22 フレーム × 33ms ≈ 0.7s の間のログは間引かれて 1 回だけ
+    assert.equal(warns.filter((w) => w.includes("detect threw")).length, 1, warns.join("\n"));
+    // 成功したら error 表示と連続回数が消え、追跡に戻る
+    mode = "ok";
+    const t1 = step();
+    assert.ok(a.isTracking(t1, 500), a.info);
+    assert.equal(a.consecutiveFailures, 0);
+    assert.equal(a.lastDetectError, "");
+    assert.ok(!a.info.includes("error"), a.info);
+  }),
+);
+
+await testAsync("一度も検出できないうちに例外が続いても info は searching + error で、表示が積み重ならない", () =>
+  withWarns(() => {
+    const { a, step } = makeAnchor({
+      detect() {
+        throw new WebAssembly.RuntimeError("unreachable");
+      },
+    });
+    for (let i = 0; i < 5; i++) assert.doesNotThrow(() => step());
+    assert.equal(a.info, "searching error(5x)=RuntimeError: unreachable");
+    assert.ok(!a.everDetected);
+  }),
+);
+
+await testAsync("同じ失敗が連続 maxConsecutiveFailures（30）回で fallbackDetector に切り替わり、onFallback が 1 回呼ばれる。以後は切り替え先で検出する", () =>
+  withWarns((warns) => {
+    let wasmCalls = 0;
+    let fallbackCalls = 0;
+    const fallbacks = [];
+    const { a, step } = makeAnchor(
+      {
+        detect() {
+          wasmCalls++;
+          throw new WebAssembly.RuntimeError("unreachable");
+        },
+      },
+      {
+        maxConsecutiveFailures: 30,
+        fallbackDetector: () => ({
+          detect() {
+            fallbackCalls++;
+            return goodObservation();
+          },
+        }),
+        onFallback: (msg, failures) => fallbacks.push({ msg, failures }),
+      },
+    );
+    for (let i = 0; i < 29; i++) assert.doesNotThrow(() => step());
+    assert.equal(fallbacks.length, 0, "29 回ではまだ切り替えない");
+    assert.ok(!a.fellBack);
+    assert.doesNotThrow(() => step());
+    assert.equal(fallbacks.length, 1);
+    assert.deepEqual(fallbacks[0], { msg: "RuntimeError: unreachable", failures: 30 });
+    assert.ok(a.fellBack);
+    assert.match(a.info, /error\(30x → fallback\)/, a.info);
+    assert.ok(warns.some((w) => w.includes("switched to fallback detector")), warns.join("\n"));
+    const t = step();
+    assert.equal(wasmCalls, 30, "切り替え後は WASM の検出器を呼ばない");
+    assert.equal(fallbackCalls, 1);
+    assert.ok(a.everDetected && a.isTracking(t, 500), a.info);
+    for (let i = 0; i < 40; i++) step();
+    assert.equal(fallbacks.length, 1, "onFallback は 1 回だけ");
+  }),
+);
+
+await testAsync("fallbackDetector が無ければ切り替えずにロスト扱いを続ける（例外は外に出さない）", () =>
+  withWarns(() => {
+    const { a, step } = makeAnchor({
+      detect() {
+        throw new RangeError("bad");
+      },
+    });
+    for (let i = 0; i < 60; i++) assert.doesNotThrow(() => step());
+    assert.ok(!a.fellBack);
+    assert.equal(a.consecutiveFailures, 60);
+  }),
+);
 
 console.log(process.exitCode ? `\n${passed} passed, some FAILED` : `\nALL PASS (${passed})`);

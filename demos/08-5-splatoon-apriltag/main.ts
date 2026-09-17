@@ -606,6 +606,14 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
   const pt = passthrough;
   markerAnchor = createDetectorAnchor({
     detector,
+    // 検出中に WASM が例外を投げ続けたら（連続 30 回）js-aruco2 に切り替える。1 回ごとの例外はアンカーがロスト扱いにして HUD の april= に出す
+    maxConsecutiveFailures: 30,
+    fallbackDetector: detectorActive === "apriltag" ? () => createMarkerDetector(MARKER_SIZE_M) : undefined,
+    onFallback: (msg, failures) => {
+      aprilStatus = `error: detect threw ${failures}x (${msg})`;
+      detectorActive = "aruco2";
+      console.warn(`[apriltag] 検出中の例外が ${failures} 回続いたので js-aruco2 に落とす: ${msg}`);
+    },
     video: pt.video,
     camera,
     anchor,
