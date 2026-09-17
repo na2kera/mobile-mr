@@ -3,7 +3,10 @@
 //
 // 確認内容:
 //   - 画面マーカー（markers-screen.html）が ?pxPerMm= と ?markerMm= の指定どおりの大きさ（黒い正方形 80mm × 2 px/mm = 160px、余白込み 200px）で
-//     原点を中央に、追加マーカー 4 枚を周りに描く。単一モードなら 1 枚、収まらない一辺は最大に丸める（HUD の clamped=1）
+//     原点を中央に、追加マーカー 4 枚を周りに描く。単一モードなら 1 枚、収まらない一辺は最大に丸めて描くが接続も反映もしない（HUD の clamped=1 blocked=1）
+//   - 空の room に「丸める設定」（multi 4 枚・150mm を 1280x720 / 2 px/mm）で開くと接続せず反映ボタンが disabled。
+//     表示領域を広げる（resize）と収まって接続し、狭めると再び切断する
+//   - 較正線（100mm）が 100 × pxPerMm の CSS px で、マーカーの余白に重ならずに描かれている
 //   - 画面の配置（window.__screenMarkers.placements()）と同じ配置をフェイクカメラ（fake-markers.ts の 3D 版）に描いた 2 つのスマホ窓 + 俯瞰画面を
 //     同じ room に入れ、画面マーカーの「room に反映」を押すと全員の layout= / markers= に同じ配置が届く
 //   - スマホ窓 1 は原点 + 追加マーカーを同時に使い（marker=id=0+1+...）、原点の候補のばらつき spread が小さい
@@ -197,6 +200,9 @@ function parseScreenHud(hud) {
     room: hud.match(/\broom=(\S+) applies/)?.[1] ?? "",
     applies: Number(hud.match(/applies=(\d+)/)?.[1] ?? -1),
     pending: hud.match(/pending=(\d)/)?.[1] === "1",
+    blocked: hud.match(/blocked=(\d)/)?.[1] === "1",
+    sizeWarn: hud.match(/sizeWarn=(\d)/)?.[1] === "1",
+    ruler: Number(hud.match(/ruler=([\d.]+)/)?.[1] ?? NaN),
   };
 }
 
@@ -231,8 +237,44 @@ try {
   const newPage = async (name) => {
     const created = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
     const t = (await cdpJson("/json")).find((x) => x.id === created.result.targetId);
-    return openPage(t, name);
+    const page = await openPage(t, name);
+    page.targetId = created.result.targetId;
+    return page;
   };
+
+  // ---- 丸める設定で空の room に開く（ウィンドウ C）: 接続せず、反映ボタンは disabled ----
+  const CLAMP_ROOM = "clampcheck";
+  const pC = await newPage("C");
+  await pC.send("Emulation.setDeviceMetricsOverride", { width: BOARD_W, height: BOARD_H, deviceScaleFactor: 1, mobile: false });
+  await pC.send("Page.navigate", { url: `${BASE}markers-screen.html?room=${CLAMP_ROOM}&pxPerMm=${PX_PER_MM}&mode=multi&count=4&markerMm=150` });
+  const readClamp = async () => parseScreenHud((await pC.eval("document.querySelector('#hud')?.textContent")) ?? "");
+  const tC = Date.now();
+  let hc = await readClamp();
+  while (Date.now() - tC < 20000 && hc.tiles.length === 0) {
+    await sleep(300);
+    hc = await readClamp();
+  }
+  await sleep(3000);
+  hc = await readClamp();
+  const clampHintC = (await pC.eval("document.querySelector('#marker-hint')?.textContent")) ?? "";
+  const clampColor = await pC.eval("getComputedStyle(document.querySelector('#marker-hint')).color");
+  console.log(`clamp-open: ws=${hc.ws} joined=${hc.joined} markerMm=${hc.markerMm}/${hc.roomMm} max=${hc.max} clamped=${hc.clamped} blocked=${hc.blocked} hint=${clampHintC.slice(0, 60)} color=${clampColor}`);
+  check("丸める設定（multi 4 枚・150mm・最大 86mm）で空の room に開くと接続しない（サーバーに入室の記録が無い）", hc.clamped && hc.blocked && !hc.joined && hc.max === 86 && !serverLines.some((l) => l.includes(`"${CLAMP_ROOM}"`)), `joined=${hc.joined} ws=${hc.ws}`);
+  check("その間「room に反映」は disabled で、パネルに赤で「一辺 150mm は画面に収まりません。86mm 以下にするか、1 枚モードにしてください」", (await pC.eval("document.querySelector('#apply').disabled")) === true && clampHintC.includes("一辺 150mm は画面に収まりません。86mm 以下にするか、1 枚モードにしてください") && clampColor === "rgb(242, 139, 130)", clampColor);
+  // 表示領域を広げる（resize）→ 2560x1440 なら最大 173mm で収まる → 接続する
+  await pC.send("Emulation.setDeviceMetricsOverride", { width: 2560, height: 1440, deviceScaleFactor: 1, mobile: false });
+  const tW = Date.now();
+  hc = await readClamp();
+  while (Date.now() - tW < 15000 && !hc.joined) {
+    await sleep(300);
+    hc = await readClamp();
+  }
+  check("resize で収まるようになると丸めをやめて接続する（2560x1440 で最大 173mm）", hc.joined && !hc.clamped && !hc.blocked && hc.max === 173 && hc.markerMm === 150, `joined=${hc.joined} max=${hc.max}`);
+  await pC.send("Emulation.setDeviceMetricsOverride", { width: BOARD_W, height: BOARD_H, deviceScaleFactor: 1, mobile: false });
+  await sleep(1500);
+  hc = await readClamp();
+  check("resize で再び収まらなくなると切断して反映できない", !hc.joined && hc.clamped && hc.blocked && (await pC.eval("document.querySelector('#apply').disabled")) === true, `joined=${hc.joined} ws=${hc.ws}`);
+  await browser.send("Target.closeTarget", { targetId: pC.targetId });
 
   // ---- 画面マーカー（ウィンドウ S）。先に開いて画面上の配置を読み、同じ配置をフェイクカメラに描く ----
   const pS = await openPage(first, "S");
@@ -261,6 +303,13 @@ try {
   check("DOM のタイルの中心が計算どおりの位置（左右 ±232px・上下 ±232px）", domSizes.every((d) => { const t = tiles.find((x) => String(x.id) === d.id); return t && Math.abs(d.cx - t.cx) < 1 && Math.abs(d.cy - t.cy) < 1; }) && Math.abs(domSizes[1].cx - (bw / 2 - 232)) < 1 && Math.abs(domSizes[3].cy - (bh / 2 - 232)) < 1);
   check("配置は 4 枚とも正面の壁（wall）で、画面上の px 差 ÷ 2 = ±0.116m", placements.length === 4 && placements.every((p) => p.face === "wall") && placements[0].pos[0] === -0.116 && placements[1].pos[0] === 0.116 && placements[2].pos[1] === 0.116 && placements[3].pos[1] === -0.116, JSON.stringify(placements));
   const expectedLayout = placements.map((p) => `${p.id}:${p.face}`).join(",");
+  // 較正線: 100mm × 2 px/mm = 200 CSS px。タイル（余白込み）に重ならない
+  const rulerBox = await pS.eval(`(() => { const r = document.querySelector('#ruler'); const bar = r.querySelector('.bar').getBoundingClientRect(); const box = r.getBoundingClientRect(); const tiles = Array.from(document.querySelectorAll('#board .tile')).map((el) => el.getBoundingClientRect()); const overlap = tiles.some((t) => box.left < t.right && box.right > t.left && box.top < t.bottom && box.bottom > t.top); return { hidden: r.hidden, vertical: r.classList.contains('vertical'), barW: bar.width, barH: bar.height, left: box.left, top: box.top, right: box.right, bottom: box.bottom, overlap, text: r.textContent }; })()`);
+  console.log(`ruler: ${JSON.stringify(rulerBox)}`);
+  const rulerLen = rulerBox.vertical ? rulerBox.barH : rulerBox.barW;
+  check("較正線が 100mm × 2 px/mm = 200 CSS px で描かれ、両端の目盛りと「定規を当てて 100mm か確かめる」がある", !rulerBox.hidden && Math.abs(rulerLen - 200) < 0.5 && hs.ruler === 200 && /定規を当てて 100mm か確かめる/.test(rulerBox.text), `len=${rulerLen} hud=${hs.ruler}`);
+  check("較正線は画面内で、マーカーの余白に重ならない", !rulerBox.overlap && rulerBox.left >= 0 && rulerBox.top >= 0 && rulerBox.right <= bw && rulerBox.bottom <= bh, JSON.stringify(rulerBox));
+  check("画面の実寸（1280 px ÷ 2 = 640mm）は範囲内で警告しない", !hs.sizeWarn);
   check("反映前: room の配置は空で「room に反映」が押せる", hs.room === "-" && hs.applies === 0 && (await pS.eval("!document.querySelector('#apply').disabled")) === true, `room=${hs.room}`);
 
   // ---- スマホ窓 1・2（フェイクカメラに画面と同じ配置を描く）+ 俯瞰画面 ----
@@ -351,16 +400,23 @@ try {
   await sleep(300);
   const big = await readScreen();
   const bigDom = await pS.eval("(() => { const r = document.querySelector('#board .tile').getBoundingClientRect(); return [r.width, r.height]; })()");
-  console.log(`clamped: markerMm=${big.markerMm}/${big.roomMm} clamped=${big.clamped} dom=${JSON.stringify(bigDom)}`);
+  console.log(`clamped: markerMm=${big.markerMm}/${big.roomMm} clamped=${big.clamped} blocked=${big.blocked} joined=${big.joined} dom=${JSON.stringify(bigDom)}`);
   check("収まらない一辺（5000mm）は最大 288mm に丸めて描き（余白込み 720px）、HUD に clamped=1", big.clamped && big.markerMm === 288 && Math.abs(bigDom[0] - 720) < 1, `${big.markerMm} ${bigDom}`);
   const clampHint = await pS.eval("document.querySelector('#marker-hint')?.textContent");
-  check("丸めたことをパネルに出す", /収まらない/.test(clampHint ?? ""), (clampHint ?? "").slice(0, 80));
-  // 一辺は room の接続設定なので、入力が落ち着く（600ms）と新しい値で入り直す → room（80mm）と食い違うのでサーバーが拒否し、案内が出る
+  check("丸めたことをパネルに出す（1 枚モードなので「1 枚モードに」とは言わない）", (clampHint ?? "").startsWith("一辺 5000mm は画面に収まりません。288mm 以下にするか") && !/1 枚モードに/.test(clampHint ?? ""), (clampHint ?? "").slice(0, 80));
+  // 丸めている間は切断し、入力が落ち着いても（5000mm で）入り直さない
   await sleep(2000);
+  const blockedS = await readScreen();
+  console.log(`blocked: ws=${blockedS.ws} joined=${blockedS.joined} blocked=${blockedS.blocked}`);
+  check("丸めている間は切断し、入力が落ち着いても入り直さない（サーバーに markerMm=5000 の入室が来ない）", !blockedS.joined && blockedS.blocked && (await pS.eval("document.querySelector('#apply').disabled")) === true && !serverLines.some((l) => /markerMm=5000/.test(l)), `${blockedS.ws}`);
+  // 収まるが room と違う一辺（200mm）→ 入力が落ち着く（600ms）と新しい値で入り直す → room（80mm）と食い違うのでサーバーが拒否し、案内が出る
+  await pS.eval("(() => { const i = document.querySelector('#marker-mm'); i.value = '200'; i.dispatchEvent(new Event('input')); })()");
+  await sleep(2500);
   const mismatch = await readScreen();
   const mismatchHint = await pS.eval("document.querySelector('#apply-hint')?.textContent");
   console.log(`mismatch: ws=${mismatch.ws} joined=${mismatch.joined} hint=${(mismatchHint ?? "").slice(0, 60)}`);
-  check("一辺を room と違う値に変えると入り直してサーバーに拒否され、「全員の URL に ?markerMm= を付けて入り直す」案内が出る", !mismatch.joined && /設定と不一致/.test(mismatch.ws) && /markerMm/.test(mismatchHint ?? "") && serverLines.some((l) => /設定と不一致.*markerMm=5000/.test(l)), `${mismatch.ws} / ${mismatchHint}`);
+  check("一辺を room と違う（収まる）値に変えると入り直してサーバーに拒否され、「全員の URL に ?markerMm= を付けて入り直す」案内が出る", !mismatch.joined && !mismatch.clamped && /設定と不一致/.test(mismatch.ws) && /markerMm/.test(mismatchHint ?? "") && serverLines.some((l) => /設定と不一致.*markerMm=200/.test(l)), `${mismatch.ws} / ${mismatchHint}`);
+  check("入力が落ち着く前の古い一辺（5000mm）では入り直していない", !serverLines.some((l) => /markerMm=5000/.test(l)));
   // 元に戻す → 80mm で入り直し（id は新しくなる）、配置は同じに戻る
   await pS.eval("(() => { const i = document.querySelector('#marker-mm'); i.value = '80'; i.dispatchEvent(new Event('input')); const s = document.querySelector('#mode'); s.value = 'multi'; s.dispatchEvent(new Event('input')); })()");
   const tBack = Date.now();
@@ -371,7 +427,7 @@ try {
   }
   console.log(`back: me=${back.me} joined=${back.joined} markerMm=${back.markerMm}/${back.roomMm} layout=${back.layout} room=${back.room}`);
   check("元に戻すと 80mm で入り直し、同じ配置に戻る（room の配置は反映したまま）", back.joined && back.me !== hs.me && back.roomMm === 80 && back.tiles.length === 5 && back.layout === expectedLayout && back.room === expectedLayout, `me=${back.me} (was ${hs.me})`);
-  check("白黒の反転はクラスで切り替わる", (await pS.eval("(() => { const i = document.querySelector('#invert'); i.checked = true; i.dispatchEvent(new Event('input')); const on = document.querySelector('#board').classList.contains('invert'); i.checked = false; i.dispatchEvent(new Event('input')); return on && !document.querySelector('#board').classList.contains('invert'); })()")) === true);
+  check("白黒の反転は載せていない（今の検出器では検出できない）", (await pS.eval("document.querySelector('#invert') === null")) === true);
 
   // ---- 対戦開始（俯瞰画面のボタン）→ 両方が得点 ----
   await p3.eval("document.querySelector('#start-match').click()");

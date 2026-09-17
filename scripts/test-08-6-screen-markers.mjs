@@ -1,22 +1,29 @@
 // 08-6 画面マーカーの回帰テスト。`npm run test:08-6-screen-markers` で実行する。
 //   demos/08-6-splatoon-screen-markers/screen-layout.ts — 画面の実寸（対角 / pxPerMm）→ 画面上の配置（px）→ room に配る配置（MarkerPlacement[]）
-//   の純粋な変換（原点が中央・追加マーカーの mm が正しい・収まらない大きさは丸める・上限と ID の不正は弾く）
+//   の純粋な変換（原点が中央・追加マーカーの mm が正しい・収まらない大きさは丸める・上限と ID の不正は弾く・画面の実寸の範囲・較正線の置き場所）
 // テストフレームワークは使わない（他の scripts/test-*.mjs と同じ方針）。Node 22 は .ts をそのまま import できる
 import { MAX_EXTRA_MARKERS, validateMarkerLayout } from "../src/shared/marker-layout.ts";
 import {
+  CAPTION_GAP_PX,
   DEFAULT_GAP_RATIO,
   MARKER_SVG_SCALE,
   RING_OFFSETS,
+  clampExtraCount,
+  clampMessage,
   defaultExtraIds,
+  describeExtraIds,
   describeTiles,
   gridSpan,
   inchesToMm,
   layoutScreenMarkers,
   maxMarkerMm,
+  placeRuler,
   pxPerMmFromDiagonal,
+  resolveExtraIds,
   screenSizeMm,
   tilesToPlacements,
   validateScreenPlacements,
+  validateScreenSize,
 } from "../demos/08-6-splatoon-screen-markers/screen-layout.ts";
 
 const results = [];
@@ -45,6 +52,14 @@ const throws = (fn) => {
   check("24 インチ FHD は 1mm ≈ 3.61 px", near(pxPerMmFromDiagonal(inchesToMm(24), 1920, 1080), 3.6136, 1e-3));
   check("不正な入力（0・負・NaN）は NaN", Number.isNaN(pxPerMmFromDiagonal(0, 1920, 1080)) && Number.isNaN(pxPerMmFromDiagonal(600, -1, 1080)) && Number.isNaN(pxPerMmFromDiagonal(NaN, 1920, 1080)));
   check("1 インチ = 25.4mm", inchesToMm(1) === 25.4);
+  // Retina / 拡大率 2: CSS px は 1280x720 なので 1mm = 2.14 CSS px（物理画素の 4.28 ではない）
+  check("27 インチ QHD・拡大率 2（CSS 1280x720）は 1mm ≈ 2.14 CSS px", near(pxPerMmFromDiagonal(inchesToMm(27), 1280, 720), 2.1415, 1e-3));
+  // 画面の実寸の範囲（幅 150〜5000mm）。配置の mm は pxPerMm に依らないので、入力ミスはここでしか分からない
+  check("27 インチの実寸（幅 598mm）は警告しない", validateScreenSize(ppm27, 2560, 1440) === null);
+  check("画面の幅が 150mm 未満（1920 px を 20 px/mm = 96mm）は警告", /範囲外/.test(validateScreenSize(20, 1920, 1080) ?? ""), validateScreenSize(20, 1920, 1080));
+  check("画面の幅が 5000mm 超（1920 px を 0.3 px/mm = 6400mm。対角を mm のつもりでインチ欄に入れた等）は警告", /範囲外/.test(validateScreenSize(0.3, 1920, 1080) ?? ""));
+  check("境界: 幅ちょうど 150mm / 5000mm は通る", validateScreenSize(1920 / 150, 1920, 1080) === null && validateScreenSize(1920 / 5000, 1920, 1080) === null);
+  check("pxPerMm が未入力なら入力を促す", /入れて/.test(validateScreenSize(NaN, 1920, 1080) ?? ""));
 }
 
 // ================= 2. 収まる最大の一辺 =================
@@ -61,7 +76,8 @@ const throws = (fn) => {
   check("multi 4 枚の最大は高さで決まり 86mm", maxMarkerMm(1280, 720, 2, "multi", 4) === 86);
   // 1 行 3 列: 幅 640 / 4.15 = 154.2 → 154、高さ 288 → 154
   check("multi 2 枚（1 行）の最大は幅で決まり 154mm", maxMarkerMm(1280, 720, 2, "multi", 2) === 154);
-  check("間隔 0 なら 3 列で 640 / 3.75 = 170mm", maxMarkerMm(1280, 720, 2, "multi", 2, 0) === 170);
+  // 間隔 0 でもキャプションの高さ（18px = 9mm）は空ける: (640 - 2 × 9) / 3.75 = 165.9 → 165
+  check("間隔 0 でもキャプションぶん（18px）空けて 3 列で (640 - 18) / 3.75 = 165mm", CAPTION_GAP_PX === 18 && maxMarkerMm(1280, 720, 2, "multi", 2, 0) === 165);
   check("pxPerMm が不正なら 0", maxMarkerMm(1280, 720, 0, "single", 0) === 0 && maxMarkerMm(1280, 720, NaN, "single", 0) === 0);
 }
 
@@ -83,6 +99,22 @@ const throws = (fn) => {
   check("single は追加 ID を渡しても原点 1 枚だけ（200mm はそのまま）", single.tiles.length === 1 && single.markerMm === 200 && !single.clamped && single.maxMm === 288);
   const clamped = layoutScreenMarkers({ ...base, markerMm: 300 });
   check("収まらない大きさ（300mm）は最大（86mm）に丸めて clamped=true", clamped.markerMm === 86 && clamped.clamped && clamped.tiles.every((t) => near(t.sidePx, 172)));
+  const gap0 = layoutScreenMarkers({ ...base, gapRatio: 0, markerMm: 40 });
+  check("間隔 0 でも隣との余白同士の間はキャプションの高さ（18px）以上", near(gap0.tiles[0].cx - gap0.tiles[1].cx, 80 * 1.25 + 18), `${gap0.tiles[0].cx - gap0.tiles[1].cx}`);
+  // 27 インチ QHD・multi 4 枚・既定 150mm: 高さ 336mm / 4.15 = 81mm → 丸める（room の 150mm と食い違うのでページは接続も反映もしない）
+  const ppm27 = pxPerMmFromDiagonal(inchesToMm(27), 2560, 1440);
+  const l27 = layoutScreenMarkers({ widthPx: 2560, heightPx: 1440, pxPerMm: ppm27, markerMm: 150, mode: "multi", originId: 0, extraIds: [1, 2, 3, 4] });
+  check("27 インチ・multi 4 枚・150mm は clamped（最大 81mm）", l27.clamped && l27.maxMm === 81 && l27.markerMm === 81 && l27.wantedMm === 150, `max=${l27.maxMm}`);
+  check("丸めたときの文言は「一辺 150mm は画面に収まりません。81mm 以下にするか、1 枚モードにしてください」", clampMessage(l27.wantedMm, l27.maxMm, "multi") === "一辺 150mm は画面に収まりません。81mm 以下にするか、1 枚モードにしてください");
+  const s27 = layoutScreenMarkers({ widthPx: 2560, heightPx: 1440, pxPerMm: ppm27, markerMm: 150, mode: "single", originId: 0, extraIds: [] });
+  check("27 インチ・single・150mm は丸めない（最大 268mm）", !s27.clamped && s27.maxMm === 268 && s27.markerMm === 150, `max=${s27.maxMm}`);
+  const s55 = maxMarkerMm(1920, 1080, pxPerMmFromDiagonal(inchesToMm(55), 1920, 1080), "single", 0);
+  check("55 インチ・single の最大は 547mm（README の値）", s55 === 547, String(s55));
+  // 丸めた最大が 20mm 未満（0mm もあり得る）は layoutError
+    // 300x150 px を 2 px/mm = 150x75mm、3 行: (75 - 2 × 9) / 3.75 = 15mm
+  const tiny = throws(() => layoutScreenMarkers({ ...base, widthPx: 300, heightPx: 150, extraIds: [1, 2, 3, 4, 5, 6, 7, 8] }));
+  check("丸めた最大が 20mm 未満（300x150 px を 2 px/mm の multi 8 枚 = 15mm）はエラー", /15mm で、20mm 未満/.test(tiny ?? ""), tiny);
+  check("最大が 0mm（2x2 px）もエラー", /は 0mm で、20mm 未満/.test(throws(() => layoutScreenMarkers({ ...base, widthPx: 2, heightPx: 2, mode: "single" })) ?? ""));
   const eight = layoutScreenMarkers({ ...base, extraIds: [1, 2, 3, 4, 5, 6, 7, 8], markerMm: 60 });
   check("上限の 8 枚まで並ぶ（四隅は対角に）", eight.tiles.length === 9 && near(eight.tiles[8].cx, 640 + 60 * 2 * 1.45) && near(eight.tiles[8].cy, 360 + 60 * 2 * 1.45));
   const off = layoutScreenMarkers({ ...base, widthPx: 1000, heightPx: 500 });
@@ -115,9 +147,9 @@ const throws = (fn) => {
   check("pxPerMm が小数でも位置は mm に丸める（116mm）", tilesToPlacements(l17.tiles, 1.7)[0].pos[0] === -0.116);
   check("サーバーと同じ validateMarkerLayout を通る", validateMarkerLayout(p, 0, 1.2) === null && validateScreenPlacements(p, 0) === null);
   check("原点のタイルが無ければ弾く", /原点/.test(throws(() => tilesToPlacements(l.tiles.slice(1), 2)) ?? ""));
-  // 画面の実寸の入力ミス（pxPerMm を 100 倍小さく）→ 原点から 11.6m → 弾く
-  const far = tilesToPlacements(l.tiles, 0.02);
-  check("原点から 5m 超は「画面の実寸の入力を確認」で弾く", /実寸/.test(validateScreenPlacements(far, 0) ?? ""), validateScreenPlacements(far, 0));
+  // 配置の mm は「一辺 × 比」で決まり pxPerMm に依らない（実寸の入力ミスは配置では分からない。validateScreenSize で見る）
+  const l3 = layoutScreenMarkers({ widthPx: 1280, heightPx: 720, pxPerMm: 1.2, markerMm: 80, mode: "multi", originId: 0, extraIds: [1] });
+  check("pxPerMm を変えても配置の mm は同じ（入力ミスは配置では検出できない）", tilesToPlacements(l3.tiles, 1.2)[0].pos[0] === -0.116);
   check("原点と同じ ID が混ざれば弾く（validateMarkerLayout の文言）", /原点/.test(validateScreenPlacements([{ id: 0, face: "wall", pos: [0.1, 0, 0] }], 0) ?? ""));
   // 単一なら空の配置（原点だけ）
   const s = layoutScreenMarkers({ widthPx: 1280, heightPx: 720, pxPerMm: 2, markerMm: 200, mode: "single", originId: 0, extraIds: [] });
@@ -128,7 +160,29 @@ const throws = (fn) => {
 {
   check("既定は原点を飛ばして 1 から count 枚", defaultExtraIds(0, 4).join(",") === "1,2,3,4" && defaultExtraIds(2, 3).join(",") === "0,1,3");
   check("count 0 は空", defaultExtraIds(0, 0).length === 0);
-  check("?ids= は不正な要素（重複・原点・範囲外・数値でない）を捨てる", defaultExtraIds(0, 4, "5,5,0,300,x,7").join(",") === "5,7");
+  const r = resolveExtraIds(0, 4, "5,5,0,300,x,7");
+  console.log(`ids: ${JSON.stringify(r)} → ${describeExtraIds(r)}`);
+  check("?ids= の不正な要素を理由つきで捨てる（重複・原点・範囲外・数値でない）", JSON.stringify(r.dropped) === JSON.stringify([{ raw: "5", reason: "重複" }, { raw: "0", reason: "原点" }, { raw: "300", reason: "範囲外" }, { raw: "x", reason: "数値でない" }]));
+  check("有効な ID が count 未満なら既定の ID で補う（5,7 + 1,2）", r.ids.join(",") === "5,7,1,2" && r.filled.join(",") === "1,2" && defaultExtraIds(0, 4, "5,5,0,300,x,7").join(",") === "5,7,1,2");
+  check("パネルの説明に捨てた ID と補った ID が出る", /300（範囲外）/.test(describeExtraIds(r)) && /x（数値でない）/.test(describeExtraIds(r)) && /補いました/.test(describeExtraIds(r)));
+  check("?ids= が count より多ければ先頭から count 枚、捨てたものが無ければ説明は空", resolveExtraIds(0, 2, "3,4,5").ids.join(",") === "3,4" && describeExtraIds(resolveExtraIds(0, 2, "3,4,5")) === "");
+  check("小数の ID は範囲外", resolveExtraIds(0, 1, "1.5").dropped[0]?.reason === "範囲外");
+  // 枚数の入力は 0〜8 に丸める（9 以上で throw して板が空にならない）
+  check("枚数 9 は 8 に丸めて理由を出す", clampExtraCount(9).count === 8 && /0〜8/.test(clampExtraCount(9).note));
+  check("枚数 -1 は 0、NaN は 0、4 はそのまま（説明なし）", clampExtraCount(-1).count === 0 && clampExtraCount(NaN).count === 0 && /数値でない/.test(clampExtraCount(NaN).note) && clampExtraCount(4).count === 4 && clampExtraCount(4).note === "");
+}
+
+// ================= 6. 較正線の置き場所 =================
+{
+  // single 最大（720px 四方が中央）: 1280 幅なら右下に横置きで 200px の線が入る
+  const single = layoutScreenMarkers({ widthPx: 1280, heightPx: 720, pxPerMm: 2, markerMm: 288, mode: "single", originId: 0, extraIds: [] });
+  const spot = placeRuler(1280, 720, single.tiles, 200);
+  check("較正線は右下に横置き（タイルに重ならない）", spot !== null && !spot.vertical && spot.x + spot.w <= 1280 && spot.x >= 1000, JSON.stringify(spot));
+  // 横が狭い（760px 幅）: 横置きは入らず、縦置き（幅 110px）なら入る
+  const narrow = layoutScreenMarkers({ widthPx: 1000, heightPx: 720, pxPerMm: 2, markerMm: 288, mode: "single", originId: 0, extraIds: [] });
+  const spotN = placeRuler(1000, 720, narrow.tiles, 200);
+  check("横に余白が無ければ縦置きにする", spotN !== null && spotN.vertical && spotN.h === 200, JSON.stringify(spotN));
+  check("どこにも入らなければ null", placeRuler(720, 720, narrow.tiles.map((t) => ({ ...t, cx: 360 })), 200) === null);
 }
 
 const failed = results.filter(([, ok]) => !ok);

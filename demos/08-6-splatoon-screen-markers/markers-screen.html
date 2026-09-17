@@ -31,10 +31,6 @@
       #board.bg-white {
         background: #fff;
       }
-      /* 白黒の反転（プロジェクタ実験用。黒枠が白になるので今の検出器では検出されない。README 参照） */
-      #board.invert {
-        filter: invert(1);
-      }
       #board .tile {
         position: absolute;
         /* 余白込みの SVG（10 セル）。width / height は markers-screen.ts が px で入れる */
@@ -61,6 +57,64 @@
       }
       #board.bg-white .tile .cap {
         color: #9aa0a6;
+      }
+      /* 較正線（長さ 100mm。markers-screen.ts がマーカーの余白に重ならない隅に置く）。両端に目盛り */
+      #ruler {
+        position: fixed;
+        z-index: 4;
+        box-sizing: border-box;
+        color: #e8eaed;
+        pointer-events: none;
+      }
+      #ruler[hidden] {
+        display: none;
+      }
+      #ruler.on-white {
+        color: #202124;
+      }
+      #ruler .bar {
+        position: relative;
+        height: 12px;
+        box-sizing: border-box;
+        border-left: 2px solid currentColor;
+        border-right: 2px solid currentColor;
+      }
+      #ruler .bar::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 5px;
+        height: 2px;
+        background: currentColor;
+      }
+      #ruler .label {
+        margin-top: 3px;
+        font-size: 11px;
+        line-height: 14px;
+      }
+      #ruler.vertical {
+        display: flex;
+        gap: 6px;
+      }
+      #ruler.vertical .bar {
+        width: 12px;
+        flex: none;
+        border: none;
+        border-top: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+      }
+      #ruler.vertical .bar::after {
+        left: 5px;
+        right: auto;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        height: auto;
+      }
+      #ruler.vertical .label {
+        margin-top: 0;
+        align-self: center;
       }
       /* 左上の操作パネル（俯瞰画面と同じ見た目。「隠す」で小さなボタンだけ残す） */
       #panel {
@@ -200,6 +254,7 @@
   </head>
   <body>
     <div id="board"></div>
+    <div id="ruler" hidden><div class="bar"></div><div class="label">定規を当てて 100mm か確かめる</div></div>
     <button id="show-panel" type="button" hidden>パネルを表示</button>
     <div id="panel">
       <h1>08-6. 画面マーカー</h1>
@@ -214,8 +269,9 @@
         <legend>画面の実寸</legend>
         <div class="row">
           <label>対角 [インチ]<input id="screen-in" type="number" step="0.1" min="3" max="400" inputmode="decimal" /></label>
-          <label>1mm あたり px（直接指定）<input id="px-per-mm" type="number" step="0.01" min="0.1" max="100" inputmode="decimal" /></label>
+          <label>1mm あたり CSS px（画面 <span id="screen-px">W×H</span> px の値で数える。Retina でも物理画素ではない）<input id="px-per-mm" type="number" step="0.01" min="0.1" max="100" inputmode="decimal" /></label>
         </div>
+        <div class="hint">プロジェクタは型番ではなく、投影された映像の対角を測って入れる</div>
         <div class="hint" id="screen-hint"></div>
       </fieldset>
       <fieldset>
@@ -229,7 +285,6 @@
           <label>間隔（一辺に対する比）<input id="gap" type="number" step="0.05" min="0" max="2" inputmode="decimal" /></label>
         </div>
         <div class="row">
-          <label class="check"><input id="invert" type="checkbox" />白黒を反転（プロジェクタ実験用）</label>
           <label class="check"><input id="bg-white" type="checkbox" />背景を白に</label>
         </div>
         <div class="hint" id="marker-hint"></div>
