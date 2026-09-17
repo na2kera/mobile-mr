@@ -25,3 +25,6 @@ dist-ssr
 
 # MediaPipe のモデル（npm run fetch:models で取得。バイナリなので管理しない）
 public/models/*.task
+
+# OpenCV.js（npm run fetch:opencv で取得。WASM 同梱の 10MB 超なので管理しない。08-4 で使用）
+public/vendor/opencv/

@@ -26,7 +26,10 @@
     "test:batting": "node scripts/test-batting.mjs",
     "check:batting": "node scripts/headless-batting.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
-    "fetch:models": "node scripts/fetch-models.mjs"
+    "test:splatoon-opencv": "node scripts/test-08-4-opencv.mjs",
+    "check:splatoon-opencv": "node scripts/headless-08-4-opencv.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:opencv": "node scripts/fetch-opencv.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
