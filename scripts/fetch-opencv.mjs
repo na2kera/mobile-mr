@@ -12,36 +12,35 @@
 //     solvePnP（SOLVEPNP_IPPE / ITERATIVE）/ Rodrigues / projectPoints。cornerSubPix は無いが CORNER_REFINE_SUBPIX は
 //     ArucoDetector 内部で動く
 //   - package.json の依存には足さない（scripts/fetch-models.mjs と同じ方針。ページは動的 import で読む）
-import { mkdir, stat, writeFile } from "node:fs/promises";
+//   - 取得したファイルは SHA-256 を固定して照合する（既存ファイルも新規ダウンロードも）。値は npm の tarball
+//     （registry.npmjs.org の integrity sha512 と一致を確認）の package/dist/opencv.js / package/LICENSE から取った。
+//     jsDelivr は gzip / brotli で返し content-length は圧縮後の大きさなので、サイズでは照合できない
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const OPENCV_VERSION = "4.12.0-release.1";
 const BASE = `https://cdn.jsdelivr.net/npm/@techstark/opencv-js@${OPENCV_VERSION}/`;
 const FILES = [
-  { file: "opencv.js", url: `${BASE}dist/opencv.js`, minBytes: 5_000_000 },
-  { file: "LICENSE", url: `${BASE}LICENSE`, minBytes: 1_000 },
+  { file: "opencv.js", url: `${BASE}dist/opencv.js`, sha256: "bd0c3e6448043de04f6a64a12cb7b759f78c3ab8f7c35c9f2e0f71c88bb17103" },
+  { file: "LICENSE", url: `${BASE}LICENSE`, sha256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4" },
 ];
 
 const dir = fileURLToPath(new URL("../public/vendor/opencv/", import.meta.url));
 await mkdir(dir, { recursive: true });
+const mb = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : `${(n / 1e3).toFixed(1)}KB`);
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
-for (const { file, url, minBytes } of FILES) {
+for (const { file, url, sha256: expected } of FILES) {
   const dest = dir + file;
-  const existing = await stat(dest).catch(() => null);
-  if (existing && existing.size >= minBytes) {
-    // 途中で切れたファイルを取得済みと誤認しないよう、配布元のサイズと照合する（HEAD が失敗したらサイズ不明として取得済み扱い）
-    // jsDelivr は gzip / brotli で返し content-length は圧縮後の大きさなので、圧縮されているときは照合しない
-    const expected = await fetch(url, { method: "HEAD" })
-      .then((r) => {
-        const len = r.ok && !r.headers.get("content-encoding") ? r.headers.get("content-length") : null;
-        return len === null ? NaN : Number(len);
-      })
-      .catch(() => NaN);
-    if (!Number.isFinite(expected) || expected === existing.size) {
-      console.log(`skip: ${file} は取得済み (${(existing.size / 1e6).toFixed(1)}MB)`);
+  const existing = await readFile(dest).catch(() => null);
+  if (existing) {
+    const actual = sha256(existing);
+    if (actual === expected) {
+      console.log(`skip: ${file} は取得済み (${mb(existing.length)}, sha256 一致)`);
       continue;
     }
-    console.log(`再取得: ${file} のサイズが配布元と違う (${existing.size} != ${expected})`);
+    console.log(`再取得: ${file} の sha256 が固定値と違う (${actual})。途中で切れた・別の版の可能性`);
   }
   console.log(`fetch: ${url}`);
   const res = await fetch(url);
@@ -50,17 +49,13 @@ for (const { file, url, minBytes } of FILES) {
     process.exit(1);
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  const declared = res.headers.get("content-encoding") ? NaN : Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > 0 && declared !== buf.length) {
-    console.error(`failed: サイズが一致しない (${buf.length} != ${declared}) ${url}`);
-    process.exit(1);
-  }
-  if (buf.length < minBytes) {
-    console.error(`failed: ${file} が小さすぎる (${buf.length} bytes)。配布元の構成が変わった可能性`);
+  const actual = sha256(buf);
+  if (actual !== expected) {
+    console.error(`failed: ${file} の sha256 が一致しない (${actual} != ${expected})。配布元の中身が変わった可能性（保存しない）`);
     process.exit(1);
   }
   await writeFile(dest, buf);
-  console.log(`saved: public/vendor/opencv/${file} (${(buf.length / 1e6).toFixed(1)}MB)`);
+  console.log(`saved: public/vendor/opencv/${file} (${mb(buf.length)}, sha256 一致)`);
 }
 // バージョンを添えておく（HUD / README の照合用。opencv.js 自体には package のバージョンが入っていない）
 await writeFile(`${dir}VERSION`, `@techstark/opencv-js ${OPENCV_VERSION} (= docs.opencv.org/4.12.0/opencv.js)\n`);

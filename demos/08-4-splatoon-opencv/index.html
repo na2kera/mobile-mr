@@ -248,7 +248,7 @@
         重力でフィールドを水平に直す ?gravityAlign=1（実機は既定 on。0 で従来どおり PnP の傾きをそのまま使う）。
         <strong>08-4 固有</strong>: ?detector=opencv|aruco2（既定 opencv）、?pnp=auto|ippe|iterative（既定 auto: 平面なら IPPE → LM 仕上げ + 前フレームがあれば初期値ありの解も出して連続性を優先、壁 + 床のような非平面なら ITERATIVE + 前フレームを初期値）、
         ?pose=board|single（既定 board。single は 1 枚ずつ IPPE_SQUARE で出して 08 と同じ重み付き平均にする「数学だけ替えた」比較用）、
-        ?maxReprojPx=6（board の再投影誤差の上限 [px]）、?opencvUrl=（opencv.js の場所）。
+        ?maxReprojPx=4（board の再投影誤差の上限。detW=960 のときの px）、?opencvUrl=（opencv.js の場所）。
         焦点距離は 08 と同じく camFov（水平 FOV）からの換算で、?camFov= で上書きします（歪みは 0）。
         飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
         （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。

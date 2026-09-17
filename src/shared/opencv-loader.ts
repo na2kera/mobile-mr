@@ -35,7 +35,7 @@ export type OpenCv = {
   solvePnP(objectPoints: CvMat, imagePoints: CvMat, cameraMatrix: CvMat, distCoeffs: CvMat, rvec: CvMat, tvec: CvMat, useExtrinsicGuess: boolean, flags: number): boolean;
   Rodrigues(src: CvMat, dst: CvMat): void;
   getPredefinedDictionary(name: number): { delete(): void };
-  aruco_DetectorParameters: new () => { cornerRefinementMethod: number; delete(): void };
+  aruco_DetectorParameters: new () => { cornerRefinementMethod: number; errorCorrectionRate: number; delete(): void };
   aruco_RefineParameters: new (minRepDistance: number, errorCorrectionRate: number, checkAllOrders: boolean) => { delete(): void };
   aruco_ArucoDetector: new (dictionary: unknown, params: unknown, refine: unknown) => { detectMarkers(image: CvMat, corners: CvMatVector, ids: CvMat, rejected: CvMatVector): void; delete(): void };
   getBuildInformation?: () => string;
@@ -58,11 +58,40 @@ export function defaultOpenCvUrl(baseUrl: string): string {
 }
 
 /**
- * OpenCV.js を読み込んで初期化済みのモジュールを返す。失敗（404・パース失敗・ArucoDetector 無し・初期化タイムアウト）は throw。
+ * OpenCV.js を読み込んで初期化済みのモジュールを返す。失敗（404・パース失敗・ArucoDetector 無し・取得や初期化のタイムアウト）は throw。
  * @param onProgress 取得の進捗（"3.2/10.9MB" → "compiling" → "ready"）
+ * @param timeoutMs WASM の初期化（onRuntimeInitialized）を待つ上限
+ * @param fetchTimeoutMs 取得の無応答の上限。応答ヘッダまで、および本体のチャンクの間隔がこれを超えたら AbortController で中断する
+ *   （回線が遅いだけで 11MB の取得全体が 30s を超えるのは許し、止まったまま loading に居座るのを防ぐ）
  */
-export async function loadOpenCv(url: string, onProgress?: (step: string) => void, timeoutMs = 90_000): Promise<OpenCv> {
-  const res = await fetch(url);
+export async function loadOpenCv(url: string, onProgress?: (step: string) => void, timeoutMs = 90_000, fetchTimeoutMs = 30_000): Promise<OpenCv> {
+  const controller = new AbortController();
+  let fetchTimer: ReturnType<typeof setTimeout> | undefined;
+  const armFetchTimer = () => {
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(() => controller.abort(new Error(`opencv.js の取得が ${fetchTimeoutMs / 1000}s 応答しない`)), fetchTimeoutMs);
+  };
+  armFetchTimer();
+  try {
+    return await loadOpenCvInner(url, controller.signal, { arm: armFetchTimer, stop: () => clearTimeout(fetchTimer) }, onProgress, timeoutMs);
+  } catch (e) {
+    // abort の理由（タイムアウト）を優先して返す（fetch / reader.read は AbortError を投げる）
+    if (controller.signal.aborted && controller.signal.reason instanceof Error) throw controller.signal.reason;
+    throw e;
+  } finally {
+    clearTimeout(fetchTimer);
+  }
+}
+
+async function loadOpenCvInner(
+  url: string,
+  signal: AbortSignal,
+  fetchTimer: { arm(): void; stop(): void },
+  onProgress: ((step: string) => void) | undefined,
+  timeoutMs: number,
+): Promise<OpenCv> {
+  const res = await fetch(url, { signal });
+  fetchTimer.arm();
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}（npm run fetch:opencv で取得）`);
   // Vite の dev サーバーは無いパスにも index.html を 200 で返すので、種類でも弾く
   if (/html/i.test(res.headers.get("content-type") ?? "")) throw new Error(`${url} が JS ではなく HTML（ファイルが無い? npm run fetch:opencv で取得）`);
@@ -74,6 +103,7 @@ export async function loadOpenCv(url: string, onProgress?: (step: string) => voi
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      fetchTimer.arm();
       chunks.push(value);
       received += value.length;
       onProgress?.(`${(received / 1e6).toFixed(1)}${total ? `/${(total / 1e6).toFixed(1)}` : ""}MB`);
@@ -91,6 +121,9 @@ export async function loadOpenCv(url: string, onProgress?: (step: string) => voi
     off += c.length;
   }
   const src = new TextDecoder().decode(merged);
+  // 取得は終わったので無応答のタイムアウトは止める（以降は WASM の初期化の timeoutMs）
+  fetchTimer.stop();
+  signal.throwIfAborted();
   onProgress?.("compiling");
   // UMD の CommonJS 分岐（typeof module === 'object' && module.exports）に入れて、返ったモジュールを default export にする。
   // ES モジュールなので top-level の this は undefined だが、UMD は module 分岐を先に見るので問題ない

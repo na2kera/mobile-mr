@@ -10,7 +10,9 @@ import {
   cvPoseToCameraMatrix,
   isCoplanar,
   markerCorners,
+  markerErrorsL1,
   matrixToRodrigues,
+  meanSidePx,
   reprojectionErrorPx,
   rodriguesToMatrix,
 } from "./pnp-board.ts";
@@ -32,12 +34,20 @@ export function createArucoDetector(cv: OpenCv): ArucoDetectorLike {
   const dict = cv.getPredefinedDictionary(cv.DICT_ARUCO_MIP_36h12);
   const params = new cv.aruco_DetectorParameters();
   params.cornerRefinementMethod = cv.CORNER_REFINE_SUBPIX;
-  // 誤検出の足切り: js-aruco2 側（maxHammingDistance 4）に近い厳しさ。辞書の既定 maxCorrectionBits は 12 で緩い
+  // 誤検出の足切り: detectMarkers が許す誤りビット数は int(辞書の maxCorrectionBits × errorCorrectionRate)。
+  // 36h12 の maxCorrectionBits は 12 で、既定の 0.6 だと 7 ビット反転しても ID として読む（Node で確認）。
+  // 0.34 で int(12 × 0.34) = 4 ビット = js-aruco2（08 の maxHammingDistance 4）と同じ厳しさにする（4 ビット反転は検出・5 ビットは不検出をテストで確認）
+  params.errorCorrectionRate = 0.34;
+  // RefineParameters は refineDetectedMarkers（使っていない）用。この JS バインディングは引数無しで作れないので C++ の既定値（10, 3, true）を渡すだけ
   const refine = new cv.aruco_RefineParameters(10, 3, true);
-  const detector = new cv.aruco_ArucoDetector(dict, params, refine);
-  params.delete();
-  refine.delete();
-  return detector as unknown as ArucoDetectorLike;
+  try {
+    // ArucoDetector は辞書・パラメータを値でコピーして持つので、JS 側のハンドルはすぐ消してよい
+    return new cv.aruco_ArucoDetector(dict, params, refine) as unknown as ArucoDetectorLike;
+  } finally {
+    dict.delete();
+    params.delete();
+    refine.delete();
+  }
 }
 
 /** 灰色画像（CV_8UC1）からマーカーを検出する。Mat は毎回作って消す（Emscripten のヒープなので GC されない） */
@@ -51,17 +61,20 @@ export function detectMarkers(cv: OpenCv, detector: ArucoDetectorLike, gray: CvM
     const n = ids.rows;
     for (let i = 0; i < n; i++) {
       const c = corners.get(i);
-      const d = c.data32F;
-      out.push({
-        id: ids.data32S[i],
-        corners: [
-          [d[0], d[1]],
-          [d[2], d[3]],
-          [d[4], d[5]],
-          [d[6], d[7]],
-        ],
-      });
-      c.delete();
+      try {
+        const d = c.data32F;
+        out.push({
+          id: ids.data32S[i],
+          corners: [
+            [d[0], d[1]],
+            [d[2], d[3]],
+            [d[4], d[5]],
+            [d[6], d[7]],
+          ],
+        });
+      } finally {
+        c.delete();
+      }
     }
   } finally {
     corners.delete();
@@ -81,14 +94,21 @@ export type PnpResult = {
   cameraMatrix: number[];
   /** 再投影誤差の平均 [px] */
   errPx: number;
+  /** マーカーごとの正規化誤差（08 の POSIT と同じ尺度。pnp-board.ts の markerErrorsL1。board.ids と同じ並び） */
+  markerErrors: number[];
   /** 実際に使った方法（HUD 用: "ippe+lm" / "iter" / "iter(guess)"） */
   method: string;
 };
 
 export type PnpGuess = { rvec: V3; tvec: V3 };
 
+/** solveSingleMarker の結果（マーカー → three.js カメラの 4x4、再投影誤差の平均 [px]、08 と同じ尺度の正規化誤差） */
+export type SinglePose = { cameraMatrix: number[]; errPx: number; error: number };
+
 /**
- * board の対応点を solvePnP で 1 つの姿勢にする。失敗（solvePnP が false・非有限・カメラの後ろ）なら null。
+ * board の対応点を solvePnP で 1 つの姿勢にする。解が無い（solvePnP が false・非有限・カメラの後ろ）なら null。
+ * OpenCV.js の例外（WASM の abort・メモリ不足など）は握りつぶさずそのまま throw する（「解なし」の null と区別するため。
+ * 呼び出し側の marker-anchor-opencv.ts が連続回数を数えて js-aruco2 に切り替える）
  * @param K カメラ行列（行優先 9。pnp-board.ts の cameraMatrix）
  * @param guess 前フレームの姿勢（ITERATIVE の初期値。無ければ無しで解く）
  */
@@ -107,12 +127,7 @@ export function solveBoardPnP(cv: OpenCv, board: Board, K: readonly number[], me
   const candidates: Candidate[] = [];
   try {
     const solve = (flags: number, useGuess: boolean, label: string) => {
-      let ok = false;
-      try {
-        ok = cv.solvePnP(obj, img, kMat, dist, rvec, tvec, useGuess, flags);
-      } catch {
-        ok = false;
-      }
+      const ok = cv.solvePnP(obj, img, kMat, dist, rvec, tvec, useGuess, flags);
       if (!ok) return;
       const rv = Array.from(rvec.data64F) as V3;
       const tv = Array.from(tvec.data64F) as V3;
@@ -157,7 +172,16 @@ export function solveBoardPnP(cv: OpenCv, board: Board, K: readonly number[], me
       candidates.find((c) => c.method === "ippe+lm" && c.errPx <= minErr * 1.05) ??
       candidates.find((c) => c.errPx === minErr)!;
     const R = rodriguesToMatrix(best.rvec);
-    return { R, t: best.tvec, rvec: best.rvec, tvec: best.tvec, cameraMatrix: cvPoseToCameraMatrix(R, best.tvec), errPx: best.errPx, method: best.method };
+    return {
+      R,
+      t: best.tvec,
+      rvec: best.rvec,
+      tvec: best.tvec,
+      cameraMatrix: cvPoseToCameraMatrix(R, best.tvec),
+      errPx: best.errPx,
+      markerErrors: markerErrorsL1(board.objectPoints, board.imagePoints, board.sidesPx, R, best.tvec, K),
+      method: best.method,
+    };
   } finally {
     obj.delete();
     img.delete();
@@ -171,6 +195,7 @@ export function solveBoardPnP(cv: OpenCv, board: Board, K: readonly number[], me
 /**
  * 1 枚のマーカーだけの姿勢（SOLVEPNP_IPPE_SQUARE。マーカー座標系 → three.js のカメラ座標系の 4x4）。
  * 08 の POSIT と同じ「1 枚ずつ」の推定で、複数見えたときの候補のばらつき（spread）の診断と、?pose=single の比較用。
+ * 解が無ければ null、OpenCV.js の例外は throw（solveBoardPnP と同じ）。error は 08 の POSIT と同じ尺度の正規化誤差
  * @param guess board の解から予測したこのマーカーの姿勢（マーカー → three.js カメラの 4x4）。渡すとそれを初期値にした ITERATIVE も解き、
  *   再投影誤差が IPPE_SQUARE の 1.5 倍以内ならそちらを採る（正面付近の小さい 1 枚は IPPE の 2 解（鏡像）の誤差が僅差で、
  *   1 枚ずつだと鏡像を拾って spread が 0.16m になる。board の予測に近い局所解を選べば spread は「配置と実物のずれ」だけを表す）
@@ -181,7 +206,7 @@ export function solveSingleMarker(
   markerSizeM: number,
   K: readonly number[],
   guess: readonly number[] | null = null,
-): { cameraMatrix: number[]; errPx: number } | null {
+): SinglePose | null {
   const local = markerCorners(markerSizeM);
   const obj = cv.matFromArray(4, 3, cv.CV_32F, local.flat());
   const img = cv.matFromArray(4, 2, cv.CV_32F, corners.flat());
@@ -190,20 +215,17 @@ export function solveSingleMarker(
   const rvec = cv.Mat.zeros(3, 1, cv.CV_64F);
   const tvec = cv.Mat.zeros(3, 1, cv.CV_64F);
   try {
-    const solve = (flags: number, useGuess: boolean): { cameraMatrix: number[]; errPx: number } | null => {
-      let ok = false;
-      try {
-        ok = cv.solvePnP(obj, img, kMat, dist, rvec, tvec, useGuess, flags);
-      } catch {
-        ok = false;
-      }
+    const solve = (flags: number, useGuess: boolean): SinglePose | null => {
+      const ok = cv.solvePnP(obj, img, kMat, dist, rvec, tvec, useGuess, flags);
       if (!ok) return null;
       const rv = Array.from(rvec.data64F) as V3;
       const tv = Array.from(tvec.data64F) as V3;
       if (rv.length !== 3 || tv.length !== 3 || !rv.every(Number.isFinite) || !tv.every(Number.isFinite)) return null;
       const R = rodriguesToMatrix(rv);
       const errPx = reprojectionErrorPx(local.flat(), corners.flat(), R, tv, K);
-      return Number.isFinite(errPx) ? { cameraMatrix: cvPoseToCameraMatrix(R, tv), errPx } : null;
+      if (!Number.isFinite(errPx)) return null;
+      const error = markerErrorsL1(local.flat(), corners.flat(), [meanSidePx(corners)], R, tv, K)[0];
+      return { cameraMatrix: cvPoseToCameraMatrix(R, tv), errPx, error };
     };
     const ippe = solve(cv.SOLVEPNP_IPPE_SQUARE, false);
     if (!guess) return ippe;

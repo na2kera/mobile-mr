@@ -1,15 +1,17 @@
-// 08-4（demos/08-4-splatoon-opencv。OpenCV.js の ArUco board + solvePnP）の回帰テスト。`npm run test:splatoon-opencv` で実行する。
+// 08-4（demos/08-4-splatoon-opencv。OpenCV.js の ArUco board + solvePnP）の回帰テスト。`npm run test:08-4-opencv` で実行する。
 //   1. src/shared/pnp-board.ts — board の組み立て・平面判定・rvec/tvec ↔ 4x4 の変換・座標系の向き（three.js ⇔ OpenCV）・再投影誤差。
 //      OpenCV 無しの純粋な数学で、合成カメラ（fake-markers.ts）の投影と整合することを確かめる
 //   2. OpenCV.js（public/vendor/opencv/opencv.js。`npm run fetch:opencv`）を Node で動かし（Emscripten の Node 対応ビルド）、
 //      - 辞書 DICT_ARUCO_MIP_36h12 の ID とビットの向きが js-aruco2 の ARUCO_MIP_36h12 と一致する（印刷したマーカーがそのまま読める）
 //      - 合成画像（field 座標系のマーカーをピンホール投影して描く）→ ArucoDetector → solvePnP で元のカメラ姿勢に戻る（平面・非平面・前フレーム初期値）
+//      - 誤り訂正の厳しさ（4 ビット反転は読む・5 ビットは読まない = js-aruco2 と同じ）
+//      - createOpenCvMarkerAnchor（DOM は最小のスタブ）: 配置の不整合で 1 枚ずつの平均に落ちない・実行時の例外が続くと js-aruco2 に切り替わる
 //      - 同じ合成入力を js-aruco2 + POSIT（08）と OpenCV + solvePnP（08-4）の両方に流し、斜め（0 / 30 / 45 / 60°）での原点の位置の
 //        ばらつきと誤差を比べる（README の表の元データ。数値はそのまま出力する）
 //      opencv.js が無ければ 2 は SKIP（1 だけで pass にはしない: 取得してから流すこと）
 // テストフレームワークは使わない（04〜08 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,13 +19,16 @@ import {
   cameraMatrix,
   cameraMatrixToCvPose,
   cvPoseToCameraMatrix,
+  DEFAULT_MAX_REPROJ_PX,
   focalPxOf,
   isCoplanar,
   markerCorners,
+  markerErrorsL1,
   matrixToRodrigues,
   meanSidePx,
   meanV3,
   reprojectionErrorPx,
+  reprojLimitPx,
   rodriguesToMatrix,
 } from "../src/shared/pnp-board.ts";
 import { createArucoDetector, detectMarkers, guessFromCameraMatrix, solveBoardPnP, solveSingleMarker } from "../src/shared/opencv-pose.ts";
@@ -124,6 +129,20 @@ const fakeMarker = (p) => ({ id: p.id, bits: bitsOf(p.id), toField: markerToFiel
     near(reprojectionErrorPx([0, 0, 0.1, 0, 0.1, 0], [270, 240, 320, 190], yawCv, [0, 0, 1], cameraMatrix(500, 640, 480)), 0) &&
       near(reprojectionErrorPx([0, 0, 0.1, 0, 0.1, 0], [273, 240, 320, 190], yawCv, [0, 0, 1], cameraMatrix(500, 640, 480)), 1.5),
   );
+  // 08 の POSIT と同じ尺度の正規化誤差: 4 隅の |du|+|dv| の合計 ÷ 辺長。1 隅の u を 3px・v を 1px ずらすと (3+1)/40 = 0.1
+  {
+    const obj = markerCorners(0.1).flat(); // 1m 前方で f=400 なら 40px 角
+    const R0 = [1, 0, 0, 0, -1, 0, 0, 0, -1];
+    const img = [300, 220, 340, 220, 340, 260, 300, 260];
+    const K0 = cameraMatrix(400, 640, 480);
+    const e0 = markerErrorsL1(obj, img, [40], R0, [0, 0, 1], K0);
+    const shifted = [...img];
+    shifted[0] += 3;
+    shifted[1] -= 1;
+    const e1 = markerErrorsL1(obj, shifted, [40], R0, [0, 0, 1], K0);
+    check("markerErrorsL1（手計算）: 投影どおりなら 0、1 隅を (3, −1)px ずらすと (3+1)/40 = 0.1（08 の POSIT の err= と同じ尺度）", near(e0[0], 0, 1e-9) && near(e1[0], 0.1, 1e-9), `${e0[0]} ${e1[0]}`);
+  }
+  check("reprojLimitPx: ?maxReprojPx= は検出画像の長辺 960px 基準（既定 4 → 640px では 2.67px、1920px では 8px）", DEFAULT_MAX_REPROJ_PX === 4 && near(reprojLimitPx(4, 640), 8 / 3, 1e-9) && near(reprojLimitPx(4, 1920), 8));
   const back = cameraMatrixToCvPose(camThree);
   check("cameraMatrixToCvPose: cvPoseToCameraMatrix の逆", nearV(back.R, [1, 0, 0, 0, -1, 0, 0, 0, -1]) && nearV(back.t, [0, 0, 1]));
   // 合成カメラ（fake-markers.ts）の投影と整合するか: field → camera(three) = (camToField)⁻¹ の OpenCV 姿勢で board の対応点を再投影すると誤差 0
@@ -178,6 +197,38 @@ if (!existsSync(opencvPath)) {
   }
 
   const detector = createArucoDetector(cv);
+
+  // ---- 誤り訂正の厳しさ: 印刷したマーカーの内側のセルを k 個反転しても ID 0 と読むか（js-aruco2 の maxHammingDistance 4 と同じ）----
+  {
+    const dict = cv.getPredefinedDictionary(cv.DICT_ARUCO_MIP_36h12);
+    const CELL = 20;
+    const PAD = 60;
+    const flips = [[0, 0], [1, 3], [2, 5], [3, 1], [4, 4], [5, 2], [0, 5]];
+    const detectedWith = (k) => {
+      const marker = new cv.Mat();
+      cv.generateImageMarker(dict, 0, 8 * CELL, marker, 1);
+      const img = new cv.Mat();
+      cv.copyMakeBorder(marker, img, PAD, PAD, PAD, PAD, cv.BORDER_CONSTANT, new cv.Scalar(255));
+      marker.delete();
+      for (const [r, c] of flips.slice(0, k)) {
+        for (let y = (1 + r) * CELL; y < (2 + r) * CELL; y++) {
+          for (let x = (1 + c) * CELL; x < (2 + c) * CELL; x++) {
+            const i = (PAD + y) * img.cols + PAD + x;
+            img.data[i] = 255 - img.data[i];
+          }
+        }
+      }
+      const ids = detectMarkers(cv, detector, img).map((d) => d.id);
+      img.delete();
+      return ids;
+    };
+    const res = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => detectedWith(k));
+    const text = res.map((ids, k) => `${k}:${ids.join("+") || "-"}`).join(" ");
+    check("誤り訂正: 内側のセルを 4 ビットまで反転しても ID 0 として検出する", res.slice(0, 5).every((ids) => ids.length === 1 && ids[0] === 0), text);
+    check("誤り訂正: 5 ビット以上反転すると検出しない（errorCorrectionRate 0.34 = int(12×0.34) = 4 ビット。既定 0.6 だと 7 ビットでも読んでいた）", res.slice(5).every((ids) => ids.length === 0), text);
+    dict.delete();
+  }
+
   const arucoDetector = new AR.Detector({ maxHammingDistance: 4 });
   const posit = new POS.Posit(MARKER_M, FOCAL);
   // marker-detector.ts と同じ POSIT → three.js の変換（列優先）
@@ -297,6 +348,11 @@ if (!existsSync(opencvPath)) {
       const wrong = buildBoard(dets, layoutOf([fakeMarker({ ...FLOOR_NEAR, pos: [0.3, -1.2, 0.5] })]), MARKER_M);
       const rw = solveBoardPnP(cv, wrong, K, "auto", null);
       check("配置の入力ミス（床を 30cm ずらす）は board の再投影誤差に出る（> 3px）", rw !== null && rw.errPx > 3, rw ? `${rw.errPx.toFixed(1)}px` : "null");
+      // 既定の上限（?maxReprojPx=4 は 960px 基準。この画像は 640px なので 2.67px）で、正しい配置は通り、30cm ずれた配置は棄却される
+      const limit = reprojLimitPx(DEFAULT_MAX_REPROJ_PX, Math.max(W, H));
+      const rOk = solveBoardPnP(cv, board, K, "auto", null);
+      check("既定の上限: 正しい配置の board は再投影誤差の上限と maxPoseError 0.5 の両方を通る", rOk !== null && rOk.errPx <= limit && Math.max(...rOk.markerErrors) <= 0.5, rOk ? `${rOk.errPx.toFixed(2)}px <= ${limit.toFixed(2)}px err=${rOk.markerErrors.map((e) => e.toFixed(2))}` : "null");
+      check("既定の上限: 床を 30cm ずらした board は棄却される（再投影誤差が上限を超える）", rw !== null && rw.errPx > limit, rw ? `${rw.errPx.toFixed(1)}px > ${limit.toFixed(2)}px` : "null");
     }
     img.delete();
   }
@@ -324,6 +380,152 @@ if (!existsSync(opencvPath)) {
     const fused = fusePoseCandidates(cands);
     check("08 の headless と同じ幾何（原点 + ID 5）: 1 枚ずつの IPPE_SQUARE から出した原点の候補の spread < 5cm", dets.length === 2 && fused && fused.spread < 0.05, `ids=${dets.map((x) => x.id).join("+")} spread=${fused?.spread.toFixed(3)}m`);
     img.delete();
+  }
+
+  // ---- createOpenCvMarkerAnchor（08-4 のループがそのまま使う実装）を合成画像で動かす ----
+  // marker-anchor-opencv.ts は Vite 向けに拡張子無しで import しているので、Node の解決に「.ts を補う」フックを足す。
+  // フォールバック先の marker-detector.ts は CommonJS の js-aruco2 を名前付きで import する（Vite は変換するが Node は読めない）ので、
+  // require した結果を名前付きで export する薄い ES モジュールに差し替える。
+  // DOM は検出に使う分だけのスタブ（canvas の getImageData が合成画像を返す）。カメラはワールド原点・単位回転なので anchor = field → カメラ
+  {
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier === "js-aruco2" || specifier.startsWith("js-aruco2/")) return { url: `cjs-shim:${specifier}`, shortCircuit: true };
+        try {
+          return nextResolve(specifier, context);
+        } catch (e) {
+          if (specifier.startsWith(".") && !/\.[cm]?[jt]s$/.test(specifier)) return nextResolve(`${specifier}.ts`, context);
+          throw e;
+        }
+      },
+      load(url, context, nextLoad) {
+        if (!url.startsWith("cjs-shim:")) return nextLoad(url, context);
+        const spec = url.slice("cjs-shim:".length);
+        const names = Object.keys(require(spec)).filter((k) => /^[A-Za-z_$][\w$]*$/.test(k));
+        const source = `import { createRequire } from "node:module"; const m = createRequire(${JSON.stringify(import.meta.url)})(${JSON.stringify(spec)}); export default m; ${names.map((k) => `export const ${k} = m.${k};`).join(" ")}`;
+        return { format: "module", source, shortCircuit: true };
+      },
+    });
+    let frame = null;
+    globalThis.HTMLMediaElement ??= { HAVE_CURRENT_DATA: 2 };
+    globalThis.document ??= {
+      createElement: () => ({ width: 0, height: 0, getContext: () => ({ drawImage() {}, getImageData: () => frame }) }),
+    };
+    const THREE = await import("three");
+    const { createOpenCvMarkerAnchor, OPENCV_MAX_CONSECUTIVE_ERRORS } = await import("../src/shared/marker-anchor-opencv.ts");
+    const extraOf = (p) => ({ id: p.id, toAnchor: new THREE.Matrix4().fromArray(markerToFieldMatrix(p)) });
+    async function makeAnchor(extras, cvImpl = cv) {
+      const video = { readyState: 4, currentTime: 0, videoWidth: W, videoHeight: H };
+      const anchor = new THREE.Object3D();
+      const a = createOpenCvMarkerAnchor({
+        opencvUrl: "",
+        detector: "opencv",
+        pnpMethod: "auto",
+        poseSource: "board",
+        maxReprojPx: DEFAULT_MAX_REPROJ_PX,
+        loadCv: async () => cvImpl,
+        video,
+        camera: new THREE.PerspectiveCamera(),
+        anchor,
+        markerSizeM: MARKER_M,
+        markerId: 0,
+        extraMarkers: () => extras,
+        maxPoseError: 0.5,
+        detW: 960,
+        smooth: 1,
+        minIntervalMs: 0,
+        camHFovDeg: () => HFOV,
+        resnapAfterMs: 2000,
+        snapDistanceM: 0.3,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      let now = 1000;
+      const step = (img) => {
+        frame = toImageData(img);
+        video.currentTime += 1 / 30;
+        now += 100;
+        a.update(now);
+      };
+      return { a, anchor, step };
+    }
+
+    // 配置の不整合（ID 5 は実物が右 0.6m、配置は右 1.2m = 0.6m ずれ）: board は棄却されるが、1 枚ずつの平均（同じ不正な配置で原点に直す）には落とさず原点だけで解く
+    {
+      const camToField = fakeCameraToField([0.3, 0.1, 1.6], 0, 4);
+      const { img } = renderImage([fakeMarker(ORIGIN), fakeMarker(WALL2)], camToField);
+      const ref = await makeAnchor([]);
+      const bad = await makeAnchor([extraOf({ id: 5, face: "wall", pos: [1.2, 0, 0] })]);
+      for (let i = 0; i < 3; i++) {
+        ref.step(img);
+        bad.step(img);
+      }
+      const truth = posOf(invertRigid(camToField));
+      const refPos = ref.anchor.position.toArray();
+      const badPos = bad.anchor.position.toArray();
+      const moved = dist3(refPos, badPos);
+      console.log(`inconsistent layout: ref=${ref.a.info} / bad=${bad.a.info} moved=${(moved * 100).toFixed(2)}cm`);
+      check("配置の不整合（0.6m ずれ）: 原点マーカー単体のアンカーは真値に 3cm 以内（基準の確認）", ref.a.backend === "opencv" && dist3(refPos, truth) < 0.03, `${(dist3(refPos, truth) * 100).toFixed(2)}cm`);
+      check("配置の不整合（0.6m ずれ）: アンカーが原点マーカー単体の位置から 2cm 以上動かない（1 枚ずつの平均に落ちない）", bad.a.everDetected && moved < 0.02, `moved=${(moved * 100).toFixed(2)}cm`);
+      check("配置の不整合: usedIds は実際に寄与した原点だけ、HUD に inconsistent と spread（独立の 1 枚ずつの解のばらつき ≈ 0.6m）が出る", bad.a.usedIds.join("+") === "0" && /inconsistent/.test(bad.a.info) && bad.a.spreadM > 0.45 && bad.a.spreadM < 0.75, `usedIds=${bad.a.usedIds} spread=${bad.a.spreadM.toFixed(2)} info=${bad.a.info}`);
+      img.delete();
+    }
+    // 原点が見えないときの不整合: 直前の姿勢を維持（lastAcceptedMs を進めない。ロストではなく inconsistent と出す）
+    {
+      const camToField = fakeCameraToField([0, 0.1, 1.8], 0, 3);
+      const WALL7 = { id: 7, face: "wall", pos: [-0.6, 0, 0] };
+      const extras = [extraOf(WALL2), extraOf(WALL7)];
+      const t = await makeAnchor(extras);
+      const all = renderImage([fakeMarker(ORIGIN), fakeMarker(WALL2), fakeMarker(WALL7)], camToField);
+      t.step(all.img);
+      t.step(all.img);
+      const ok = t.a.everDetected && t.a.usedIds.length === 3;
+      const before = t.anchor.position.toArray();
+      const acceptedBefore = t.a.lastAcceptedMs;
+      extras[1] = extraOf({ ...WALL7, pos: [-1.2, 0, 0] });
+      const hidden = renderImage([fakeMarker(WALL2), fakeMarker(WALL7)], camToField);
+      t.step(hidden.img);
+      t.step(hidden.img);
+      const held = dist3(before, t.anchor.position.toArray());
+      console.log(`inconsistent without origin: info=${t.a.info}`);
+      check("原点が見えない不整合: 3 枚が正しい配置で見えている間は board（usedIds=0+5+7）", ok, `usedIds=${t.a.usedIds}`);
+      check("原点が見えない不整合: 直前の姿勢を維持し（アンカーが動かない・lastAcceptedMs を進めない）、HUD は inconsistent spread=…m", held === 0 && t.a.lastAcceptedMs === acceptedBefore && /^inconsistent spread=[\d.]+m/.test(t.a.info), `held=${held} info=${t.a.info}`);
+      all.img.delete();
+      hidden.img.delete();
+    }
+    // 実行時の例外（WASM の abort 後は毎フレーム throw）: 30 回連続で js-aruco2 に切り替わり、update は例外を外に出さない
+    {
+      const throwingCv = Object.create(cv);
+      throwingCv.aruco_ArucoDetector = class {
+        detectMarkers() {
+          throw new Error("fake abort");
+        }
+        delete() {}
+      };
+      const t = await makeAnchor([], throwingCv);
+      const camToField = fakeCameraToField([0.1, 0.1, 1.4], 0, 4);
+      const { img } = renderImage([fakeMarker(ORIGIN)], camToField);
+      let escaped = null;
+      let backendAt29 = "";
+      let infoAt29 = "";
+      let acceptedAt29 = 0;
+      for (let i = 1; i <= OPENCV_MAX_CONSECUTIVE_ERRORS + 5; i++) {
+        try {
+          t.step(img);
+        } catch (e) {
+          escaped = e;
+        }
+        if (i === OPENCV_MAX_CONSECUTIVE_ERRORS - 1) {
+          backendAt29 = t.a.backend;
+          infoAt29 = t.a.info;
+          acceptedAt29 = t.a.lastAcceptedMs;
+        }
+      }
+      console.log(`runtime errors: at ${OPENCV_MAX_CONSECUTIVE_ERRORS - 1}: ${backendAt29} ${infoAt29} / after: ${t.a.backend} (${t.a.loadStatus}) ${t.a.info}`);
+      check("実行時の例外: update は例外を外に出さない", escaped === null, String(escaped));
+      check("実行時の例外: 29 回目までは opencv のまま、HUD は error(29x)=理由 でロスト扱い（一度も採用しない）", OPENCV_MAX_CONSECUTIVE_ERRORS === 30 && backendAt29 === "opencv" && /^error\(29x\)=fake abort/.test(infoAt29) && acceptedAt29 === -Infinity, infoAt29);
+      check("実行時の例外: 30 回連続で js-aruco2 に切り替わり（loadStatus に理由）、以後は js-aruco2 で原点を検出する", t.a.backend === "aruco2" && t.a.loadStatus === "opencv runtime error: fake abort" && t.a.info.startsWith("id=0"), `${t.a.backend} ${t.a.loadStatus} ${t.a.info}`);
+      img.delete();
+    }
   }
 
   // ---- 比較: 同じ合成入力を js-aruco2 + POSIT（08）と OpenCV + solvePnP（08-4）に流す ----

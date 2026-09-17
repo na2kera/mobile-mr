@@ -17,6 +17,7 @@ import type { OpenCvMarkerAnchor, PoseSource } from "../../src/shared/marker-anc
 import type { ExtraMarker } from "../../src/shared/marker-anchor";
 import { defaultOpenCvUrl } from "../../src/shared/opencv-loader";
 import type { PnpMethod } from "../../src/shared/opencv-pose";
+import { DEFAULT_MAX_REPROJ_PX } from "../../src/shared/pnp-board";
 import { markerBits } from "../../src/shared/marker-detector";
 import { DEFAULT_MARKER_MM, FACE_LABELS, MARKER_FACES, describeMarkers, invertRigid, markerToFieldMatrix, mulMat4, transformPoint } from "../../src/shared/marker-layout";
 import type { MarkerFace, MarkerPlacement } from "../../src/shared/marker-layout";
@@ -61,7 +62,7 @@ import { createSplatSound } from "./splat-sound";
 //     HUD に出して 08 と同じ js-aruco2 経路にフォールバック
 //   - 方式固有の URL パラメータ: ?detector=opencv|aruco2（既定 opencv）、?pnp=auto|ippe|iterative（既定 auto。auto は平面なら
 //     IPPE → LM（前フレームがあれば初期値ありの解も出して誤差が同程度なら連続性を優先）、壁 + 床のような非平面なら ITERATIVE + 前フレームを初期値）、?pose=board|single（既定 board。single は 1 枚ずつ
-//     IPPE_SQUARE で出して 08 と同じ重み付き平均 = 「数学だけ替えた」比較用）、?maxReprojPx=（board の再投影誤差の上限 [px]。既定 6）、
+//     IPPE_SQUARE で出して 08 と同じ重み付き平均 = 「数学だけ替えた」比較用）、?maxReprojPx=（board の再投影誤差の上限。detW=960 のときの px で、検出画像の解像度に比例して換算。既定 4）、
 //     ?opencvUrl=（opencv.js の場所）。?camFov= は 08 と同じく焦点距離の換算（水平 FOV）を上書きする（内部パラメータの手動較正）。
 //     HUD の marker= の行は pose=<opencv|aruco2|loading> id=… err=… reproj=…px … cv=…ms に置き換わる（1 行目に detector= pnp= poseSource=）
 //   - ゲームの仕様・UI・サーバー（server/splatoon.ts、同じプロトコル）は 08 のまま。以下は 08 のコメント
@@ -110,8 +111,11 @@ const DETECTOR: "opencv" | "aruco2" = detectorRaw === "aruco2" ? "aruco2" : "ope
 const pnpRaw = (params.get("pnp") ?? "auto").toLowerCase();
 const PNP_METHOD: PnpMethod = pnpRaw === "ippe" || pnpRaw === "iterative" ? pnpRaw : "auto";
 const POSE_SOURCE: PoseSource = params.get("pose") === "single" ? "single" : "board";
-/** board の再投影誤差（平均 [px]）の上限。検出画像 detW=960 でのサブピクセル精錬なら 1px 前後、誤った配置や誤検出が混ざると 10px 超 */
-const MAX_REPROJ_PX = numParam("maxReprojPx", 6, { min: 0.1, max: 200 });
+/**
+ * board の再投影誤差（平均 [px]）の上限。検出画像の長辺 960px（detW=960）のときの px で指定し、実際の検出画像の解像度に比例して換算する
+ * （pnp-board.ts の reprojLimitPx）。サブピクセル精錬なら正常 1〜2px、配置の入力ミス・貼りズレで 5px 超
+ */
+const MAX_REPROJ_PX = numParam("maxReprojPx", DEFAULT_MAX_REPROJ_PX, { min: 0.1, max: 200 });
 const OPENCV_URL = params.get("opencvUrl") ?? defaultOpenCvUrl(import.meta.env.BASE_URL);
 
 const NUM_HANDS = Math.round(numParam("hands", 1, { min: 1, max: 2 }));

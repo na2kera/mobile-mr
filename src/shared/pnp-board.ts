@@ -209,6 +209,54 @@ export function reprojectionErrorPx(
   return sum / n;
 }
 
+/**
+ * マーカーごとの正規化誤差（08 の marker-detector.ts の POSIT と同じ尺度: 4 隅の |du|+|dv| の合計 [px] ÷ 画面上の平均辺長 [px]）。
+ * objectPoints / imagePoints は 1 枚 4 点ずつの並び（buildBoard と同じ）、sidesPx はマーカーごとの平均辺長。
+ * ?maxPoseError= はこの値で足切りし、HUD の err= もこの値なので 08 の err= と比べられる（POSIT は投影を整数に丸めてから比べるが、ここは丸めない）。
+ * カメラの後ろに来る点があればそのマーカーは Infinity
+ */
+export function markerErrorsL1(
+  objectPoints: readonly number[],
+  imagePoints: readonly number[],
+  sidesPx: readonly number[],
+  R: readonly number[],
+  t: V3,
+  K: readonly number[],
+): number[] {
+  const out: number[] = [];
+  for (let m = 0; m < sidesPx.length; m++) {
+    let sum = 0;
+    for (let k = 0; k < 4; k++) {
+      const i = m * 4 + k;
+      const x = objectPoints[i * 3];
+      const y = objectPoints[i * 3 + 1];
+      const z = objectPoints[i * 3 + 2];
+      const cx = R[0] * x + R[1] * y + R[2] * z + t[0];
+      const cy = R[3] * x + R[4] * y + R[5] * z + t[1];
+      const cz = R[6] * x + R[7] * y + R[8] * z + t[2];
+      if (cz <= 0) {
+        sum = Infinity;
+        break;
+      }
+      sum += Math.abs((K[0] * cx) / cz + K[2] - imagePoints[i * 2]) + Math.abs((K[4] * cy) / cz + K[5] - imagePoints[i * 2 + 1]);
+    }
+    out.push(sidesPx[m] > 0 ? sum / sidesPx[m] : Infinity);
+  }
+  return out;
+}
+
+/** ?maxReprojPx= の基準の検出画像の長辺 [px]（08 の既定 detW）。上限はこの解像度での px として指定する */
+export const REPROJ_REFERENCE_LONG_PX = 960;
+/**
+ * ?maxReprojPx= の既定（検出画像の長辺 960px のときの平均再投影誤差 [px]）。正常な配置なら 1〜2px、配置の入力ミス・貼りズレで 5px 超
+ * （Node のテストで床の配置を 30cm ずらした board は 640px の画像で 5.2px = 960px 換算 7.8px）
+ */
+export const DEFAULT_MAX_REPROJ_PX = 4;
+/** 実際の検出画像（長辺 detLongPx）での再投影誤差の上限 [px]。誤差の px は画像の解像度に比例するので detW=960 基準の値を換算する */
+export function reprojLimitPx(maxReprojPxAt960: number, detLongPx: number): number {
+  return (maxReprojPxAt960 * detLongPx) / REPROJ_REFERENCE_LONG_PX;
+}
+
 /** 平均（centersAnchor など V3 の配列） */
 export function meanV3(points: readonly V3[]): V3 {
   const out: V3 = [0, 0, 0];

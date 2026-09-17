@@ -8,8 +8,12 @@
 //     1 枚の平面 4 点の不良条件（issue #54 / #55）が「複数枚の合成」に変わる
 //   - 重力での水平化（worldUp）は 08 と同じ考え方で残す（PnP の傾きも信用しない場合の保険。?gravityAlign=0 で切れる）。
 //     位置は「見えているマーカーの中心の平均 − R_level・(その平均のアンカー座標)」（08 の「マーカー中心 − R・pos」の複数枚版）
-//   - 1 枚ずつの姿勢（SOLVEPNP_IPPE_SQUARE）も診断用に出し、08 と同じ定義の spread（候補の位置の最大距離）を返す
+//   - 1 枚ずつの姿勢（SOLVEPNP_IPPE_SQUARE。board を初期値にしない独立の解）も診断用に出し、08 と同じ定義の spread（候補の位置の最大距離）を返す
+//   - board が解けたが再投影誤差が大きい（複数枚の配置と観測が合わない = 配置の入力ミス・貼りズレ）ときは、同じ不正な配置で原点に直す
+//     1 枚ずつの平均は使わず、原点マーカーが見えていれば原点だけで解き、見えていなければ直前の姿勢を維持する（HUD に inconsistent spread=…m）
+//   - usedIds は最終の姿勢に実際に寄与した ID だけ（board なら全枚、原点だけで解いたら原点、single なら誤差で捨てなかった候補）
 // OpenCV.js の読み込み（opencv-loader.ts）は非同期で、失敗したら marker-anchor.ts（js-aruco2）にフォールバックする。
+// 読み込めた後も、検出・solvePnP の例外（WASM の abort など。以後毎フレーム throw する）が 30 回連続したら js-aruco2 に切り替える。
 // src/shared/marker-anchor.ts は変更しない（08 のもの）
 import * as THREE from "three";
 import { createMarkerAnchor } from "./marker-anchor";
@@ -19,8 +23,13 @@ import type { PoseCandidate } from "./marker-layout";
 import { loadOpenCv } from "./opencv-loader";
 import type { CvMat, OpenCv } from "./opencv-loader";
 import { createArucoDetector, detectMarkers, guessFromCameraMatrix, solveBoardPnP, solveSingleMarker } from "./opencv-pose";
-import type { ArucoDetectorLike, PnpGuess, PnpMethod } from "./opencv-pose";
-import { buildBoard, cameraMatrix, focalPxOf, meanV3 } from "./pnp-board";
+import type { ArucoDetectorLike, PnpGuess, PnpMethod, PnpResult } from "./opencv-pose";
+import { buildBoard, cameraMatrix, focalPxOf, meanV3, reprojLimitPx } from "./pnp-board";
+import type { Board, MarkerDetection } from "./pnp-board";
+import type { V3 } from "./surface";
+
+/** 検出・solvePnP の例外がこの回数連続したら js-aruco2 に切り替える（WASM の abort 後は毎フレーム throw するため） */
+export const OPENCV_MAX_CONSECUTIVE_ERRORS = 30;
 
 export type PoseSource = "board" | "single";
 
@@ -33,8 +42,13 @@ export type OpenCvMarkerAnchorOptions = MarkerAnchorOptions & {
   pnpMethod: PnpMethod;
   /** "board"（既定。全マーカーを 1 つの board で解く）か "single"（1 枚ずつ IPPE_SQUARE → 08 と同じ重み付き平均。数学だけ替えた比較用） */
   poseSource: PoseSource;
-  /** 再投影誤差の上限 [px]（board の平均。超えたら捨てる。maxPoseError は正規化誤差（px / 辺長）で、両方で足切りする） */
+  /**
+   * board の平均再投影誤差の上限 [px]。**検出画像の長辺 960px（08 の既定 detW）のときの px** で指定し、実際の検出画像の長辺に比例して換算する
+   * （pnp-board.ts の reprojLimitPx）。maxPoseError（08 の POSIT と同じ尺度の正規化誤差）でもマーカーごとに足切りする
+   */
   maxReprojPx: number;
+  /** テスト用: OpenCV.js の読み込みを差し替える（Node では fetch → Blob の import が使えないため）。省略時は loadOpenCv(opencvUrl) */
+  loadCv?: (onProgress: (step: string) => void) => Promise<OpenCv>;
 };
 
 export type OpenCvMarkerAnchor = MarkerAnchor & {
@@ -60,6 +74,8 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
   let lastDetVideoTime = -1;
   let lastDetMs = -Infinity;
   let lastRejectLogMs = -Infinity;
+  /** 検出・solvePnP の例外の連続回数（成功したフレームで 0 に戻す） */
+  let consecutiveErrors = 0;
   /** 前フレームの board の姿勢（object → three.js カメラ。ITERATIVE の初期値） */
   let lastGuess: PnpGuess | null = null;
 
@@ -72,7 +88,6 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
   const centroidWorld = new THREE.Vector3();
   const centroidOffset = new THREE.Vector3();
   const markerWorld = new THREE.Matrix4();
-  const predicted = new THREE.Matrix4();
   const markerCenter = new THREE.Vector3();
   const anchorOffset = new THREE.Vector3();
   const identity = new THREE.Matrix4();
@@ -141,36 +156,128 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
         detCanvas.height = h;
       }
       const t0 = performance.now();
-      detCtx.drawImage(video, 0, 0, w, h);
-      const image = detCtx.getImageData(0, 0, w, h);
-      const focalPx = focalPxOf(w, h, opts.camHFovDeg());
-      const K = cameraMatrix(focalPx, w, h);
       let rgba: CvMat | null = null;
       let gray: CvMat | null = null;
       try {
+        detCtx.drawImage(video, 0, 0, w, h);
+        const image = detCtx.getImageData(0, 0, w, h);
+        const focalPx = focalPxOf(w, h, opts.camHFovDeg());
+        const K = cameraMatrix(focalPx, w, h);
         rgba = cv.matFromImageData(image);
         gray = new cv.Mat();
         cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
         const detections = detectMarkers(cv, detector, gray);
         self.detMs = performance.now() - t0;
-        apply(detections, K, now);
+        apply(detections, K, Math.max(w, h), now);
+        consecutiveErrors = 0;
       } catch (e: unknown) {
-        // WASM 側の例外（メモリ不足など）で毎フレーム落ちないよう、ログだけ出して次のフレームへ
-        if (now - lastRejectLogMs > 2000) {
-          console.warn("[opencv] 検出でエラー:", e);
-          lastRejectLogMs = now;
-        }
-        self.detMs = performance.now() - t0;
+        runtimeError(e, now, t0);
       } finally {
-        rgba?.delete();
-        gray?.delete();
+        // abort 後は delete 自体も throw しうるので、ここで外に出さない
+        try {
+          rgba?.delete();
+          gray?.delete();
+        } catch {
+          /* 次のフレームの例外として数える */
+        }
       }
     },
   };
 
-  function apply(detections: ReturnType<typeof detectMarkers>, K: number[], now: number) {
+  /**
+   * 検出・solvePnP の例外（WASM の abort・メモリ不足・OpenCV の cv::Exception）。update の外には出さない。
+   * そのフレームはロスト扱い（lastAcceptedMs を進めない・前フレームの初期値を捨てる）で HUD に error(N 回連続)=理由 を出し、
+   * OPENCV_MAX_CONSECUTIVE_ERRORS 回連続したら js-aruco2 に切り替える
+   */
+  function runtimeError(e: unknown, now: number, t0: number) {
+    consecutiveErrors++;
+    self.detMs = performance.now() - t0;
+    lastGuess = null;
+    const msg = (e instanceof Error ? e.message : String(e)).slice(0, 80);
+    self.info = `error(${consecutiveErrors}x)=${msg}`;
+    if (consecutiveErrors === 1 || now - lastRejectLogMs > 2000) {
+      console.warn(`[opencv] 検出でエラー（${consecutiveErrors} 回連続）:`, e);
+      lastRejectLogMs = now;
+    }
+    if (consecutiveErrors >= OPENCV_MAX_CONSECUTIVE_ERRORS) {
+      console.warn(`[opencv] エラーが ${consecutiveErrors} 回連続したので js-aruco2 に切り替える`);
+      try {
+        detector?.delete();
+      } catch {
+        /* abort 後は delete も失敗しうる */
+      }
+      detector = null;
+      cv = null;
+      useFallback(`opencv runtime error: ${msg}`);
+    }
+  }
+
+  /** 1 枚ずつ独立に解いた姿勢（board を初期値にしない IPPE_SQUARE。08 の POSIT と同じ「1 枚ずつ」）をアンカーの候補にしたもの */
+  type SingleCandidate = PoseCandidate & { id: number; error: number; tilt: number };
+
+  /** 1 枚ずつの姿勢 → アンカーの候補（08 の apply と同じ式。水平化するなら「マーカー中心 − R_level・pos」） */
+  function singleCandidates(detections: readonly MarkerDetection[], board: Board, K: number[], upArr: V3 | null): SingleCandidate[] {
+    const out: SingleCandidate[] = [];
+    for (const d of detections) {
+      const toAnchor = toAnchorOf(d.id);
+      if (!toAnchor || !board.ids.includes(d.id) || out.some((c) => c.id === d.id)) continue;
+      const single = solveSingleMarker(cv!, d.corners, opts.markerSizeM, K);
+      if (!single) continue;
+      const sidePx = board.sidesPx[board.ids.indexOf(d.id)];
+      objToCam.fromArray(single.cameraMatrix);
+      markerWorld.multiplyMatrices(camera.matrixWorld, objToCam);
+      if (toAnchor !== identity) markerWorld.multiply(inverseOf(toAnchor));
+      let tilt = 0;
+      if (upArr) {
+        tilt = tiltDegOf(markerWorld.elements, upArr);
+        levelWorld.fromArray(levelRotation(markerWorld.elements, upArr));
+        markerCenter.setFromMatrixPosition(objToCam).applyMatrix4(camera.matrixWorld);
+        anchorOffset.setFromMatrixPosition(toAnchor).applyMatrix4(levelWorld);
+        targetPos.copy(markerCenter).sub(anchorOffset);
+        targetQuat.setFromRotationMatrix(levelWorld);
+      } else {
+        markerWorld.decompose(targetPos, targetQuat, targetScale);
+      }
+      out.push({
+        id: d.id,
+        error: single.error,
+        tilt,
+        pos: [targetPos.x, targetPos.y, targetPos.z],
+        quat: [targetQuat.x, targetQuat.y, targetQuat.z, targetQuat.w],
+        weight: sidePx * sidePx,
+      });
+    }
+    return out;
+  }
+
+  /** board（アンカー座標系の対応点）の solvePnP の解を targetPos / targetQuat に入れる。戻り値は水平化前の傾き [deg] */
+  function boardPoseToTarget(result: PnpResult, board: Board, upArr: V3 | null): number {
+    objToCam.fromArray(result.cameraMatrix);
+    anchorWorld.multiplyMatrices(camera.matrixWorld, objToCam);
+    if (!upArr) {
+      anchorWorld.decompose(targetPos, targetQuat, targetScale);
+      return 0;
+    }
+    // 水平化: 回転は Y = up（ヨーは PnP の Z 軸から）、位置は「見えているマーカーの中心の平均（ワールド） − R_level・(その平均のアンカー座標)」。
+    // マーカーの中心は傾きの推定に依らずほぼ正しいので、原点までのオフセットだけ水平化した回転で戻す（08 と同じ考え方の複数枚版）
+    const tilt = tiltDegOf(anchorWorld.elements, upArr);
+    levelWorld.fromArray(levelRotation(anchorWorld.elements, upArr));
+    const c = meanV3(board.centersAnchor);
+    centroidWorld.set(c[0], c[1], c[2]).applyMatrix4(anchorWorld);
+    centroidOffset.set(c[0], c[1], c[2]).applyMatrix4(levelWorld);
+    targetPos.copy(centroidWorld).sub(centroidOffset);
+    targetQuat.setFromRotationMatrix(levelWorld);
+    return tilt;
+  }
+
+  /** board の解を採用してよいか（平均再投影誤差 ≤ 検出画像の解像度に換算した上限、かつ全マーカーの正規化誤差 ≤ maxPoseError） */
+  function boardOk(result: PnpResult, limitPx: number): boolean {
+    return result.errPx <= limitPx && Math.max(...result.markerErrors) <= opts.maxPoseError;
+  }
+
+  function apply(detections: MarkerDetection[], K: number[], detLongPx: number, now: number) {
     const up = opts.worldUp?.() ?? null;
-    const upArr: [number, number, number] | null = up ? [up.x, up.y, up.z] : null;
+    const upArr: V3 | null = up ? [up.x, up.y, up.z] : null;
     camera.updateMatrixWorld();
     const board = buildBoard(
       detections,
@@ -185,104 +292,75 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       lost(now);
       return;
     }
-    // ---- board（全マーカー同時）の姿勢。再投影誤差で捨てられたら null（配置の入力ミス・誤検出）----
-    let maxTilt = 0;
-    let boardResult: ReturnType<typeof solveBoardPnP> = null;
-    let errNorm = Infinity;
-    const meanSide = board.sidesPx.reduce((a, b) => a + b, 0) / board.sidesPx.length;
-    if (opts.poseSource === "board") {
+    // ---- 1 枚ずつ独立に解いた候補（board を初期値にしない）。spread（08 と同じ「候補の原点の位置のばらつき」）と ?pose=single に使う ----
+    const singles = singleCandidates(detections, board, K, upArr);
+    const goodSingles = singles.filter((c) => Number.isFinite(c.error) && c.error <= opts.maxPoseError);
+    const fused = fusePoseCandidates(goodSingles);
+    const spreadM = fused?.spread ?? 0;
+
+    let usedIds: number[] = [];
+    let errText = "";
+    let tilt = 0;
+    let inconsistent = false;
+    if (opts.poseSource === "single") {
+      // single: 08 と同じ重み付き平均（POSIT を IPPE_SQUARE に替えただけ。誤差の大きい候補は 1 枚ずつ捨てる）
+      if (!fused) {
+        lost(now);
+        return;
+      }
+      targetPos.set(fused.pos[0], fused.pos[1], fused.pos[2]);
+      targetQuat.set(fused.quat[0], fused.quat[1], fused.quat[2], fused.quat[3]);
+      usedIds = goodSingles.map((c) => c.id);
+      errText = goodSingles.map((c) => c.error.toFixed(2)).join(",");
+      tilt = Math.max(0, ...goodSingles.map((c) => c.tilt));
+      self.reprojPx = 0;
+      self.pnpUsed = "single";
+    } else {
+      // ---- board（全マーカー同時）の姿勢 ----
       // ロストが長かったら前フレームの初期値は捨てる（古い姿勢や鏡像の解に引きずられないよう IPPE / DLT から取り直す）
       if (now - self.lastAcceptedMs > opts.resnapAfterMs) lastGuess = null;
-      const result = cv ? solveBoardPnP(cv, board, K, opts.pnpMethod, lastGuess) : null;
-      if (result) {
-        errNorm = meanSide > 0 ? result.errPx / meanSide : Infinity;
-        self.reprojPx = result.errPx;
-        self.pnpUsed = result.method;
-      }
-      if (result && result.errPx <= opts.maxReprojPx && errNorm <= opts.maxPoseError) {
-        boardResult = result;
-        lastGuess = guessFromCameraMatrix(result.cameraMatrix);
-      } else {
+      const limitPx = reprojLimitPx(opts.maxReprojPx, detLongPx);
+      let result = solveBoardPnP(cv!, board, K, opts.pnpMethod, lastGuess);
+      if (!result) {
+        // 解なし（solvePnP が false・カメラの後ろ）。配置の不整合とは区別してロスト扱い
         lastGuess = null;
-        if (now - lastRejectLogMs > 2000) {
-          console.log(`[opencv] board rejected: ids=${board.ids.join("+")} reproj=${result ? result.errPx.toFixed(1) : "fail"}px err=${Number.isFinite(errNorm) ? errNorm.toFixed(2) : "-"} → 1 枚ずつの平均に落とす`);
-          lastRejectLogMs = now;
+        lost(now);
+        return;
+      }
+      self.reprojPx = result.errPx;
+      self.pnpUsed = result.method;
+      let solvedBoard = board;
+      if (!boardOk(result, limitPx)) {
+        if (board.ids.length < 2) {
+          // 1 枚で誤差が大きい = 誤検出・ブレ。配置の問題ではないのでロスト扱い
+          logReject(now, `rejected: id=${board.ids[0]} reproj=${result.errPx.toFixed(1)}px err=${result.markerErrors[0].toFixed(2)}`);
+          lastGuess = null;
+          lost(now);
+          return;
         }
+        // 解けたが複数枚の配置と観測が合わない（配置の入力ミス・貼りズレ）。1 枚ずつの平均は同じ不正な配置で原点に直すので使わない:
+        // 原点マーカーが見えていれば原点だけで解き、見えていなければ直前の姿勢を維持する（ロストとは別の「配置不整合」）
+        inconsistent = true;
+        logReject(now, `inconsistent: ids=${board.ids.join("+")} reproj=${result.errPx.toFixed(1)}px spread=${spreadM.toFixed(2)}m → ${board.ids.includes(opts.markerId) ? "原点だけで解く" : "直前の姿勢を維持"}`);
+        const originDet = detections.find((d) => d.id === opts.markerId);
+        const originBoard = originDet ? buildBoard([originDet], () => identity.elements, opts.markerSizeM) : null;
+        const originResult = originBoard ? solveBoardPnP(cv!, originBoard, K, opts.pnpMethod, lastGuess) : null;
+        if (!originBoard || !originResult || !boardOk(originResult, limitPx)) {
+          self.info = `inconsistent spread=${spreadM.toFixed(2)}m ids=${board.ids.join("+")} reproj=${result.errPx.toFixed(1)}px (${originDet ? "origin rejected" : "no origin"}, holding pose) cv=${self.detMs.toFixed(0)}ms`;
+          self.spreadM = spreadM;
+          return;
+        }
+        result = originResult;
+        solvedBoard = originBoard;
+        self.reprojPx = result.errPx;
+        self.pnpUsed = `${result.method}(origin only)`;
       }
+      lastGuess = guessFromCameraMatrix(result.cameraMatrix);
+      tilt = boardPoseToTarget(result, solvedBoard, upArr);
+      usedIds = [...solvedBoard.ids];
+      errText = result.markerErrors.map((e) => e.toFixed(2)).join(",");
     }
-    // ---- 1 枚ずつの候補（診断の spread と、poseSource=single / board が捨てられたときに採用する姿勢）。08 の apply と同じ式。
-    // board が解けていればその予測を初期値にして鏡像でない側の局所解を採る（solveSingleMarker の guess）----
-    const candidates: PoseCandidate[] = [];
-    const singleErrs: number[] = [];
-    for (const d of detections) {
-      const toAnchor = toAnchorOf(d.id);
-      if (!toAnchor || !board.ids.includes(d.id)) continue;
-      let guess: number[] | null = null;
-      if (boardResult) {
-        objToCam.fromArray(boardResult.cameraMatrix);
-        predicted.multiplyMatrices(objToCam, toAnchor);
-        guess = predicted.elements;
-      }
-      const single = cv ? solveSingleMarker(cv, d.corners, opts.markerSizeM, K, guess) : null;
-      if (!single) continue;
-      const sidePx = board.sidesPx[board.ids.indexOf(d.id)];
-      singleErrs.push(sidePx > 0 ? single.errPx / sidePx : Infinity);
-      objToCam.fromArray(single.cameraMatrix);
-      markerWorld.multiplyMatrices(camera.matrixWorld, objToCam);
-      if (toAnchor !== identity) markerWorld.multiply(inverseOf(toAnchor));
-      if (upArr) {
-        maxTilt = Math.max(maxTilt, tiltDegOf(markerWorld.elements, upArr));
-        levelWorld.fromArray(levelRotation(markerWorld.elements, upArr));
-        markerCenter.setFromMatrixPosition(objToCam).applyMatrix4(camera.matrixWorld);
-        anchorOffset.setFromMatrixPosition(toAnchor).applyMatrix4(levelWorld);
-        targetPos.copy(markerCenter).sub(anchorOffset);
-        targetQuat.setFromRotationMatrix(levelWorld);
-      } else {
-        markerWorld.decompose(targetPos, targetQuat, targetScale);
-      }
-      candidates.push({
-        pos: [targetPos.x, targetPos.y, targetPos.z],
-        quat: [targetQuat.x, targetQuat.y, targetQuat.z, targetQuat.w],
-        weight: sidePx * sidePx,
-      });
-    }
-    const fused = fusePoseCandidates(candidates);
 
-    // ---- 採用する姿勢: board が解けていればそれ、無ければ（single 指定か board が捨てられた）1 枚ずつの重み付き平均 ----
-    let accepted = false;
-    const usedBoard = boardResult !== null;
-    if (boardResult) {
-      objToCam.fromArray(boardResult.cameraMatrix);
-      anchorWorld.multiplyMatrices(camera.matrixWorld, objToCam);
-      if (upArr) {
-        maxTilt = Math.max(maxTilt, tiltDegOf(anchorWorld.elements, upArr));
-        // 水平化: 回転は Y = up（ヨーは PnP の Z 軸から）、位置は「見えているマーカーの中心の平均（ワールド） − R_level・(その平均のアンカー座標)」。
-        // マーカーの中心は傾きの推定に依らずほぼ正しいので、原点までのオフセットだけ水平化した回転で戻す（08 と同じ考え方の複数枚版）
-        levelWorld.fromArray(levelRotation(anchorWorld.elements, upArr));
-        const c = meanV3(board.centersAnchor);
-        centroidWorld.set(c[0], c[1], c[2]).applyMatrix4(anchorWorld);
-        centroidOffset.set(c[0], c[1], c[2]).applyMatrix4(levelWorld);
-        targetPos.copy(centroidWorld).sub(centroidOffset);
-        targetQuat.setFromRotationMatrix(levelWorld);
-      } else {
-        anchorWorld.decompose(targetPos, targetQuat, targetScale);
-      }
-      accepted = true;
-    } else if (fused) {
-      // single: 08 と同じ重み付き平均（POSIT を IPPE_SQUARE に替えただけ）。board が捨てられたとき（配置の入力ミスなど）もここに落ちる
-      const worst = Math.max(...singleErrs);
-      if (worst <= opts.maxPoseError) {
-        targetPos.set(fused.pos[0], fused.pos[1], fused.pos[2]);
-        targetQuat.set(fused.quat[0], fused.quat[1], fused.quat[2], fused.quat[3]);
-        if (opts.poseSource === "single") self.reprojPx = 0;
-        self.pnpUsed = opts.poseSource === "single" ? "single" : "single(board rejected)";
-        accepted = true;
-      }
-    }
-    if (!accepted) {
-      lost(now);
-      return;
-    }
     self.correctionM = self.everDetected ? anchor.position.distanceTo(targetPos) : 0;
     const snap =
       !self.everDetected ||
@@ -297,11 +375,18 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     }
     self.everDetected = true;
     self.lastAcceptedMs = now;
-    self.usedIds = [...board.ids];
-    self.spreadM = fused?.spread ?? 0;
-    self.tiltDeg = maxTilt;
-    const errText = usedBoard ? errNorm.toFixed(2) : singleErrs.map((e) => e.toFixed(2)).join(",");
-    self.info = `id=${board.ids.join("+")} err=${errText}${opts.poseSource === "board" ? ` reproj=${self.reprojPx.toFixed(1)}px ${self.pnpUsed}` : ""}${board.ids.length > 1 ? ` spread=${self.spreadM.toFixed(2)}m` : ""}${upArr ? ` tilt=${maxTilt.toFixed(0)}deg` : ""} Δ=${self.correctionM.toFixed(2)}m cv=${self.detMs.toFixed(0)}ms`;
+    self.usedIds = usedIds;
+    self.spreadM = spreadM;
+    self.tiltDeg = tilt;
+    const showSpread = inconsistent || board.ids.length > 1;
+    self.info = `id=${usedIds.join("+")} err=${errText}${opts.poseSource === "board" ? ` reproj=${self.reprojPx.toFixed(1)}px ${self.pnpUsed}` : ""}${inconsistent ? " inconsistent" : ""}${showSpread ? ` spread=${spreadM.toFixed(2)}m` : ""}${upArr ? ` tilt=${tilt.toFixed(0)}deg` : ""} Δ=${self.correctionM.toFixed(2)}m cv=${self.detMs.toFixed(0)}ms`;
+  }
+
+  function logReject(now: number, text: string) {
+    if (now - lastRejectLogMs > 2000) {
+      console.log(`[opencv] ${text}`);
+      lastRejectLogMs = now;
+    }
   }
 
   function lost(now: number) {
@@ -318,10 +403,11 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     useFallback("detector=aruco2");
   } else {
     self.loadStatus = "loading";
-    void loadOpenCv(opts.opencvUrl, (step) => {
+    const onProgress = (step: string) => {
       self.loadStatus = step;
       if (self.backend === "loading") self.info = `loading opencv.js ${step}`;
-    })
+    };
+    void (opts.loadCv ? opts.loadCv(onProgress) : loadOpenCv(opts.opencvUrl, onProgress))
       .then((loaded) => {
         cv = loaded;
         detector = createArucoDetector(loaded);
