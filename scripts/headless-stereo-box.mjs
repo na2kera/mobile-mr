@@ -3,7 +3,8 @@
 // Chrome が無ければスキップ）。
 //   A. タッチ端末（縦持ち）を模擬 → Android Chrome 相当の経路:
 //      - 開始タップで sensor=（granted or no-permission-api）→ 3 秒でイベントが来なければ no-events
-//      - fs= / lock= / wake= が HUD に出る。fs が needs-tap のときだけ #fs-button が出る
+//      - fs=ok（1 タップで全画面まで到達する。needs-tap に落ちたら start() が activation を失っている）
+//        + lock= / wake= が HUD に出る。#fs-button は隠れたまま（needs-tap のときだけ出る）
 //      - 縦持ちなので「横向きにしてください」が出る / 長押しの contextmenu が抑止される
 //   B. PC（マウス）: 許可・全画面・Wake Lock を飛ばし mode=orbit で開始する
 //   - どちらも例外が出ていない（file: で参照した SDK が Vite から読めていることの確認を兼ねる）
@@ -177,12 +178,15 @@ try {
   await sleep(3500);
   hud = await pa.hud();
   check("A: 3 秒でイベントが来なければ no-events（Mac にはセンサーが無い）", /sensor=(no-permission-api|granted) no-events/.test(hud), hud.match(/sensor=[^\n]*/)?.[0]);
-  check("A: fs= の結果が HUD に出る", /fs=\S+/.test(hud), hud.match(/fs=[^\n]*/)?.[0]);
   const fsLine = hud.match(/fs=([^\n]*)/)?.[1] ?? "";
-  const fsOk = /^(ok|unsupported)/.test(fsLine);
+  // 1 タップで全画面まで到達することを必須にする（許可ダイアログが出ないヘッドレス Chrome では
+  // タップの効力が requestFullscreen まで残るはず。ここが needs-tap に落ちたら、
+  // start() の途中にタイマー・通信など時間のかかる処理が入って activation を失ったということ。
+  // Chrome の引き継ぎは 5 秒、Safari は 1 秒なので、実機の方が先に落ちる）
+  check("A: fs=ok（1 タップで全画面まで到達する。needs-tap に落ちたら start() が activation を失っている）", /^ok/.test(fsLine), `fs=${fsLine}`);
   const buttonHidden = await pa.eval(`document.querySelector('#fs-button').hidden`);
-  check("A: fs が ok / unsupported なら #fs-button は隠れ、それ以外（needs-tap）なら出る", fsOk === buttonHidden, `fs=${fsLine} hidden=${buttonHidden}`);
-  if (fsOk && /^ok/.test(fsLine)) check("A: 全画面化に成功したら lock= が続く", /lock=/.test(fsLine), fsLine);
+  check("A: fs=ok なので #fs-button は隠れている（needs-tap のときだけ出る）", buttonHidden === true, `fs=${fsLine} hidden=${buttonHidden}`);
+  check("A: 全画面化に成功したら lock= が続く", /lock=/.test(fsLine), fsLine);
   check("A: 縦持ちなので「横向きにしてください」が出る", (await pa.display("#rotate-hint")) === "flex");
   check("A: contextmenu が抑止される（長押しで押し続けが切れない）", await pa.eval(`!document.querySelector('#app').dispatchEvent(new MouseEvent('contextmenu', { cancelable: true, bubbles: true }))`));
   check("A: 描画ループが回っている（canvas がある）", await pa.eval(`Boolean(document.querySelector('#app canvas'))`));
