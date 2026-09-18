@@ -17,6 +17,8 @@
     "check:surface": "node scripts/headless-surface.mjs",
     "test:splatoon": "node scripts/test-splatoon.mjs",
     "check:splatoon": "node scripts/headless-splatoon.mjs",
+    "test:outside-in": "node scripts/test-08-3-outside-in.mjs",
+    "check:outside-in": "node scripts/headless-08-3-outside-in.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
@@ -25,10 +27,15 @@
     "check:golf": "node scripts/headless-golf.mjs",
     "test:batting": "node scripts/test-batting.mjs",
     "check:batting": "node scripts/headless-batting.mjs",
+    "test:08-2-fixed": "node scripts/test-08-2-fixed.mjs",
+    "check:08-2-fixed": "node scripts/headless-08-2-fixed.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
+    "test:splatoon-apriltag": "node scripts/test-08-5-apriltag.mjs",
+    "check:splatoon-apriltag": "node scripts/headless-splatoon-apriltag.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:apriltag": "node scripts/fetch-apriltag.mjs",
     "test:08-6-screen-markers": "node scripts/test-08-6-screen-markers.mjs",
-    "check:08-6-screen-markers": "node scripts/headless-08-6-screen-markers.mjs",
-    "fetch:models": "node scripts/fetch-models.mjs"
+    "check:08-6-screen-markers": "node scripts/headless-08-6-screen-markers.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
