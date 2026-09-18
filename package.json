@@ -43,7 +43,8 @@
     "test:08-4-opencv": "node scripts/test-08-4-opencv.mjs",
     "check:08-4-opencv": "node scripts/headless-08-4-opencv.mjs",
     "fetch:opencv": "node scripts/fetch-opencv.mjs",
-    "fetch:alva": "node scripts/fetch-alva.mjs"
+    "fetch:alva": "node scripts/fetch-alva.mjs",
+    "check:stereo-box": "node scripts/headless-stereo-box.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
@@ -56,6 +57,7 @@
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",
     "js-aruco2": "^2.0.0",
+    "mobile-mr-sdk": "file:../mobile-mr-sdk",
     "three": "^0.185.1",
     "three-stdlib": "^2.36.1"
   },
