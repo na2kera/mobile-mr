@@ -159,6 +159,10 @@ export default defineConfig({
         "demo-08-4-splatoon-opencv": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/index.html", import.meta.url)),
         "demo-08-4-splatoon-opencv-overview": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/overview.html", import.meta.url)),
         "demo-08-4-splatoon-opencv-markers": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/markers.html", import.meta.url)),
+
+        "demo-08-7-splatoon-alva": fileURLToPath(new URL("./demos/08-7-splatoon-alva/index.html", import.meta.url)),
+        "demo-08-7-splatoon-alva-overview": fileURLToPath(new URL("./demos/08-7-splatoon-alva/overview.html", import.meta.url)),
+        "demo-08-7-splatoon-alva-markers": fileURLToPath(new URL("./demos/08-7-splatoon-alva/markers.html", import.meta.url)),
       },
     },
   },

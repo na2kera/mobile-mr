@@ -19,6 +19,8 @@
     "check:splatoon": "node scripts/headless-splatoon.mjs",
     "test:outside-in": "node scripts/test-08-3-outside-in.mjs",
     "check:outside-in": "node scripts/headless-08-3-outside-in.mjs",
+    "test:splatoon-alva": "node scripts/test-08-7-alva.mjs",
+    "check:splatoon-alva": "node scripts/headless-08-7-alva.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
@@ -38,7 +40,8 @@
     "check:08-6-screen-markers": "node scripts/headless-08-6-screen-markers.mjs",
     "test:08-4-opencv": "node scripts/test-08-4-opencv.mjs",
     "check:08-4-opencv": "node scripts/headless-08-4-opencv.mjs",
-    "fetch:opencv": "node scripts/fetch-opencv.mjs"
+    "fetch:opencv": "node scripts/fetch-opencv.mjs",
+    "fetch:alva": "node scripts/fetch-alva.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
