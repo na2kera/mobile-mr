@@ -33,7 +33,9 @@
     "test:splatoon-apriltag": "node scripts/test-08-5-apriltag.mjs",
     "check:splatoon-apriltag": "node scripts/headless-splatoon-apriltag.mjs",
     "fetch:models": "node scripts/fetch-models.mjs",
-    "fetch:apriltag": "node scripts/fetch-apriltag.mjs"
+    "fetch:apriltag": "node scripts/fetch-apriltag.mjs",
+    "test:08-6-screen-markers": "node scripts/test-08-6-screen-markers.mjs",
+    "check:08-6-screen-markers": "node scripts/headless-08-6-screen-markers.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",

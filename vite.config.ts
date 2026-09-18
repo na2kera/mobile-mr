@@ -150,6 +150,11 @@ export default defineConfig({
         "demo-08-5-splatoon-apriltag": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/index.html", import.meta.url)),
         "demo-08-5-splatoon-apriltag-overview": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/overview.html", import.meta.url)),
         "demo-08-5-splatoon-apriltag-markers": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/markers.html", import.meta.url)),
+
+        "demo-08-6-splatoon-screen-markers": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/index.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-overview": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/overview.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-markers": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-screen": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers-screen.html", import.meta.url)),
       },
     },
   },
