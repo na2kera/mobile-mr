@@ -139,6 +139,10 @@ export default defineConfig({
         "demo-10-golf-joycon-test": fileURLToPath(new URL("./demos/10-golf/joycon-test.html", import.meta.url)),
         "demo-10-2-batting": fileURLToPath(new URL("./demos/10-2-batting/index.html", import.meta.url)),
         "demo-10-2-batting-overview": fileURLToPath(new URL("./demos/10-2-batting/overview.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/index.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed-overview": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/overview.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed-markers": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/markers.html", import.meta.url)),
+
         "demo-08-3-splatoon-outside-in": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/index.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-overview": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/overview.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-markers": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/markers.html", import.meta.url)),
