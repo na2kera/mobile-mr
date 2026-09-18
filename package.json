@@ -30,7 +30,10 @@
     "test:08-2-fixed": "node scripts/test-08-2-fixed.mjs",
     "check:08-2-fixed": "node scripts/headless-08-2-fixed.mjs",
     "check:chrome-flow": "node scripts/headless-chrome-flow.mjs",
-    "fetch:models": "node scripts/fetch-models.mjs"
+    "test:splatoon-apriltag": "node scripts/test-08-5-apriltag.mjs",
+    "check:splatoon-apriltag": "node scripts/headless-splatoon-apriltag.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:apriltag": "node scripts/fetch-apriltag.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
