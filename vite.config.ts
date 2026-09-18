@@ -155,6 +155,10 @@ export default defineConfig({
         "demo-08-6-splatoon-screen-markers-overview": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/overview.html", import.meta.url)),
         "demo-08-6-splatoon-screen-markers-markers": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers.html", import.meta.url)),
         "demo-08-6-splatoon-screen-markers-screen": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers-screen.html", import.meta.url)),
+
+        "demo-08-4-splatoon-opencv": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/index.html", import.meta.url)),
+        "demo-08-4-splatoon-opencv-overview": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/overview.html", import.meta.url)),
+        "demo-08-4-splatoon-opencv-markers": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/markers.html", import.meta.url)),
       },
     },
   },
