@@ -8,6 +8,7 @@ import { volleyballServer } from "./server/volleyball.ts";
 import { dartsServer } from "./server/darts.ts";
 import { surfaceServer } from "./server/surface.ts";
 import { splatoonServer } from "./server/splatoon.ts";
+import { splatoonOutsideInServer } from "./server/splatoon-outside-in.ts";
 import { personServer } from "./server/person.ts";
 import { golfServer } from "./server/golf.ts";
 import { battingServer } from "./server/batting.ts";
@@ -70,6 +71,7 @@ export default defineConfig({
     dartsServer(),
     surfaceServer(),
     splatoonServer(),
+    splatoonOutsideInServer(),
     personServer(),
     golfServer(),
     battingServer(),
@@ -140,6 +142,10 @@ export default defineConfig({
         "demo-08-2-splatoon-fixed": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/index.html", import.meta.url)),
         "demo-08-2-splatoon-fixed-overview": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/overview.html", import.meta.url)),
         "demo-08-2-splatoon-fixed-markers": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/markers.html", import.meta.url)),
+
+        "demo-08-3-splatoon-outside-in": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/index.html", import.meta.url)),
+        "demo-08-3-splatoon-outside-in-overview": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/overview.html", import.meta.url)),
+        "demo-08-3-splatoon-outside-in-markers": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/markers.html", import.meta.url)),
       },
     },
   },

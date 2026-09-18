@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>08-3. MR Splatoon（アウトサイドイン） — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜06 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label {
+        color: #e8eaed;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #player-name[aria-invalid="true"] {
+        border-color: #f28b82;
+      }
+      #name-hint {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #name-error {
+        color: #f28b82;
+      }
+      #name-error[hidden] {
+        display: none;
+      }
+      #start-button {
+        width: 100%;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) and (pointer: coarse) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜05 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・手・通信・試合の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>08-3. MR Splatoon（アウトサイドイン）</h1>
+      <p>
+        <strong>08 と同じ仕様のスプラトゥーンを「位置の取り方」だけ変えた比較用デモ</strong>（docs/space-stability-options.md の 2a）。
+        スマホはマーカーを検出しません。<strong>部屋に固定した PC の Web カメラ</strong>（<a href="./overview.html">俯瞰画面</a>の「トラッカー」）が
+        各ゴーグル前面に貼ったマーカー（ID は入室順に割り当て。入室後の案内と HUD の track=id= に出るので、
+        <a href="./markers.html">印刷</a>した該当 ID をゴーグルの前面に貼る。?trackMarkerMm= 既定 60mm）を検出し、部屋座標系での位置をサーバー経由で受け取ります。
+        回転はジャイロのまま（ヨーはトラッカーの値で緩やかに補正）。コートは PC カメラの座標系に固定されるので、どこを向いてもコートは動かず、
+        全員が同じ 1 台のカメラで測られるので相手の相対位置が構造的に一致します。
+        原点は 08 と同じ<strong>正面の壁のマーカー（ID 0）</strong>で、床（既定 3.0m × 2.5m）を四方の壁（既定の高さ 2.4m）で囲んだ箱型のコートができます。
+        塗れる空間の大きさと床からマーカー中心までの高さ（実測。既定 1.2m）は俯瞰画面で開始前に変えられ、全員に配られます。
+        追加マーカーの配置（床など）はトラッカーの原点合わせに使います（スマホは検出しません。枠は配置どおりに描くので、実物と重ならなければ原点合わせがずれています）。
+        <strong>パーを開いている間、手からインクを連射</strong>します（目 → 手の向きへ。満タンで 50 発）。
+        満タンで 50 発ぶんで、空になると撃てません。<strong>撃つのをやめると回復</strong>します
+        （撃った直後 1 秒は回復せず、約 5 秒で満タン）。
+        残量は<strong>グーで補充している間だけ、手元のインクタンク</strong>（グーの手の横、親指側に浮かぶ筒。水位が残量）に出ます（パーで撃っている間は消えます）。
+        ただし<strong>空になると</strong>パーのままでも出て（枠が黄色く脈打つ）、1/4 ほど回復するまで出続けます。
+      </p>
+      <p>
+        <strong>入室したら練習</strong>（時間無制限に自由に塗れます。<strong>パーで塗る ／ グーで補充</strong>: グーにしている間はインクが約 2 秒で満タン）。
+        対戦は <a href="./overview.html">PC の俯瞰画面</a>の「対戦開始」で始まり（カウントダウン ?waitSec= 既定 5 秒）、
+        <strong>1 分</strong>（?matchSec=）で塗った面積が最多の人の勝ち（俯瞰画面の「対戦を終了」で途中でも結果に進めます）。
+        対戦中は視界の上に自分の順位と塗り率が大きく出ます。結果のあと練習に戻ります。
+        <strong>全員が自分の色で塗り合う個人戦</strong>（参加順に 8 色を割り当て）。
+        何台でも同じ URL を開くだけで同じ room に入ります（既定 room: demo。分けたいときは ?room=名前）。表示名は下の入力欄で設定します（?name= での事前指定も可能）。
+        手が取れないときは<strong>画面を押している間、視界の中央へ連射</strong>
+        （PC は Space キー）。05 で較正した手の実寸（例: ?handScale=1.9）は毎回付けてください。
+      </p>
+      <p id="room-error" hidden></p>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
+      <p>
+        確認の見方: 開始後、俯瞰画面でカメラを開いて原点を確定し、ゴーグルのマーカーを PC のカメラに向けると、壁と床の枠（上にスコアボード）がその場に出ます。
+        骨格が背景の手に重なったらパーを開くと連射が始まり、自分の色の玉が壁か床に着弾して塗られれば OK。
+        グーにするとその横（親指側）に自分の色のインクタンクが浮かび、水位が上がっていくのが見えます（パーに戻すと消えます）。
+        撃ち続けて空になると、パーのままでも枠が黄色く脈打つ空のタンクが手の横に出ます。グーにすると水位が上がり、1/4 ほどで消えます。
+        どこを向いてもフィールドはその場に残ります。HUD の track= に自分のマーカー ID・品質 q=・トラッカーのヨー・補正 φ・観測の古さ（見失うと "tracked (0.8s ago)"）、
+        self=（自分の位置）が出ます。俯瞰画面で「対戦開始」を押すと視界に「まもなく対戦開始」と出て、
+        格子が消えて 1 分の対戦になります（視界の上に「1位 12.3%」のように自分の順位と塗り率）。俯瞰画面の「対戦を終了」で途中でも結果になります。
+      </p>
+      <p>
+        調整: 表示は 06 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
+        原点マーカーは ?markerMm=150（印刷ページ markers.html の既定と同じ。room 設定なので全員と俯瞰画面で揃える。手用は handDetW / handSmooth / handLostMs）。
+        アウトサイドイン固有: ?trackSmooth=0.3（届いた位置へ寄せる係数）&amp;trackLostMs=2000（見失い判定）&amp;yawQuality=0.5（ヨー補正に使う品質の下限）&amp;yawSmooth=0.1（ヨー補正の速さ）&amp;yawMaxRate=30（これより速く首を振っている間はヨー補正を止める [deg/s]）。
+        08 の detW / smooth / markerIntervalMs / lostMs / gravityAlign / fakeMarkers / fakeCamPos はこのデモにはありません（位置合わせは常に水平で、トラッカー側で行うため）。
+        飛行・時間 ?gravity=4&amp;matchSec=90&amp;waitSec=5 は room 内で一致が必要です
+        （塗れる空間の幅・高さ・奥行きとマーカーの高さは俯瞰画面の入力欄で変えます）。
+        手元のインクタンクは ?tankPlace=thumb（親指側。pinky = 小指側、arm = 手首の先）&amp;tankH=0.12（板の高さ [m]）&amp;tankOffset=0.09（手からずらす距離 [m]）&amp;tankHoldMs=800（グーの手を見失ってから消すまでの猶予 [ms]）。
+        空で出したタンクを下ろす残量は ?tankLowUntil=0.25（0〜1）。
+        従来どおり見えている手のそばに常に出す（手が見えない間は視界の下）なら ?tankShow=always。手が見えないときに視界の下に出さないなら &amp;tankFallback=0。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC&amp;fakehands=1 で、合成の手がパー → グーを繰り返して撃ち続け
+        （パー 2.5s → グー 2s → 休み 0.5s。&amp;fakeOpenSec=9 でタンクが空になるまで撃つ）、
+        別ウィンドウで同じ URL を開くと別の色の相手として同じフィールドを塗り合います（裏タブは描画が止まるので別ウィンドウで）。
+        位置は俯瞰画面のトラッカーから来るので、俯瞰画面を ?room=同じ名前&amp;tracker=1&amp;fakecam=1&amp;fakePlayers=10:-0.5,0,1.5,0;11:0.5,0,1.5,15 で開き
+        （フェイクカメラに ID 10 / 11 のゴーグルを部屋に置く。入室順に 10, 11 が割り当たる）、原点（床のマーカー ID 1 を配置に入れる）を確定すると 2 台の位置が届きます
+      </p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
