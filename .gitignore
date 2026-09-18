@@ -25,3 +25,11 @@ dist-ssr
 
 # MediaPipe のモデル（npm run fetch:models で取得。バイナリなので管理しない）
 public/models/*.task
+# AprilTag の WASM 検出器（npm run fetch:apriltag で取得。demos/08-5-splatoon-apriltag）
+public/vendor/apriltag/
+
+# OpenCV.js（npm run fetch:opencv で取得。WASM 同梱の 10MB 超なので管理しない。08-4 で使用）
+public/vendor/opencv/
+
+# AlvaAR（npm run fetch:alva で取得。WASM 同梱の 4MB 超・GPLv3 なので管理しない。08-7 でだけ使う）
+public/vendor/alva/

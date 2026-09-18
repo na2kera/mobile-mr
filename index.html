@@ -158,6 +158,21 @@
         </a>
       </li>
       <li>
+        <a class="demo" href="/demos/08-2-splatoon-fixed/">
+          <div class="name">08-2. MR Splatoon（一度合わせて固定）</div>
+          <div class="desc">
+            08 と同じ仕様で「位置の取り方」だけを変えた比較用（候補 5b・基準線）。マーカーの正面 1m で安定した観測が続いたときだけ
+            コートを確定し、確定後は動かさない（信頼できる観測のときだけごく緩やかに補正。練習中に 2 秒押し続けで合わせ直し）
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-2-splatoon-fixed/overview.html">
+          <div class="name">08-2. MR Splatoon（一度合わせて固定）俯瞰画面（PC 用）</div>
+          <div class="desc">08 の俯瞰画面と同じ（同じサーバー・同じ room 名空間。08-2 のスマホと同じ room に入る）</div>
+        </a>
+      </li>
+      <li>
         <a class="demo" href="/demos/08-3-splatoon-outside-in/">
           <div class="name">08-3. MR Splatoon（アウトサイドイン）</div>
           <div class="desc">
@@ -173,6 +188,76 @@
             08 の俯瞰画面に「トラッカー」（Web カメラでゴーグルのマーカーを検出して位置を配る）を足したもの。
             原点マーカーをカメラで一度見て「原点を確定」してから遊ぶ
           </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-5-splatoon-apriltag/">
+          <div class="name">08-5. MR Splatoon（AprilTag 版）</div>
+          <div class="desc">
+            08 の位置の取り方の比較実験（候補 1c）: マーカーの検出器を js-aruco2 から AprilTag（tag36h11 の WASM）に替えたもの。
+            ゲームの仕様・俯瞰画面・サーバーは 08 と同じ。マーカーの絵柄が違うので専用の印刷ページから
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-5-splatoon-apriltag/overview.html">
+          <div class="name">08-5. MR Splatoon（AprilTag 版）俯瞰画面（PC 用）</div>
+          <div class="desc">
+            08 の俯瞰画面と同じ（room 名で分かれる）。AprilTag 版のプレイヤーと同じ room 名で開く
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-6-splatoon-screen-markers/">
+          <div class="name">08-6. MR Splatoon（画面マーカー）</div>
+          <div class="desc">
+            08 と同じ仕様で、マーカーを紙ではなく PC のモニタ / プロジェクタに実寸で大きく表示する（候補 1d）。
+            スマホ側と位置の推定は 08 と同一。追加マーカーの位置は画面上の距離から自動で room に配る
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-6-splatoon-screen-markers/overview.html">
+          <div class="name">08-6. 俯瞰画面（PC 用）</div>
+          <div class="desc">08 の俯瞰画面に「画面マーカーを開く」リンクを足したもの</div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-6-splatoon-screen-markers/markers-screen.html">
+          <div class="name">08-6. 画面マーカー（モニタ / プロジェクタに全画面で）</div>
+          <div class="desc">
+            画面の対角（インチ）から実寸を出し、原点 + 追加マーカーを指定の一辺で描く。「room に反映」で配置を全員に配る
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-4-splatoon-opencv/">
+          <div class="name">08-4. MR Splatoon（OpenCV.js ArUco board + solvePnP）</div>
+          <div class="desc">
+            08 と同じスプラトゥーンで「位置の取り方」だけを OpenCV.js（WASM）に替えた比較用。見えている全マーカーを 1 つの board として
+            solvePnP で 1 つの姿勢にする（docs/space-stability-options.md の候補 1b）。要 npm run fetch:opencv
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-4-splatoon-opencv/overview.html">
+          <div class="name">08-4. MR Splatoon（OpenCV.js PnP）俯瞰画面（PC 用）</div>
+          <div class="desc">08-4 用の俯瞰画面（中身は 08 と同じ。同じ room に入る）</div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-7-splatoon-alva/">
+          <div class="name">08-7. MR Splatoon（AlvaAR の単眼 SLAM + マーカー）</div>
+          <div class="desc">
+            08 と同じスプラトゥーンで「位置の取り方」だけを変えた比較用。原点とスケールはマーカー、マーカーを見失った間の位置の増分は
+            AlvaAR（WASM の単眼 SLAM）から取る（docs/space-stability-options.md の候補 3a）。GPLv3 のためデモ限定。要 npm run fetch:alva
+          </div>
+        </a>
+      </li>
+      <li>
+        <a class="demo" href="/demos/08-7-splatoon-alva/overview.html">
+          <div class="name">08-7. MR Splatoon（AlvaAR SLAM）俯瞰画面（PC 用）</div>
+          <div class="desc">08-7 用の俯瞰画面（中身は 08 と同じ。同じ room に入る）</div>
         </a>
       </li>
       <li>

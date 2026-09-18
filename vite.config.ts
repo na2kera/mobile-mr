@@ -157,9 +157,30 @@ export default defineConfig({
         "demo-10-golf-joycon-test": fileURLToPath(new URL("./demos/10-golf/joycon-test.html", import.meta.url)),
         "demo-10-2-batting": fileURLToPath(new URL("./demos/10-2-batting/index.html", import.meta.url)),
         "demo-10-2-batting-overview": fileURLToPath(new URL("./demos/10-2-batting/overview.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/index.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed-overview": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/overview.html", import.meta.url)),
+        "demo-08-2-splatoon-fixed-markers": fileURLToPath(new URL("./demos/08-2-splatoon-fixed/markers.html", import.meta.url)),
+
         "demo-08-3-splatoon-outside-in": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/index.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-overview": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/overview.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-markers": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/markers.html", import.meta.url)),
+        "demo-08-5-splatoon-apriltag": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/index.html", import.meta.url)),
+        "demo-08-5-splatoon-apriltag-overview": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/overview.html", import.meta.url)),
+        "demo-08-5-splatoon-apriltag-markers": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/markers.html", import.meta.url)),
+
+        "demo-08-6-splatoon-screen-markers": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/index.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-overview": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/overview.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-markers": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers.html", import.meta.url)),
+        "demo-08-6-splatoon-screen-markers-screen": fileURLToPath(new URL("./demos/08-6-splatoon-screen-markers/markers-screen.html", import.meta.url)),
+
+        "demo-08-4-splatoon-opencv": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/index.html", import.meta.url)),
+        "demo-08-4-splatoon-opencv-overview": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/overview.html", import.meta.url)),
+        "demo-08-4-splatoon-opencv-markers": fileURLToPath(new URL("./demos/08-4-splatoon-opencv/markers.html", import.meta.url)),
+
+        "demo-08-7-splatoon-alva": fileURLToPath(new URL("./demos/08-7-splatoon-alva/index.html", import.meta.url)),
+        "demo-08-7-splatoon-alva-overview": fileURLToPath(new URL("./demos/08-7-splatoon-alva/overview.html", import.meta.url)),
+        "demo-08-7-splatoon-alva-markers": fileURLToPath(new URL("./demos/08-7-splatoon-alva/markers.html", import.meta.url)),
+
         "demo-08-8-splatoon-pose-cam": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/index.html", import.meta.url)),
         "demo-08-8-splatoon-pose-cam-overview": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/overview.html", import.meta.url)),
         "demo-08-8-splatoon-pose-cam-markers": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/markers.html", import.meta.url)),
