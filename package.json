@@ -21,6 +21,8 @@
     "check:outside-in": "node scripts/headless-08-3-outside-in.mjs",
     "test:splatoon-alva": "node scripts/test-08-7-alva.mjs",
     "check:splatoon-alva": "node scripts/headless-08-7-alva.mjs",
+    "test:pose-cam": "node scripts/test-08-8-pose-cam.mjs",
+    "check:pose-cam": "node scripts/headless-08-8-pose-cam.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",

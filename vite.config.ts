@@ -9,6 +9,7 @@ import { dartsServer } from "./server/darts.ts";
 import { surfaceServer } from "./server/surface.ts";
 import { splatoonServer } from "./server/splatoon.ts";
 import { splatoonOutsideInServer } from "./server/splatoon-outside-in.ts";
+import { splatoonPoseCamServer } from "./server/splatoon-pose-cam.ts";
 import { personServer } from "./server/person.ts";
 import { golfServer } from "./server/golf.ts";
 import { battingServer } from "./server/batting.ts";
@@ -19,6 +20,21 @@ import { clientLogServer } from "./server/client-log.ts";
 // 読み込み時に該当行だけを ESM の import/export へ書き換えて解決する。
 // 下の optimizeDeps.exclude とセット（除外しないと dev の事前バンドルが
 // このプラグインを通らず壊れる）。js-aruco2 を剥がすときはここも削除する
+// dev サーバーの HTTP サーバーには、デモごとの WebSocket サーバー（server/*.ts）が upgrade と close を 1 つずつ購読する。
+// 08-3 / 08-8 を足して 11 個になり、Node の既定の上限 10 を超えて MaxListenersExceededWarning が出るようになったので、
+// 上限を購読の数に合わせて上げる（漏れではなく、デモの数だけ購読が並ぶのが正しい形）。他のプラグインより先に置く
+function roomListenerLimit(): Plugin {
+  return {
+    name: "room-listener-limit",
+    configureServer(server) {
+      server.httpServer?.setMaxListeners(32);
+    },
+    configurePreviewServer(server) {
+      server.httpServer?.setMaxListeners(32);
+    },
+  };
+}
+
 function jsAruco2Esm(): Plugin {
   const patches: Record<string, [RegExp, string][]> = {
     "cv.js": [[/^this\.CV = CV;$/m, "export { CV };"]],
@@ -64,6 +80,7 @@ function jsAruco2Esm(): Plugin {
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
   plugins: [
+    roomListenerLimit(),
     basicSsl(),
     jsAruco2Esm(),
     sharedRoomServer(),
@@ -72,6 +89,7 @@ export default defineConfig({
     surfaceServer(),
     splatoonServer(),
     splatoonOutsideInServer(),
+    splatoonPoseCamServer(),
     personServer(),
     golfServer(),
     battingServer(),
@@ -146,7 +164,6 @@ export default defineConfig({
         "demo-08-3-splatoon-outside-in": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/index.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-overview": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/overview.html", import.meta.url)),
         "demo-08-3-splatoon-outside-in-markers": fileURLToPath(new URL("./demos/08-3-splatoon-outside-in/markers.html", import.meta.url)),
-
         "demo-08-5-splatoon-apriltag": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/index.html", import.meta.url)),
         "demo-08-5-splatoon-apriltag-overview": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/overview.html", import.meta.url)),
         "demo-08-5-splatoon-apriltag-markers": fileURLToPath(new URL("./demos/08-5-splatoon-apriltag/markers.html", import.meta.url)),
@@ -163,6 +180,10 @@ export default defineConfig({
         "demo-08-7-splatoon-alva": fileURLToPath(new URL("./demos/08-7-splatoon-alva/index.html", import.meta.url)),
         "demo-08-7-splatoon-alva-overview": fileURLToPath(new URL("./demos/08-7-splatoon-alva/overview.html", import.meta.url)),
         "demo-08-7-splatoon-alva-markers": fileURLToPath(new URL("./demos/08-7-splatoon-alva/markers.html", import.meta.url)),
+
+        "demo-08-8-splatoon-pose-cam": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/index.html", import.meta.url)),
+        "demo-08-8-splatoon-pose-cam-overview": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/overview.html", import.meta.url)),
+        "demo-08-8-splatoon-pose-cam-markers": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/markers.html", import.meta.url)),
       },
     },
   },

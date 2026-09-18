@@ -10,6 +10,8 @@
 //     （Codex レビューの指摘: 未測定でも自己申告の pose で射撃できた）
 //   - トラッカーは 1 台だけ有効（最初に接続した tracker が所有者。2 台目は接続できるが track は "not active tracker" で
 //     拒否され、所有者が切断したら引き継ぐ。Codex レビューの指摘: 複数トラッカーが locked と位置を競合する）
+//   - 08-8（Pose カメラ）も同じサーバーを別パスで使う（splatoonOutsideInServer のオプション path / checkTrackIdCollision / dropMissing。
+//     オプションを付けなければ 08-3 の挙動のまま）
 import type { RawData } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
@@ -88,10 +90,12 @@ function isPlayer(room: Ctx, id: string): boolean {
  * 原点マーカー（room 設定の markerId）と追加マーカーの ID は避ける（衝突すると、トラッカーがそのプレイヤーのマーカーを
  * 原点候補として消費し、永遠に「位置待ち」になる。Fable レビューの指摘）
  */
-function allocTrackId(room: Ctx): number {
+function allocTrackId(room: Ctx, checkCollision: boolean): number {
   const used = new Set(room.state.trackIds.values());
-  used.add(room.config.markerId);
-  for (const m of room.state.game.config.markers) used.add(m.id);
+  if (checkCollision) {
+    used.add(room.config.markerId);
+    for (const m of room.state.game.config.markers) used.add(m.id);
+  }
   let id = TRACK_ID_FIRST;
   while (used.has(id)) id++;
   return id;
@@ -102,12 +106,12 @@ function trackerStatus(room: Ctx): TrackerStatus {
 }
 
 /** 所有者が居なければ、接続順で次のトラッカーを所有者にする（原点は未確定に戻る） */
-function electTracker(room: Ctx) {
+function electTracker(room: Ctx, tag: string) {
   if (room.state.activeTracker && room.state.trackers.has(room.state.activeTracker)) return;
   const next = [...room.state.trackers][0] ?? null;
   room.state.activeTracker = next;
   room.state.locked = false;
-  if (next) console.log(`[splatoon-oi] ${next} is now the active tracker`);
+  if (next) console.log(`${tag} ${next} is now the active tracker`);
 }
 
 function trackIdsRecord(room: Ctx): Record<string, number> {
@@ -242,10 +246,33 @@ function broadcastState(room: Ctx, now: number, withGrids: boolean, event?: Retu
   room.broadcast({ type: "state", state: room.state.game.snapshot(now, withGrids, event) } satisfies ServerMessage);
 }
 
-export function splatoonOutsideInServer() {
-  return roomServerPlugin<SplatoonRoomConfig, State, ClientMessage>("splatoon-outside-in-server", {
-    tag: "[splatoon-oi]",
-    path: SPLATOON_OUTSIDE_IN_PATH,
+export type SplatoonOutsideInServerOptions = {
+  /** WebSocket のパス（既定は 08-3 の SPLATOON_OUTSIDE_IN_PATH。別パスなら Room も別。プラグイン名とログの接頭辞もパスから決める） */
+  path?: string;
+  /**
+   * プレイヤーの trackId と原点・追加マーカーの ID の衝突を避ける（既定 true = 08-3）。
+   * trackId がゴーグルのマーカーの ID でないデモ（08-8 の Pose カメラ）では不要なので false
+   */
+  checkTrackIdCollision?: boolean;
+  /**
+   * 有効なトラッカーの track に含まれないプレイヤーを未測定に戻す（既定 false = 08-3: 見失っても最後の測定位置で撃てる）。
+   * true（08-8）なら、含まれなかった時点で pose を配らず、発射は "not tracked yet" で拒否し、tracked の配信からも外れる。
+   * トラッカーの原点が未確定になったとき・有効なトラッカーが居なくなったときも全員を未測定に戻す
+   * （08-8 では track に居ない = 「人物との対応が無効」で、08-3 のマーカーの一時的な隠れとは意味が違うため）
+   */
+  dropMissing?: boolean;
+};
+
+export function splatoonOutsideInServer(options: SplatoonOutsideInServerOptions = {}) {
+  const path = options.path ?? SPLATOON_OUTSIDE_IN_PATH;
+  const checkTrackIdCollision = options.checkTrackIdCollision ?? true;
+  const dropMissing = options.dropMissing ?? false;
+  // 08-3 の既定のパスは従来の名前と接頭辞のまま。別パスは末尾の名前から（"/api/splatoon-pose-cam" → "[splatoon-pose-cam]"）
+  const baseName = path === SPLATOON_OUTSIDE_IN_PATH ? "splatoon-outside-in" : (path.split("/").filter(Boolean).pop() ?? "splatoon-outside-in");
+  const tag = path === SPLATOON_OUTSIDE_IN_PATH ? "[splatoon-oi]" : `[${baseName}]`;
+  return roomServerPlugin<SplatoonRoomConfig, State, ClientMessage>(`${baseName}-server`, {
+    tag,
+    path,
     protocolVersion: SPLATOON_OUTSIDE_IN_PROTOCOL_VERSION,
     maxPayloadBytes: MAX_PAYLOAD_BYTES,
     parseConfig: parseRoomConfig,
@@ -312,18 +339,18 @@ export function splatoonOutsideInServer() {
           trackIds: trackIdsRecord(room),
           tracker: trackerStatus(room),
         } satisfies ServerMessage);
-        console.log(`[splatoon-oi] ${id} ${role} joined`);
+        console.log(`${tag} ${id} ${role} joined`);
         if (role === "tracker") {
           // トラッカーが（再）接続した: 所有者が居なければこれが所有者（原点は未確定から）。居れば待機（track は拒否される）。
           // 全員に状態を知らせる（スマホの HUD「トラッカー待ち」→「原点待ち」）
-          electTracker(room);
-          if (room.state.activeTracker !== id) console.log(`[splatoon-oi] ${id} tracker standby (active: ${room.state.activeTracker})`);
+          electTracker(room, tag);
+          if (room.state.activeTracker !== id) console.log(`${tag} ${id} tracker standby (active: ${room.state.activeTracker})`);
           room.broadcast({ type: "tracked", tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         }
         return;
       }
       const name = parseName(url, id, NAME_MAX_LENGTH);
-      const trackId = allocTrackId(room);
+      const trackId = allocTrackId(room, checkTrackIdCollision);
       room.state.trackIds.set(id, trackId);
       const events = game.join(id, name, now);
       room.send(id, {
@@ -340,7 +367,7 @@ export function splatoonOutsideInServer() {
       room.broadcast({ type: "join", id, trackId } satisfies ServerMessage, id);
       // 色の割当が変わったので全員に配る（色を再利用してセルを消したときは格子ごと）
       broadcastState(room, now, events.length > 0 || game.lastJoinClearedColor, events[0]);
-      console.log(`[splatoon-oi] ${id} "${name}" color ${game.players.get(id)?.color} marker ${trackId}`);
+      console.log(`${tag} ${id} "${name}" color ${game.players.get(id)?.color} marker ${trackId}`);
     },
     onMessage(room: Ctx, id, msg, now) {
       const { game } = room.state;
@@ -359,6 +386,11 @@ export function splatoonOutsideInServer() {
           return;
         }
         room.state.locked = msg.locked;
+        if (dropMissing) {
+          // track に含まれないプレイヤーは未測定に戻す（原点が未確定なら全員）
+          const present = new Set(msg.locked ? msg.players.map((e) => e.id) : []);
+          for (const [pid, mid] of room.state.trackIds) if (!present.has(mid)) room.state.tracked.delete(pid);
+        }
         const byMarker = new Map<number, string>();
         for (const [pid, mid] of room.state.trackIds) byMarker.set(mid, pid);
         const players: TrackedPlayer[] = [];
@@ -382,11 +414,11 @@ export function splatoonOutsideInServer() {
         }
         const events = game.start(now);
         if (events.length === 0) {
-          console.log(`[splatoon-oi] ${id} start rejected: ${game.lastRejectReason}`);
+          console.log(`${tag} ${id} start rejected: ${game.lastRejectReason}`);
           room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} start → countdown ${game.config.waitSec}s`);
+        console.log(`${tag} ${id} start → countdown ${game.config.waitSec}s`);
         broadcastState(room, now, false, events[0]);
         return;
       }
@@ -398,11 +430,11 @@ export function splatoonOutsideInServer() {
         }
         const events = game.stop(now);
         if (events.length === 0) {
-          console.log(`[splatoon-oi] ${id} stop rejected: ${game.lastRejectReason}`);
+          console.log(`${tag} ${id} stop rejected: ${game.lastRejectReason}`);
           room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} stop → ${events[0].kind}`);
+        console.log(`${tag} ${id} stop → ${events[0].kind}`);
         // 結果は tick の時間切れと同じく格子ごと配る。中止も、結果表示から始めたカウントダウンなら格子が消えるので格子ごと配る
         broadcastState(room, now, true, events[0]);
         return;
@@ -415,11 +447,11 @@ export function splatoonOutsideInServer() {
         }
         const events = game.resetPractice(now);
         if (events.length === 0) {
-          console.log(`[splatoon-oi] ${id} reset rejected: ${game.lastRejectReason}`);
+          console.log(`${tag} ${id} reset rejected: ${game.lastRejectReason}`);
           room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} reset practice ink`);
+        console.log(`${tag} ${id} reset practice ink`);
         // 格子・インク残量・飛行中の弾を初期化した権威状態を全員へ配る
         broadcastState(room, now, true, events[0]);
         return;
@@ -432,11 +464,11 @@ export function splatoonOutsideInServer() {
         }
         const events = game.dismiss(now);
         if (events.length === 0) {
-          console.log(`[splatoon-oi] ${id} dismiss rejected: ${game.lastRejectReason}`);
+          console.log(`${tag} ${id} dismiss rejected: ${game.lastRejectReason}`);
           room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} dismiss → ${events[0].kind}`);
+        console.log(`${tag} ${id} dismiss → ${events[0].kind}`);
         // 格子が消えるので格子ごと配る
         broadcastState(room, now, true, events[0]);
         return;
@@ -451,11 +483,11 @@ export function splatoonOutsideInServer() {
         const invalid = validateFieldSize(size, game.config.cellM);
         const reason = invalid ?? (game.setFieldSize(size, now).length === 0 ? game.lastRejectReason : null);
         if (reason !== null) {
-          console.log(`[splatoon-oi] ${id} field ${describeSize(size)} rejected: ${reason}`);
+          console.log(`${tag} ${id} field ${describeSize(size)} rejected: ${reason}`);
           room.send(id, { type: "rejected", reason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} field → ${describeSize(game.config)} (${game.totalCells} cells)`);
+        console.log(`${tag} ${id} field → ${describeSize(game.config)} (${game.totalCells} cells)`);
         // 格子が作り直されたので、config と格子付きの state を全員に配る（俯瞰画面も含む）
         room.state.lastBroadcastMs = now;
         room.broadcast({ type: "field", config: game.config, state: game.snapshot(now, true, { kind: "field" }) } satisfies ServerMessage);
@@ -471,18 +503,18 @@ export function splatoonOutsideInServer() {
         // ゴーグル用の ID（TRACK_ID_FIRST 以上・割当済みの trackId）と重なる配置は拒否する（トラッカーが原点候補として
         // 消費してしまうため。共有の validateMarkerLayout は 08 と共用なので、ここで追加チェック。Fable レビューの指摘）
         const assigned = new Set(room.state.trackIds.values());
-        const clash = msg.markers.find((m) => m.id >= TRACK_ID_FIRST || assigned.has(m.id));
+        const clash = checkTrackIdCollision ? msg.markers.find((m) => m.id >= TRACK_ID_FIRST || assigned.has(m.id)) : undefined;
         const invalid =
           validateMarkerLayout(msg.markers, room.config.markerId, game.config.floorDrop) ??
           (clash ? `ID ${clash.id} はゴーグルのマーカー（ID ${TRACK_ID_FIRST} 以上・割当済み）と重なります` : null);
         const reason = invalid ?? (game.setMarkers(msg.markers, now) ? null : game.lastRejectReason);
         if (reason !== null) {
           // 拒否側は face が任意の文字列なので、そのままログに出さず枚数だけ
-          console.log(`[splatoon-oi] ${id} markers (${msg.markers.length}) rejected: ${reason}`);
+          console.log(`${tag} ${id} markers (${msg.markers.length}) rejected: ${reason}`);
           room.send(id, { type: "rejected", reason } satisfies ServerMessage);
           return;
         }
-        console.log(`[splatoon-oi] ${id} markers → ${describeMarkers(game.config.markers)}`);
+        console.log(`${tag} ${id} markers → ${describeMarkers(game.config.markers)}`);
         room.broadcast({ type: "markers", config: game.config } satisfies ServerMessage);
         return;
       }
@@ -507,10 +539,10 @@ export function splatoonOutsideInServer() {
           room.broadcast({ type: "shot", shot, t: now } satisfies ServerMessage);
           const l = shot.landing;
           console.log(
-            `[splatoon-oi] ${id} shot #${shot.seq}: ${l?.hit ? `${l.surfaceId} uv=(${l.uv.map((v) => v.toFixed(2)).join(",")}) t=${l.hitT.toFixed(2)}` : "miss"} r=${shot.radius.toFixed(2)} from=(${msg.pos.map((v) => v.toFixed(2)).join(",")}) vel=(${msg.vel.map((v) => v.toFixed(2)).join(",")})`,
+            `${tag} ${id} shot #${shot.seq}: ${l?.hit ? `${l.surfaceId} uv=(${l.uv.map((v) => v.toFixed(2)).join(",")}) t=${l.hitT.toFixed(2)}` : "miss"} r=${shot.radius.toFixed(2)} from=(${msg.pos.map((v) => v.toFixed(2)).join(",")}) vel=(${msg.vel.map((v) => v.toFixed(2)).join(",")})`,
           );
         } else if (game.lastRejectReason !== "rate limited") {
-          console.log(`[splatoon-oi] ${id} shot rejected: ${game.lastRejectReason}`);
+          console.log(`${tag} ${id} shot rejected: ${game.lastRejectReason}`);
           room.send(id, { type: "rejected", reason: game.lastRejectReason } satisfies ServerMessage);
         }
       }
@@ -521,7 +553,10 @@ export function splatoonOutsideInServer() {
         // トラッカーが居なくなった: 所有者なら次のトラッカーが引き継ぐ（原点は未確定から）。全員に知らせる
         // （スマホは最後の位置を保持し HUD に「トラッカー無し」か「原点未確定」）
         room.state.trackRate.forget(id);
-        electTracker(room);
+        const wasActive = room.state.activeTracker === id;
+        electTracker(room, tag);
+        // dropMissing: 有効なトラッカーが居なくなったら（引き継いだトラッカーも原点は未確定から）全員を未測定に戻す
+        if (dropMissing && wasActive) room.state.tracked.clear();
         room.broadcast({ type: "tracked", tracker: trackerStatus(room), players: [] } satisfies ServerMessage);
         return;
       }
