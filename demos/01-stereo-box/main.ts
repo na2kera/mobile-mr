@@ -108,11 +108,10 @@ function startControls() {
   }
 }
 
-// 許可フローが決着したら頭追従を始める（PC は許可不要。拒否されたら頭追従なしで続ける）
+// 許可フローが決着したら頭追従を始める（PC は許可不要。拒否されたら頭追従なしで続ける）。
+// 「どの permission なら始めてよいか」は SDK が sensor.usable として持つ（デモ側で書き写さない）
 session.on("sensor", (sensor) => {
-  const usable =
-    !isTouchDevice || sensor.permission === "granted" || sensor.permission === "no-api";
-  if (usable) startControls();
+  if (sensor.usable) startControls();
 });
 
 // ---- デバッグ用 HUD（実機では console が見えないため状態をここに出す） ----
