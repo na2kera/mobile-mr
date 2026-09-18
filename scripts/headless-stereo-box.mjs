@@ -8,7 +8,7 @@
 //      - 縦持ちなので「横向きにしてください」が出る / 長押しの contextmenu が抑止される
 //   B. PC（マウス）: 許可・全画面・Wake Lock を飛ばし mode=orbit で開始する
 //   - どちらも例外が出ていない（file: で参照した SDK が Vite から読めていることの確認を兼ねる）
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +16,20 @@ import WebSocket from "ws";
 
 const CHROME =
   process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 5194;
-const CDP_PORT = 9341;
+// 別の worktree で同時に走らせるときは PORT / CDP_PORT で変える（他のスクリプトと同じ形）
+const PORT = Number(process.env.PORT ?? "") || 5215;
+const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9355;
 const BASE = `https://localhost:${PORT}/demos/01-stereo-box/`;
+
+// どの版の SDK で確認したかを残す（package.json の "file:../mobile-mr-sdk" はパスしか記録しない）。
+// 取れなければ無視する（SDK が git 管理でない・git が無い等）
+try {
+  const sdkCommit = execFileSync("git", ["-C", "../mobile-mr-sdk", "rev-parse", "--short", "HEAD"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+  if (sdkCommit) console.log(`SDK: mobile-mr-sdk @ ${sdkCommit}`);
+} catch {}
 
 if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);
