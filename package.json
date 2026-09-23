@@ -43,7 +43,9 @@
     "test:08-4-opencv": "node scripts/test-08-4-opencv.mjs",
     "check:08-4-opencv": "node scripts/headless-08-4-opencv.mjs",
     "fetch:opencv": "node scripts/fetch-opencv.mjs",
-    "fetch:alva": "node scripts/fetch-alva.mjs"
+    "fetch:alva": "node scripts/fetch-alva.mjs",
+    "test:08-9-hold": "node scripts/test-08-9-hold.mjs",
+    "check:08-9-hold": "node scripts/headless-08-9-hold.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
