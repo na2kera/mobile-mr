@@ -86,40 +86,54 @@ function run(hold, ts, rawAt) {
 const samePose = (a, b) => a.pos.every((v, i) => v === b.pos[i]) && a.quat.every((v, i) => v === b.quat[i]);
 
 // ---- (a) 止まっている（ノイズだけ）----
+// hold に入る判定は「窓の平均からのばらつきの RMS ≤ posM / deg」（最大値判定から変更）。hold に入る瞬間は直前の出力との差を持ち越して
+// τ で縮めるので、入った直後の数フレームは出力が固定姿勢へ滑り、差が 1mm / 0.05° 未満になった時点からビット単位で変わらなくなる
 function caseA(mixed, seed) {
   const hold = createAnchorHold(OPTS);
   const noise = noiser(seed);
   const frames = run(hold, times(3000, mixed, seed + 100), () => noise(BASE_POS, BASE_QUAT));
   const firstHold = frames.findIndex((f) => f.state === "hold");
-  if (firstHold < 0) return { ok: false, firstHoldMs: NaN, maxChange: Infinity, centerErr: Infinity, stayed: false };
+  if (firstHold < 0) return { firstHoldMs: NaN, settledMs: NaN, stayed: false, centerErr: Infinity, centerDeg: Infinity, first: frames[0], frames };
   const after = frames.slice(firstHold);
-  // 差 0 はビット単位の一致で見る（quatAngleDeg は同じ四元数でも acos の丸めで 1e-6 度ほど出るので使わない）
-  const maxChange = Math.max(...after.map((f) => dist(f.out.pos, after[0].out.pos)));
-  const allSame = after.every((f) => samePose(f.out, after[0].out));
+  const fin = frames.at(-1);
+  // 出力が最後まで変わらなくなった最初のフレーム（差 0 はビット単位の一致で見る）
+  let settled = frames.length - 1;
+  while (settled > firstHold && samePose(frames[settled - 1].out, fin.out)) settled--;
   const stayed = after.every((f) => f.state === "hold");
-  const centerErr = dist(after[0].out.pos, BASE_POS);
-  const centerDeg = quatAngleDeg(after[0].out.quat, BASE_QUAT);
-  const holdT = frames[firstHold].t;
-  /** hold に入ったときの窓の点の数（平均に使った raw の数） */
-  const nWin = frames.filter((f) => f.t >= holdT - OPTS.inMs && f.t <= holdT).length;
-  return { firstHoldMs: holdT, allSame, maxChange, stayed, centerErr, centerDeg, nWin, first: frames[0] };
+  return {
+    firstHoldMs: frames[firstHold].t,
+    settledMs: frames[settled].t,
+    stayed,
+    centerErr: dist(fin.out.pos, BASE_POS),
+    centerDeg: quatAngleDeg(fin.out.quat, BASE_QUAT),
+    first: frames[0],
+    frames,
+    firstHold,
+  };
 }
 for (const mixed of [false, true]) {
   const tag = mixed ? "(h)(a) dt 不均一" : "(a) 60fps";
   const r = caseA(mixed, 1);
   check(`${tag}: 最初の update は follow で出力 = raw（初検出でいきなり固定しない）`, r.first.state === "follow" && samePose(r.first.out, r.first.raw));
+  // 窓が inMs に満たないうちは判定しないので、止まっていれば inMs（+ 最大 1 フレーム）で入る（RMS 判定でも最大値判定と同じ）
   check(`${tag}: inMs（600ms）経過後すぐに hold に入る（inMs + 最大 1 フレーム）`, r.firstHoldMs >= OPTS.inMs && r.firstHoldMs <= OPTS.inMs + (mixed ? 100 : 17), `hold に入った時刻 ${r.firstHoldMs.toFixed(0)}ms`);
-  check(`${tag}: hold に入った後は出力が一切変わらない（ビット単位で同じ、3 秒の終わりまで hold のまま）`, r.allSame && r.stayed && r.maxChange === 0, `位置の最大変化 ${r.maxChange}m`);
-  // 固定位置 = 窓の平均なので、中心からの差は窓の点の数 n で決まる（各軸 ±1cm の一様ノイズの標準偏差 5.8mm / √n）。
-  // 60fps（n = 37）では ±3mm。16ms と 100ms の混在では n ≈ 10 しか無いので、同じ信頼度の上限 3mm × √(37 / n) で見る（README / 報告に明記）
-  const bound = mixed ? 0.003 * Math.sqrt(37 / r.nWin) : 0.003;
-  check(`${tag}: 固定位置はノイズの中心 ±${(bound * 1000).toFixed(1)}mm（窓の点 ${r.nWin} 個の平均）`, r.centerErr <= bound, `中心からの差 ${(r.centerErr * 1000).toFixed(2)}mm / ${r.centerDeg.toFixed(3)}deg`);
-  // 種を 20 通り変える（1 つの種に頼っていないことの確認）。止まっている限り hold のまま出力が変わらないことを見る
+  check(`${tag}: hold に入ってから 0.5 秒以内に出力が固定姿勢に落ち着き、以後はビット単位で変わらない（3 秒の終わりまで hold のまま）`, r.stayed && r.settledMs - r.firstHoldMs <= 500, `落ち着いた時刻 ${r.settledMs.toFixed(0)}ms（hold から ${(r.settledMs - r.firstHoldMs).toFixed(0)}ms）`);
+  console.log(`INFO: ${tag}: 種 1 の固定位置の中心からの差 ${(r.centerErr * 1000).toFixed(2)}mm / ${r.centerDeg.toFixed(3)}deg`);
+  if (!mixed) {
+    // 入る瞬間の連続性: 入ったフレームの出力は follow のままの出力（= raw。follow の寄せの差は無い）で、以後 1 フレームの出力の変化は数 mm
+    const f = r.frames;
+    const i = r.firstHold;
+    const steps = f.slice(i, i + 40).map((x, k) => dist(x.out.pos, f[i + k - 1].out.pos));
+    check(`${tag}: hold に入る瞬間に出力が飛ばない（入ったフレームの出力 = そのフレームの raw、以後 1 フレームの変化 ≤ 3mm）`, samePose(f[i].out, f[i].raw) && Math.max(...steps.slice(1)) <= 0.003, `入った後の 1 フレームの変化の最大 ${(Math.max(...steps.slice(1)) * 1000).toFixed(2)}mm`);
+  }
+  // 固定位置 = 窓の平均なので、中心からの差は窓の点の数で決まる（各軸 ±1cm の一様ノイズ → 標準偏差 5.8mm / √n）。
+  // 種 1 つでは運で決まるので、種 20 通りの中央値 ≤ 3mm かつ最悪 ≤ 5mm で見る（dt 不均一は窓の点が約 10 個しかないので最悪値が大きい）
   const many = Array.from({ length: 20 }, (_, i) => caseA(mixed, 1000 + i));
-  const allHeld = many.every((x) => x.allSame && x.stayed && x.firstHoldMs <= OPTS.inMs + (mixed ? 100 : 17));
+  const allHeld = many.every((x) => x.stayed && x.firstHoldMs <= OPTS.inMs + (mixed ? 100 : 17) && x.settledMs - x.firstHoldMs <= 500);
   const errs = many.map((x) => x.centerErr * 1000).sort((a, b) => a - b);
-  console.log(`INFO: ${tag}: 種 20 通りの固定位置の中心からの差 中央値 ${errs[10].toFixed(2)}mm / 最悪 ${errs[19].toFixed(2)}mm（窓の点 ${many[0].nWin} 個前後）`);
-  check(`${tag}: 種 20 通りすべてで inMs 後に hold に入り、以後出力が一切変わらない`, allHeld);
+  const med = (errs[9] + errs[10]) / 2;
+  check(`${tag}: 種 20 通りの固定位置の中心からの差が 中央値 ≤ 3mm かつ 最悪 ≤ 5mm`, med <= 3 && errs[19] <= 5, `中央値 ${med.toFixed(2)}mm / 最悪 ${errs[19].toFixed(2)}mm`);
+  check(`${tag}: 種 20 通りすべてで inMs 後に hold に入り、0.5 秒以内に落ち着いて以後出力が変わらない`, allHeld);
 }
 
 // ---- (b) 0.5m/s で直進 ----
@@ -156,11 +170,11 @@ for (const mixed of [false, true]) {
   check("(b') 歩き出して 0.6 秒以降は raw から 3cm 以内（切り替え時の差は時定数で縮む。速度ぶんの遅れは残らない）", lagAfter600 <= 0.03, cm(lagAfter600));
 }
 
-/** 止まって hold に入った状態の hold を作る（1.5 秒ノイズ付きで流す） */
+/** 止まって hold に入り、出力が固定姿勢に落ち着いた状態の hold を作る（2 秒ノイズ付きで流す） */
 function heldHold(seed, mixed = false) {
   const hold = createAnchorHold(OPTS);
   const noise = noiser(seed);
-  const frames = run(hold, times(1500, mixed, seed + 300), () => noise(BASE_POS, BASE_QUAT));
+  const frames = run(hold, times(2000, mixed, seed + 300), () => noise(BASE_POS, BASE_QUAT));
   return { hold, noise, t: frames.at(-1).t, heldOut: frames.at(-1).out, state: frames.at(-1).state };
 }
 
@@ -205,9 +219,12 @@ for (const mixed of [false, true]) {
   const frames = run(hold, times(3000, mixed, 11), (t) => noise(posAt(t), BASE_QUAT));
   const holdAt = frames.find((f) => f.t >= stopT && f.state === "hold")?.t ?? NaN;
   const fin = frames.at(-1);
-  // 窓の平均から posM 以内なら「止まっている」なので、止まる直前の数十 ms（0.5m/s で 2cm 以内）の歩きは窓に入ってよい → inMs より少し早いこともある
-  check(`${tag}: 0.5m/s で歩いて止まると inMs + 数フレームで hold に戻る`, holdAt - stopT >= OPTS.inMs - 100 && holdAt - stopT <= OPTS.inMs + (mixed ? 200 : 100), `止まってから ${(holdAt - stopT).toFixed(0)}ms`);
-  check(`${tag}: 戻った固定位置は止まった位置の ±5mm（歩いていた区間を平均に混ぜない）`, dist(fin.out.pos, posAt(stopT)) <= 0.005 && fin.state === "hold", `${(dist(fin.out.pos, posAt(stopT)) * 1000).toFixed(2)}mm`);
+  // RMS 判定では、窓の大部分が止まっていれば止まる直前の歩き（0.5m/s）が少し混ざっていても「止まっている」になるので、
+  // 最大値判定（止まってから 567ms / 624ms、固定位置の差 1.0mm / 2.5mm）より早く入る。その代わり固定姿勢（窓の平均）が歩いてきた側に
+  // 少し寄る（60fps で 483ms・6.0mm）。寄りは窓に残った歩きの区間の分なので、上限は posM の半分（1cm）で見る
+  console.log(`INFO: ${tag}: 止まってから hold まで ${(holdAt - stopT).toFixed(0)}ms、固定位置と止まった位置の差 ${(dist(fin.out.pos, posAt(stopT)) * 1000).toFixed(2)}mm`);
+  check(`${tag}: 0.5m/s で歩いて止まると inMs + 数フレーム以内に hold に戻る`, holdAt - stopT >= 0 && holdAt - stopT <= OPTS.inMs + (mixed ? 200 : 100), `止まってから ${(holdAt - stopT).toFixed(0)}ms`);
+  check(`${tag}: 戻った固定位置は止まった位置の ±1cm（歩いていた区間の混ざりは posM の半分まで）`, dist(fin.out.pos, posAt(stopT)) <= 0.01 && fin.state === "hold", `${(dist(fin.out.pos, posAt(stopT)) * 1000).toFixed(2)}mm`);
 }
 
 // ---- (f) 0.5m の飛び → 即 follow・出力即 raw ----
@@ -216,9 +233,8 @@ for (const mixed of [false, true]) {
   const jumpRaw = noise([BASE_POS[0] + 0.5, BASE_POS[1], BASE_POS[2]], BASE_QUAT);
   const out = hold.update(jumpRaw, t + 16);
   check("(f) hold 中に 0.5m 飛ぶと、そのフレームで follow・出力 = raw", state === "hold" && hold.state === "follow" && samePose(out, jumpRaw));
-  const out2 = hold.update(noise([BASE_POS[0] + 0.5, BASE_POS[1], BASE_POS[2]], BASE_QUAT), t + 32);
-  check("(f) 飛んだ後も寄せの差は残らない（出力 = raw）", hold.devPosM === 0 && hold.devDeg < 1e-4, `dev=${hold.devPosM}m/${hold.devDeg}deg`);
-  void out2;
+  const next = noise([BASE_POS[0] + 0.5, BASE_POS[1], BASE_POS[2]], BASE_QUAT);
+  check("(f) 飛んだ後も寄せの差は残らない（出力 = raw）", samePose(hold.update(next, t + 32), next) && hold.devPosM === 0 && hold.devDeg < 1e-9, `dev=${hold.devPosM}m/${hold.devDeg}deg`);
 }
 
 // ---- (g) enabled:false ----
@@ -228,6 +244,52 @@ for (const mixed of [false, true]) {
   const posAt = (t) => (t < 1500 ? BASE_POS : t < 2000 ? [BASE_POS[0] + 0.05, BASE_POS[1], BASE_POS[2]] : [BASE_POS[0] + 0.6, BASE_POS[1], BASE_POS[2]]);
   const frames = run(hold, times(3000, true, 12), (t) => noise(posAt(t), BASE_QUAT));
   check("(g) enabled:false では常に出力 = raw（止まっていても・ずれても・飛んでも）、hold に入らない", frames.every((f) => samePose(f.out, f.raw) && f.state === "follow" && f.info === "off"));
+}
+
+// ---- 回転だけで抜ける: 位置は動かず、向きが 3° ずれ続ける（deg = 2°）----
+{
+  const { hold, noise, t, state } = heldHold(12);
+  const turned = mul(quatFromEulerDeg(3, 0, 0), BASE_QUAT);
+  const stepT = t + 1000 / 60;
+  const frames = run(hold, times(1200, false, 7, stepT), () => noise(BASE_POS, turned));
+  const followAt = frames.find((f) => f.state === "follow")?.t ?? NaN;
+  const fol = frames.filter((f) => f.state === "follow" && f.t >= followAt + 500);
+  const gapDeg = Math.max(...fol.map((f) => quatAngleDeg(f.out.quat, f.raw.quat)));
+  check("回転だけ: 位置は同じで向きが 3° ずれ続けると outMs 前後で follow に移り、0.5 秒後には出力の向きが raw に追いついている（0.3° 以内）", state === "hold" && followAt - stepT >= OPTS.outMs && followAt - stepT <= OPTS.outMs + 50 && gapDeg <= 0.3, `follow まで ${(followAt - stepT).toFixed(0)}ms、0.5s 後の向きの差 ${gapDeg.toFixed(3)}deg`);
+}
+
+// ---- follow の寄せが残ったまま止まる（?holdTau=1000）: hold に入る瞬間も飛ばない ----
+{
+  const hold = createAnchorHold({ ...OPTS, catchUpTauMs: 1000 });
+  // ノイズ無しで 1 秒止まって hold → 5cm ずれてそのまま止まる。follow に入ってから 600ms では寄せの差が 5cm × e^(−0.6) ≈ 2.7cm 残っている
+  const shifted = [BASE_POS[0] + 0.05, BASE_POS[1], BASE_POS[2]];
+  // 寄せの差 2.7cm が 1mm 未満になるまで τ × ln(27) ≈ 3.3 秒かかるので 7 秒流す
+  const frames = run(hold, times(7000, false), (t) => ({ pos: t < 1500 ? [...BASE_POS] : [...shifted], quat: [...BASE_QUAT] }));
+  const reHold = frames.findIndex((f, i) => i > 0 && f.t > 1500 && f.state === "hold" && frames[i - 1].state === "follow");
+  const residual = reHold > 0 ? dist(frames[reHold - 1].out.pos, frames[reHold - 1].raw.pos) : NaN;
+  const steps = frames.slice(1).map((f, i) => dist(f.out.pos, frames[i].out.pos));
+  // 1 フレームの変化は寄せ（5cm × (1 − e^(−16.7/1000)) ≈ 0.8mm）と、差が 1mm 未満になって 0 にする最後の 1 回（≈ 1mm）が最大
+  check("?holdTau=1000: 寄せの差が残ったまま hold に入っても出力は飛ばない（1 フレームの変化 ≤ 1.5mm）、最後は固定姿勢 = 止まった位置", reHold > 0 && Math.max(...steps) <= 0.0015 && dist(frames.at(-1).out.pos, shifted) < 0.001, `hold に入る直前の寄せの差 ${cm(residual)}、1 フレームの変化の最大 ${(Math.max(...steps) * 1000).toFixed(3)}mm`);
+}
+
+// ---- 非有限の raw・窓の点が少ない ----
+{
+  const { hold, noise, t, heldOut, state } = heldHold(13);
+  // hold 中に閾値超え（5cm）→ NaN → 閾値超え … と続けても、NaN のフレームで継続時間がリセットされず outMs で follow に移る
+  const shifted = [BASE_POS[0], BASE_POS[1] + 0.05, BASE_POS[2]];
+  const ts = times(400, false, 7, t + 1000 / 60);
+  const frames = run(hold, ts, (tt, ) => (Math.round((tt - t) / (1000 / 60)) % 3 === 0 ? { pos: [NaN, 0, 0], quat: [0, 0, 0, 1] } : noise(shifted, BASE_QUAT)));
+  const nanFrames = frames.filter((f) => !Number.isFinite(f.raw.pos[0]));
+  const nanOk = nanFrames.every((f) => f.out.pos.every(Number.isFinite));
+  const followAt = frames.find((f) => f.state === "follow")?.t ?? NaN;
+  check("非有限の raw: hold 中に NaN が混ざっても出力は有限のまま、閾値超えの継続時間はリセットされず outMs で follow に移る", state === "hold" && nanFrames.length > 0 && nanOk && samePose(frames[0].out, heldOut) && followAt - (t + 1000 / 60) <= OPTS.outMs + 20, `follow まで ${(followAt - t).toFixed(0)}ms`);
+  // 窓の点が 3 個未満（長いフレーム落ち）なら、窓が inMs を満たしていても hold に入らない
+  const h2 = createAnchorHold(OPTS);
+  h2.update({ pos: [...BASE_POS], quat: [...BASE_QUAT] }, 0);
+  h2.update({ pos: [...BASE_POS], quat: [...BASE_QUAT] }, 700);
+  const s2 = h2.state;
+  h2.update({ pos: [...BASE_POS], quat: [...BASE_QUAT] }, 800);
+  check("窓の点が 2 個（0ms と 700ms）では hold に入らず、3 個目で入る", s2 === "follow" && h2.state === "hold", `${s2} → ${h2.state}`);
 }
 
 // ---- その他: dt ≤ 0（同じ時刻が続く）でも壊れない / reset ----
@@ -244,7 +306,7 @@ for (const mixed of [false, true]) {
   const o3 = h2.update(r, 5000);
   check("reset() の後の最初の update は follow で出力 = raw", h2.state === "follow" && samePose(o3, r) && Number.isNaN(h2.heldSinceMs));
   const { hold: h3 } = heldHold(11);
-  check("HUD の info は hold dev=…m/…deg held=…s の形", /^hold dev=\d+\.\d{3}m\/\d+\.\d deg held=\d+\.\ds$/.test(h3.info.replace("deg", " deg")), h3.info);
+  check("HUD の info は hold dev=…m/…deg held=…s の形", /^hold dev=\d+\.\d{3}m\/\d+\.\ddeg held=\d+\.\ds$/.test(h3.info), h3.info);
 }
 
 const failed = results.filter(([, ok]) => !ok);

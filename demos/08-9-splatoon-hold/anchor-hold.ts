@@ -5,7 +5,7 @@
 //   マーカー（08-4 の board + solvePnP）と SLAM（08-7 の AlvaAR）で毎フレーム出るアンカーの姿勢（raw）を受け取り、
 //   表示に使う姿勢（出力）を返す。出力は 2 つの状態を自動で切り替える:
 //     hold   … 出力を固定する（raw の小さなぶれを捨てる）。raw が固定姿勢から「はっきり・しばらく」離れたら follow へ
-//     follow … 出力は raw（切り替えた直後だけ、固定姿勢との差を時定数 catchUpTauMs で縮めて滑らかに寄せる）。
+//     follow … 出力は raw（切り替えた直後だけ、直前の出力との差を時定数 catchUpTauMs で縮めて滑らかに寄せる）。
 //              raw が inMs の間ほぼ動かなければ、その区間の平均で hold へ
 //   目標は「ぴったり合わせる」ではなく「数 cm ずれていても、ちょこちょこ動かない」。実機で 08-4 / 08-7 を止まって見ていると
 //   数 cm の小さなぶれが残り、それが体験を悪くしていた。
@@ -15,23 +15,36 @@
 //   自動で follow に戻り（歩き始め・マーカーでの取り直し・SLAM の追従）、止まったらまた固定する。「止める / 追従する」を自動で切り替える。
 //
 // ■ 各値の意味と、なぜこうしたか
-//   posM / deg（既定 2cm / 1°）: 「ぶれ」と「本当の動き」の境目。hold 中の離脱の判定と、follow 中の「止まった」の判定の両方に使う。
-//     観察されたぶれ（数 cm）より小さいと hold に入れず、大きいと歩き始めの遅れが増える。実機で調整する値（README の実機項目）
+//   posM / deg（既定 2cm / 2°）: 「ぶれ」と「本当の動き」の境目。hold 中の離脱の判定と、follow 中の「止まった」の判定の両方に使う。
+//     観察されたぶれ（数 cm）より小さいと hold に入れず、大きいと歩き始めの遅れが増える。実機で調整する値（README の実機項目）。
+//     回転は PC の合成カメラに ±1cm のノイズを入れただけで推定が 0.5〜0.9° ぶれたので、1° では実機で hold に入れない恐れが高く 2° にした
 //   outMs（既定 250ms）: hold 中に閾値超えが「連続で」この時間続いたら follow へ。1 フレームの外れ値（検出の誤り・鏡像の解・
 //     SLAM の一瞬の飛び）では動かさないため。閾値内に戻ったら継続時間は 0 に戻す。代償として、歩き始めは
-//     outMs + 閾値に届くまでの時間だけ出力が止まったままになる（0.5m/s なら約 14cm 遅れてから寄せ始める）
-//   inMs（既定 600ms）: follow 中、直近 inMs の raw の窓の全点が「窓の平均」から posM / deg 以内なら hold へ。
-//     窓が inMs に満たない（follow に入った直後）うちは判定しない
+//     outMs + 閾値に届くまでの時間だけ出力が止まったままになる（0.5m/s なら約 13cm 遅れてから寄せ始める）
+//   inMs（既定 600ms）: follow 中、直近 inMs の raw の窓が「止まっている」なら hold へ。窓が inMs に満たない（follow に入った直後）
+//     うち、または窓の点が 3 個未満（長いフレーム落ちの直後）は判定しない。
+//     「止まっている」= 窓の平均からの**ばらつきの RMS** が閾値以内:
+//       位置: sqrt(Σ|p_i − p̄|² / n) ≤ posM、回転: sqrt(Σ angle(q_i, q̄)² / n) ≤ deg（angle は 2 つの回転の差の角度 [deg]）
+//     全点の最大値で判定すると、実機の推定（数 cm のぶれ）では 600ms の窓に外れ値が 1 回入るだけで 600ms 入れず、follow のままになりやすい。
+//     hold の維持は「閾値超えが outMs 続いたら離脱」で外れ値に強いので、入る側も外れ値 1 回で拒まない RMS にそろえた。
+//     代わりに、ゆっくりした動きでも止まっているとみなしやすくなる（ノイズ無しの等速なら、窓の長さ L のばらつきの RMS は L/√12 なので
+//     2cm / 600ms では約 11cm/s 以下の動きを止まっているとみなす。最大値判定では約 6.7cm/s 以下）。そうして止めても、
+//     動き続けていれば閾値超えが outMs 続いた時点で follow に戻る
 //   固定姿勢は**窓の平均**（位置は算術平均、四元数は符号を揃えて足してから正規化）。直近の 1 点で止めるとぶれの端で固まり、
 //     その後のぶれが片側に偏って閾値を超えやすい。中心で止めると、同じぶれでも固定姿勢からの差が最小になる
 //   snapM（既定 0.3m）: これ以上離れた raw は即 follow にし、出力も即 raw にする（寄せない）。マーカーの再検出のスナップ
 //     （marker-anchor の snapDistanceM と同じ 0.3m）や SLAM のリセットで座標が大きく変わったとき、ゆっくり寄せると
 //     その間ずっとずれて見えるため
-//   catchUpTauMs（既定 120ms）: follow に入った直後、出力を raw へ寄せる時定数。**出力そのものではなく「出力 − raw」の差を**
-//     毎フレーム exp(−dt/τ) 倍に縮める（α = 1 − exp(−dt/τ) で差を詰めるのと同じ）。出力そのものを raw へ lerp すると、
-//     歩いている間は速度 × τ（0.5m/s で 6cm）遅れ続けるが、差を縮める形なら raw の動きはそのまま通り、残るのは切り替え時の差だけ。
-//     差が 1mm / 0.05° 未満になったら出力 = raw（以後は raw のまま。raw は marker-anchor の smooth / slamSmooth で平滑化済み）
+//   catchUpTauMs（既定 120ms）: 状態を切り替えた直後、出力を新しい目標へ寄せる時定数。**出力そのものではなく「出力 − 目標」の差を**
+//     毎フレーム exp(−dt/τ) 倍に縮める（α = 1 − exp(−dt/τ) で差を詰めるのと同じ）。
+//       follow に入るとき: 目標は raw。出力そのものを raw へ lerp すると歩いている間は速度 × τ（0.5m/s で 6cm）遅れ続けるが、
+//         差を縮める形なら raw の動きはそのまま通り、残るのは切り替え時の差だけ
+//       hold に入るとき: 目標は固定姿勢（窓の平均）。直前の出力は窓の平均から最大 posM 程度離れているので、そのまま平均に切り替えると
+//         その分だけ飛ぶ。差を持ち越して縮めるので、**hold に入った直後の数フレームは出力が固定姿勢へ滑る**（τ = 120ms なら 0.5 秒ほど）。
+//         follow の寄せの差が残ったまま止まったとき（?holdTau=1000 など）も同じく飛ばない
+//     差が 1mm / 0.05° 未満になったら差を 0 にする（follow では出力 = raw、hold では出力 = 固定姿勢で以後一切変えない）
 //   時間はすべて nowMs（ms）で数える（フレームレートに依存しない）。nowMs が戻ることは無い前提で、dt ≤ 0 は 0 として扱う
+//   raw に非有限の値（NaN など）が混ざったフレームは無視する（状態も時刻も進めず、直前の出力を返す）
 import type { Pose, Quat, V3 } from "./slam-fusion";
 
 export type AnchorHoldOptions = {
@@ -47,7 +60,7 @@ export type AnchorHoldOptions = {
   inMs: number;
   /** これ以上離れた raw は即 follow（+ 出力も即 raw）[m] */
   snapM: number;
-  /** follow に入った直後、出力が raw に追いつく時定数 [ms] */
+  /** 状態を切り替えた直後、出力が目標（follow では raw、hold では固定姿勢）に追いつく時定数 [ms] */
   catchUpTauMs: number;
 };
 
@@ -71,16 +84,18 @@ export type AnchorHold = {
 export const DEFAULT_ANCHOR_HOLD: AnchorHoldOptions = {
   enabled: true,
   posM: 0.02,
-  deg: 1.0,
+  deg: 2.0,
   outMs: 250,
   inMs: 600,
   snapM: 0.3,
   catchUpTauMs: 120,
 };
 
-/** 追いついたとみなす差（これ未満なら出力 = raw） */
+/** 追いついたとみなす差（これ未満なら差を 0 にする） */
 const CAUGHT_UP_M = 0.001;
 const CAUGHT_UP_DEG = 0.05;
+/** hold に入る判定に要る窓の点の最小数（長いフレーム落ちの後の 2 点で止めない） */
+const MIN_WINDOW_POINTS = 3;
 
 // ---- 小道具（slam-fusion.ts と同じ並び [x, y, z, w]。Node からそのまま読めるよう、型以外は import しない） ----
 function dist(a: V3, b: V3): number {
@@ -107,10 +122,13 @@ function quatConj(q: Quat): Quat {
   return [-q[0], -q[1], -q[2], q[3]];
 }
 
-/** 2 つの回転の差の角度 [deg]（q と −q は同じ回転） */
+/**
+ * 2 つの回転の差の角度 [deg]（q と −q は同じ回転）。相対回転 r = a⁻¹·b の 2·atan2(|r.xyz|, |r.w|)。
+ * acos(|a·b|) より 0 付近の分解能が良く、内積の丸めで 1 を超えても NaN にならない
+ */
 export function quatAngleDeg(a: Quat, b: Quat): number {
-  const d = Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
-  return (2 * Math.acos(Math.min(1, d)) * 180) / Math.PI;
+  const r = quatMul(quatConj(a), b);
+  return (2 * Math.atan2(Math.hypot(r[0], r[1], r[2]), Math.abs(r[3])) * 180) / Math.PI;
 }
 
 /** 単位四元数 → 回転ベクトル（軸 × 角度 [rad]）。短い側（w ≥ 0）で出す */
@@ -119,10 +137,9 @@ function quatToRotVec(q: Quat): V3 {
   const x = q[0] * s;
   const y = q[1] * s;
   const z = q[2] * s;
-  const w = Math.min(1, q[3] * s);
   const sinHalf = Math.hypot(x, y, z);
   if (sinHalf < 1e-12) return [0, 0, 0];
-  const angle = 2 * Math.atan2(sinHalf, w);
+  const angle = 2 * Math.atan2(sinHalf, q[3] * s);
   return [(x / sinHalf) * angle, (y / sinHalf) * angle, (z / sinHalf) * angle];
 }
 
@@ -135,6 +152,10 @@ function rotVecToQuat(v: V3): Quat {
 
 function copyPose(p: Pose): Pose {
   return { pos: [p.pos[0], p.pos[1], p.pos[2]], quat: [p.quat[0], p.quat[1], p.quat[2], p.quat[3]] };
+}
+
+function isFinitePose(p: Pose): boolean {
+  return p.pos.every(Number.isFinite) && p.quat.every(Number.isFinite);
 }
 
 /** 窓の平均の姿勢（位置は算術平均、四元数は最初の点に符号を揃えて足してから正規化） */
@@ -156,6 +177,44 @@ export function meanPose(poses: readonly Pose[]): Pose {
   return { pos: [pos[0] / n, pos[1] / n, pos[2] / n], quat: quatNorm(q) };
 }
 
+/** 平均からのばらつきの RMS（位置 [m] と回転 [deg]） */
+export function spreadRms(poses: readonly Pose[], mean: Pose): { posM: number; deg: number } {
+  let sp = 0;
+  let sd = 0;
+  for (const p of poses) {
+    sp += dist(p.pos, mean.pos) ** 2;
+    sd += quatAngleDeg(p.quat, mean.quat) ** 2;
+  }
+  return { posM: Math.sqrt(sp / poses.length), deg: Math.sqrt(sd / poses.length) };
+}
+
+/** 「出力 − 目標」の差（位置はワールドのベクトル、回転は out = quat · target の quat）。exp(−dt/τ) で縮める */
+type Offset = { pos: V3; quat: Quat };
+
+function offsetBetween(from: Pose, to: Pose): Offset {
+  return {
+    pos: [from.pos[0] - to.pos[0], from.pos[1] - to.pos[1], from.pos[2] - to.pos[2]],
+    quat: quatNorm(quatMul(from.quat, quatConj(to.quat))),
+  };
+}
+
+/** 差を dt だけ縮める。十分小さくなったら null（差 0） */
+function decayOffset(off: Offset, dt: number, tauMs: number): Offset | null {
+  const k = tauMs > 0 ? Math.exp(-dt / tauMs) : 0;
+  const rv = quatToRotVec(off.quat);
+  const next: Offset = { pos: [off.pos[0] * k, off.pos[1] * k, off.pos[2] * k], quat: rotVecToQuat([rv[0] * k, rv[1] * k, rv[2] * k]) };
+  const m = Math.hypot(next.pos[0], next.pos[1], next.pos[2]);
+  const d = quatAngleDeg(next.quat, [0, 0, 0, 1]);
+  return m < CAUGHT_UP_M && d < CAUGHT_UP_DEG ? null : next;
+}
+
+function applyOffset(target: Pose, off: Offset): Pose {
+  return {
+    pos: [target.pos[0] + off.pos[0], target.pos[1] + off.pos[1], target.pos[2] + off.pos[2]],
+    quat: quatNorm(quatMul(off.quat, target.quat)),
+  };
+}
+
 export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
   let state: AnchorHoldState = "follow";
   /** 一度でも update されたか（最初の update は出力 = raw で follow） */
@@ -166,10 +225,10 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
   let heldSinceMs = NaN;
   /** hold 中、閾値超えが始まった時刻（閾値内なら NaN） */
   let exceedSinceMs = NaN;
-  /** follow 中の「出力 − raw」（位置はワールドのベクトル、回転は out = offQuat · raw の offQuat） */
-  let offPos: V3 = [0, 0, 0];
-  let offQuat: Quat = [0, 0, 0, 1];
-  let hasOffset = false;
+  /** 「出力 − 目標」の差（follow では目標 = raw、hold では目標 = held）。null なら差 0 */
+  let off: Offset | null = null;
+  /** 直近の出力 */
+  let lastOut: Pose | null = null;
   /** follow 中の raw の窓（時刻の昇順） */
   let win: { t: number; pose: Pose }[] = [];
   let devPosM = 0;
@@ -181,45 +240,32 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
     heldSinceMs = NaN;
     exceedSinceMs = NaN;
     win = [];
-    if (from) {
-      offPos = [from.pos[0] - raw.pos[0], from.pos[1] - raw.pos[1], from.pos[2] - raw.pos[2]];
-      offQuat = quatNorm(quatMul(from.quat, quatConj(raw.quat)));
-      hasOffset = true;
-    } else {
-      offPos = [0, 0, 0];
-      offQuat = [0, 0, 0, 1];
-      hasOffset = false;
-    }
+    off = from ? offsetBetween(from, raw) : null;
   }
 
-  function enterHold(pose: Pose, nowMs: number) {
+  function enterHold(mean: Pose, currentOut: Pose, nowMs: number) {
     state = "hold";
-    held = pose;
+    held = mean;
     heldSinceMs = nowMs;
     exceedSinceMs = NaN;
     win = [];
-    hasOffset = false;
+    // いまの出力と固定姿勢の差を持ち越し、hold 中に縮める（入る瞬間に飛ばない）
+    off = offsetBetween(currentOut, mean);
+    if (dist(off.pos, [0, 0, 0]) < CAUGHT_UP_M && quatAngleDeg(off.quat, [0, 0, 0, 1]) < CAUGHT_UP_DEG) off = null;
   }
 
-  /** follow の出力 = raw + 差（差は exp(−dt/τ) で縮める。十分小さければ 0） */
-  function followOutput(raw: Pose, dt: number): Pose {
-    if (hasOffset) {
-      const k = opts.catchUpTauMs > 0 ? Math.exp(-dt / opts.catchUpTauMs) : 0;
-      offPos = [offPos[0] * k, offPos[1] * k, offPos[2] * k];
-      const rv = quatToRotVec(offQuat);
-      offQuat = rotVecToQuat([rv[0] * k, rv[1] * k, rv[2] * k]);
-      const offM = Math.hypot(offPos[0], offPos[1], offPos[2]);
-      const offDeg = quatAngleDeg(offQuat, [0, 0, 0, 1]);
-      if (offM < CAUGHT_UP_M && offDeg < CAUGHT_UP_DEG) hasOffset = false;
-    }
-    if (!hasOffset) return copyPose(raw);
-    return {
-      pos: [raw.pos[0] + offPos[0], raw.pos[1] + offPos[1], raw.pos[2] + offPos[2]],
-      quat: quatNorm(quatMul(offQuat, raw.quat)),
-    };
+  function finish(out: Pose, raw: Pose): Pose {
+    devPosM = dist(raw.pos, out.pos);
+    devDeg = quatAngleDeg(raw.quat, out.quat);
+    lastOut = out;
+    return out;
   }
 
   function update(raw: Pose, nowMs: number): Pose {
+    if (!isFinitePose(raw) || !Number.isFinite(nowMs)) {
+      // 非有限の raw は無視する（hold の継続時間・窓・時刻を進めない）
+      return lastOut ?? copyPose(raw);
+    }
     const dt = started && Number.isFinite(lastMs) ? Math.max(0, nowMs - lastMs) : 0;
     lastMs = nowMs;
     if (!opts.enabled) {
@@ -227,7 +273,8 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
       state = "follow";
       devPosM = 0;
       devDeg = 0;
-      return copyPose(raw);
+      lastOut = copyPose(raw);
+      return lastOut;
     }
     if (!started) {
       // 初検出でいきなり固定しない: 最初は出力 = raw で follow
@@ -244,38 +291,35 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
       } else if (dPos > opts.posM || dDeg > opts.deg) {
         if (Number.isNaN(exceedSinceMs)) exceedSinceMs = nowMs;
         if (nowMs - exceedSinceMs >= opts.outMs) {
-          // 閾値超えが outMs 続いた = 本当に動いた。固定姿勢との差を持ったまま follow に入り、その差を縮めて寄せる（飛ばない）
-          enterFollow(raw, held);
+          // 閾値超えが outMs 続いた = 本当に動いた。直前の出力との差を持ったまま follow に入り、その差を縮めて寄せる（飛ばない）
+          enterFollow(raw, lastOut ?? held);
         }
       } else {
         exceedSinceMs = NaN;
       }
       if (state === "hold" && held) {
-        devPosM = dPos;
-        devDeg = dDeg;
-        return held;
+        if (off) off = decayOffset(off, dt, opts.catchUpTauMs);
+        // 差が消えたら固定姿勢そのもの（同じオブジェクト）を返し続ける = 以後一切変わらない
+        return finish(off ? applyOffset(held, off) : held, raw);
       }
     }
 
     // follow
-    const out = followOutput(raw, dt);
-    devPosM = dist(raw.pos, out.pos);
-    devDeg = quatAngleDeg(raw.quat, out.quat);
+    if (off) off = decayOffset(off, dt, opts.catchUpTauMs);
+    const out = off ? applyOffset(raw, off) : copyPose(raw);
     win.push({ t: nowMs, pose: copyPose(raw) });
     // 窓は「最古の点が now − inMs 以前」を 1 点だけ残す（窓の長さが inMs 以上あるかを判定できるように）
     while (win.length >= 2 && nowMs - win[1].t >= opts.inMs) win.shift();
-    if (nowMs - win[0].t >= opts.inMs) {
-      const mean = meanPose(win.map((w) => w.pose));
-      const still = win.every((w) => dist(w.pose.pos, mean.pos) <= opts.posM && quatAngleDeg(w.pose.quat, mean.quat) <= opts.deg);
-      if (still) {
-        // 窓の中心で止める（ぶれの端で止めない）
-        enterHold(mean, nowMs);
-        devPosM = dist(raw.pos, mean.pos);
-        devDeg = quatAngleDeg(raw.quat, mean.quat);
-        return mean;
+    if (nowMs - win[0].t >= opts.inMs && win.length >= MIN_WINDOW_POINTS) {
+      const poses = win.map((w) => w.pose);
+      const mean = meanPose(poses);
+      const rms = spreadRms(poses, mean);
+      if (rms.posM <= opts.posM && rms.deg <= opts.deg) {
+        // 窓の中心で止める（ぶれの端で止めない）。このフレームの出力は follow のままの out（差を持ち越すので飛ばない）
+        enterHold(mean, out, nowMs);
       }
     }
-    return out;
+    return finish(out, raw);
   }
 
   return {
@@ -304,9 +348,8 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
       held = null;
       heldSinceMs = NaN;
       exceedSinceMs = NaN;
-      offPos = [0, 0, 0];
-      offQuat = [0, 0, 0, 1];
-      hasOffset = false;
+      off = null;
+      lastOut = null;
       win = [];
       devPosM = 0;
       devDeg = 0;

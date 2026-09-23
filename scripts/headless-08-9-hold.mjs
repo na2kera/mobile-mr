@@ -3,7 +3,7 @@
 // 仕組みは headless-08-7-alva.mjs と同じ（CDP を ws で直接叩く。Chrome が無ければスキップ）。確認すること:
 //   (1) OpenCV.js の経路（HUD の pose=opencv）で位置合わせしている（フォールバックしていない）
 //   (2) ページ内で __fakeMarkers.camPos に毎フレーム ±1cm のノイズを入れても、1 秒後からは自分の位置（__hold.self = HUD の self= の mm 版）が
-//       1mm も変わらず hold=hold のまま
+//       1mm も変わらず（表示用アンカーの回転もビット単位で変わらず）hold=hold のまま
 //   (3) マーカーを見たまま合成カメラを 0.5m 動かすと self= が追従して follow になり、止めると hold に戻る
 //   (4) 原点マーカーを隠して動かす（SLAM 駆動。先にマーカーを見ながら動いて SLAM → field を較正する）と self= が追従し、止めると hold
 //   (5) 対照: ?hold=0 のウィンドウでは (2) の間 self= がノイズぶんぶれる（hold=off）
@@ -179,7 +179,7 @@ try {
   const players = [pA, pB];
 
   const readHud = async (p) => parseHud((await p.eval("document.querySelector('#hud')?.textContent")) ?? "");
-  const readHold = async (p) => p.eval("window.__hold ? { state: window.__hold.state, dev: window.__hold.devPosM, deg: window.__hold.devDeg, info: window.__hold.info, self: window.__hold.self ? [...window.__hold.self] : null } : null");
+  const readHold = async (p) => p.eval("window.__hold ? { state: window.__hold.state, dev: window.__hold.devPosM, deg: window.__hold.devDeg, info: window.__hold.info, self: window.__hold.self ? [...window.__hold.self] : null, quat: [...window.__hold.anchorQuat] } : null");
   const setCam = (p, pos) => p.eval(`window.__fakeMarkers.camPos = ${JSON.stringify(pos)}; true`);
   /**
    * ページ内で合成カメラを動かす（setInterval 16ms）。from → to を speed [m/s] で直線に動かし、各フレーム ±noise [m] の一様ノイズを足す。
@@ -214,6 +214,16 @@ try {
     }
     return out;
   }
+  /** 表示用アンカーの回転のばらつき（サンプルどうしの最大角 [deg]）と、ビット単位で全部同じか */
+  const rotSpread = (samples) => {
+    const qs = samples.map((s) => s?.quat).filter(Boolean);
+    const ang = (a, b) => {
+      const d = Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
+      return (2 * Math.acos(Math.min(1, d)) * 180) / Math.PI;
+    };
+    const same = qs.length === samples.length && qs.every((q) => q.every((v, i) => v === qs[0][i]));
+    return { deg: qs.length ? Math.max(...qs.map((a) => Math.max(...qs.map((b) => ang(a, b))))) : Infinity, same };
+  };
   const spreadMm = (samples) => {
     const ss = samples.map((s) => s?.self).filter(Boolean);
     if (ss.length === 0) return Infinity;
@@ -236,7 +246,7 @@ try {
   console.log(`A: ${a0.poseLine}\n   ${a0.slamLine}\n   ${a0.holdLine}`);
   console.log(`B: ${b0.poseLine}\n   ${b0.holdLine}`);
   check("(1) A・B が OpenCV.js の経路（pose=opencv）で位置合わせしている", a0.backend === "opencv" && b0.backend === "opencv" && a0.marker.startsWith("id=") && b0.marker.startsWith("id="), `${a0.backend} / ${b0.backend}`);
-  check("HUD の 1 行目に detector= pnp= poseSource= と hold=1(pos=0.02 deg=1 out=250ms in=600ms) が出る（B は hold=0）", /detector=opencv pnp=auto poseSource=board hold=1\(pos=0\.02 deg=1 out=250ms in=600ms\) slam=fake/.test(a0.base) && /hold=0\(/.test(b0.base), a0.base.slice(0, 200));
+  check("HUD の 1 行目に detector= pnp= poseSource= と hold=1(pos=0.02 deg=2 out=250ms in=600ms) が出る（B は hold=0）", /detector=opencv pnp=auto poseSource=board hold=1\(pos=0\.02 deg=2 out=250ms in=600ms\) slam=fake/.test(a0.base) && /hold=0\(/.test(b0.base), a0.base.slice(0, 200));
   check("A: フェイクの SLAM が追跡中（slam=tracking）", a0.slamState.startsWith("tracking"), a0.slamLine);
   check("A: 止まっていれば hold=hold、B（?hold=0）は hold=off", a0.holdState === "hold" && b0.holdState === "off", `${a0.holdLine} / ${b0.holdLine}`);
   check("A・B とも練習で発射が受理されている（08 と同じ仕様）", a0.accepted >= 1 && b0.accepted >= 1, `${a0.accepted} / ${b0.accepted}`);
@@ -253,6 +263,10 @@ try {
   console.log(`noise A: self=${fmt(sa.at(-1)?.self)} spread=${aSpread.toFixed(1)}mm states=${[...aStates].join(",")} 推定と表示の差の最大 dev=${aDevMax.toFixed(3)}m/${aDegMax.toFixed(2)}deg（${sa.length} 回読んだ）`);
   console.log(`noise B: self=${fmt(sb.at(-1)?.self)} spread=${bSpread.toFixed(1)}mm info=${sb.at(-1)?.info}`);
   check("(2) ±1cm のノイズを入れて 1 秒後から 4 秒間、A の self= が 1mm も変わらず hold=hold のまま", aSpread === 0 && aStates.size === 1 && aStates.has("hold"), `spread=${aSpread.toFixed(1)}mm states=${[...aStates].join(",")}`);
+  const aRot = rotSpread(sa);
+  const bRot = rotSpread(sb);
+  console.log(`noise rot: A spread=${aRot.deg.toFixed(4)}deg same=${aRot.same} / B spread=${bRot.deg.toFixed(3)}deg`);
+  check("(2) 同じ間、A の表示用アンカーの回転もビット単位で変わらない", aRot.same && aRot.deg === 0, `A ${aRot.deg}deg（B は ${bRot.deg.toFixed(3)}deg）`);
   check("(5) 対照: ?hold=0 の B は同じノイズで self= がぶれる（1mm 超）", bSpread > 1 && sb.every((s) => s?.state === "follow"), `spread=${bSpread.toFixed(1)}mm`);
   await Promise.all(players.map(stopMotion));
   await Promise.all(players.map((p) => setCam(p, START_POS)));
@@ -270,7 +284,9 @@ try {
   await sleep(1200);
   const [wMid, wMidTruth, wMidHud] = await Promise.all([readHold(pA), truthNow(pA), readHud(pA)]);
   console.log(`walk mid A: ${wMid.info} self=${fmt(wMid.self)} 正解=${fmt(wMidTruth)} | ${wMidHud.poseLine}`);
-  check("(3) 動いている間は follow で、self= が合成カメラに追従している（±8cm）", wMid.state === "follow" && dist(wMid.self, wMidTruth) < 0.08 && dist(wMid.self, w0.self) > 0.1, `self=${fmt(wMid.self)} 正解=${fmt(wMidTruth)} 差=${dist(wMid.self, wMidTruth).toFixed(3)}m 動いた量=${dist(wMid.self, w0.self).toFixed(3)}m`);
+  // 真値との差はマーカー検出（100ms ごと）+ marker-anchor の lerp の遅れで、hold のせいではない。hold の寄与は __hold.devPosM（推定と表示の差）で別に見る
+  check("(3) 動いている間は follow で、表示は推定そのまま（推定と表示の差 dev < 1cm = 遅れの原因は hold ではない）", wMid.state === "follow" && wMid.dev < 0.01, `dev=${wMid.dev.toFixed(4)}m`);
+  check("(3) 動いている間 self= が合成カメラに追従している（真値から ±10cm。マーカー検出 + lerp の遅れ込み）", dist(wMid.self, wMidTruth) < 0.1 && dist(wMid.self, w0.self) > 0.1, `self=${fmt(wMid.self)} 正解=${fmt(wMidTruth)} 差=${dist(wMid.self, wMidTruth).toFixed(3)}m 動いた量=${dist(wMid.self, w0.self).toFixed(3)}m`);
   await sleep(1500);
   await stopMotion(pA);
   await sleep(2500);
@@ -311,7 +327,8 @@ try {
   check("(4) SLAM 駆動で止まると hold に戻り、self= が到達点（±10cm）", sEnd.state === "hold" && /\(slam\)/.test(sEndHud.poseLine) && dist(sEnd.self, slamTo) < 0.1, `${sEnd.info} 差=${dist(sEnd.self, slamTo).toFixed(3)}m`);
   // SLAM 駆動で止まっている間もノイズ（fakeSlamNoise）が乗るが、hold なら self= は変わらない
   const sHeld = await sampleHold(pA, 2000);
-  check("(4) SLAM 駆動で止まっている間 self= が 1mm も変わらない", spreadMm(sHeld) === 0 && sHeld.every((s) => s?.state === "hold"), `spread=${spreadMm(sHeld).toFixed(1)}mm`);
+  const sRot = rotSpread(sHeld);
+  check("(4) SLAM 駆動で止まっている間 self= が 1mm も変わらず、表示用アンカーの回転もビット単位で変わらない", spreadMm(sHeld) === 0 && sHeld.every((s) => s?.state === "hold") && sRot.same, `spread=${spreadMm(sHeld).toFixed(1)}mm rot=${sRot.deg}deg`);
   // マーカーを戻す → マーカーの追跡に戻る
   await setCam(pA, START_POS);
   await pA.eval("window.__fakeMarkers.hidden.delete(0); true");

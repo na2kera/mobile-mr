@@ -69,16 +69,17 @@ import type { AnchorHoldState } from "./anchor-hold";
 //     マーカーが見えない間は SLAM の位置の増分でアンカーの位置だけを動かす（slam-fusion.ts / slam-source.ts。回転はジャイロ）
 //   - 表示（08-9 で追加）: アンカーを 2 つに分ける。マーカーと SLAM は推定用の rawAnchor（scene に入れない）に書き込み、
 //     毎フレーム anchor-hold.ts（状態機械）に通した姿勢を表示用の anchor に写す。ゲーム側（壁・床・インク・着弾・発射・pose 送信）は anchor を読む。
-//       hold   … 表示を固定する。推定が固定姿勢から holdPos / holdDeg を超えて離れた状態が holdOutMs 続いたら follow へ（1 フレームの外れ値では動かない）。
+//       hold   … 表示を固定する（入った直後だけ、直前の表示との差を時定数 holdTau で縮めて固定姿勢へ滑らせる）。推定が固定姿勢から
+//                holdPos / holdDeg を超えて離れた状態が holdOutMs 続いたら follow へ（1 フレームの外れ値では動かない）。
 //                holdSnap を超えて離れたら即 follow で表示も即推定に合わせる（再検出のスナップ・SLAM のリセット）
-//       follow … 表示は推定のまま（切り替えた直後だけ、固定姿勢との差を時定数 holdTau で縮める）。推定が holdInMs の間 holdPos / holdDeg 以内に
-//                収まっていたら、その区間の平均（ぶれの中心）で hold へ
+//       follow … 表示は推定のまま（切り替えた直後だけ、直前の表示との差を時定数 holdTau で縮める）。直近 holdInMs の推定の
+//                平均からのばらつきの RMS が holdPos / holdDeg 以内なら、その区間の平均（ぶれの中心）で hold へ
 //     SLAM の組・増分はすべて rawAnchor で作る（止めた表示と SLAM を対応づけない）
 //   - 追加の URL パラメータ（08 / 08-4 / 08-7 のものは同名・同義）:
 //     08-4 から: ?detector=opencv|aruco2&pnp=auto|ippe|iterative&pose=board|single&maxReprojPx=4&opencvUrl=
 //     08-7 から: ?slam=0&slamW=360&slamIntervalMs=50&slamMinBaseline=0.15&slamPairMaxCorr=0.08&slamSmooth=0.5、
 //                PC 確認用 ?fakeslam=1&fakeSlamScale=0.37&fakeSlamYaw=140&fakeSlamNoise=0.002（window.__fakeMarkers.camPos で合成カメラを動かす）
-//     08-9: ?hold=1（0 で止めない = 08-4 + 08-7 と同じ表示。経路は同じで出力 = 推定）&holdPos=0.02 [m] &holdDeg=1.0 [deg]
+//     08-9: ?hold=1（0 で止めない = 08-4 + 08-7 と同じ表示。経路は同じで出力 = 推定）&holdPos=0.02 [m] &holdDeg=2.0 [deg]
 //           &holdOutMs=250 &holdInMs=600 &holdSnap=0.3 [m] &holdTau=120 [ms]。ヘッドレス確認からは window.__hold（state / devPosM / devDeg / self）を読む
 //   - HUD: 08-4 の pose= 行（末尾に 08-7 の (slam) / (holding last pose)）・08-7 の slam= 行・08-9 の hold=<hold|follow> dev=…m/…deg held=…s 行。
 //     1 行目に detector= pnp= poseSource= hold=1(pos= deg= out= in=) slam=
@@ -308,7 +309,16 @@ const anchorHold = createAnchorHold({
 declare global {
   interface Window {
     /** 08-9: ヘッドレス確認用（hold の状態と、直近に送った自分の位置 = HUD の self= を mm 単位で） */
-    __hold?: { readonly state: AnchorHoldState; readonly devPosM: number; readonly devDeg: number; readonly info: string; readonly self: readonly number[] | null };
+    __hold?: {
+      readonly state: AnchorHoldState;
+      readonly devPosM: number;
+      readonly devDeg: number;
+      readonly info: string;
+      /** 直近に送った自分の位置（field 座標系。HUD の self= の mm 版） */
+      readonly self: readonly number[] | null;
+      /** 表示用アンカーの四元数 [x, y, z, w]（hold 中に回転も止まっているかの確認用） */
+      readonly anchorQuat: readonly number[];
+    };
   }
 }
 
@@ -827,6 +837,11 @@ function updateDisplayAnchor(now: number) {
   anchor.quaternion.set(out.quat[0], out.quat[1], out.quat[2], out.quat[3]);
 }
 
+/** HUD の hold= 行（初検出までは hold に通していないので waiting） */
+function holdInfo(): string {
+  return markerAnchor?.everDetected ? anchorHold.info : "waiting";
+}
+
 /** HUD の slam= 行の状態 */
 function slamStateText(): string {
   if (!slam) return `off(${slamOffReason})`;
@@ -1177,10 +1192,13 @@ window.__hold = {
     return anchorHold.devDeg;
   },
   get info() {
-    return anchorHold.info;
+    return holdInfo();
   },
   get self() {
     return lastSelfPos;
+  },
+  get anchorQuat() {
+    return [anchor.quaternion.x, anchor.quaternion.y, anchor.quaternion.z, anchor.quaternion.w];
   },
 };
 
@@ -1654,7 +1672,7 @@ function renderHud() {
     // 08-7: SLAM の状態（t=処理時間、off=マーカーで出した位置との差、fix=SLAM → field の変換の推定、rot=SLAM の向き（診断用）、n=呼び出し回数）
     `slam=${slamStateText()} t=${slam ? slam.lastMs.toFixed(0) : "-"}ms every ${slam ? slam.effectiveIntervalMs.toFixed(0) : "-"}ms off=${slamOffM === null ? "-" : `${slamOffM.toFixed(2)}m`} fix=${fusion.describe()} rot=${slamYpr ? `(${slamYpr.map((v) => v.toFixed(0)).join(",")})` : "-"}${slamRotErrDeg === null ? "" : ` rotErr=${slamRotErrDeg.toFixed(1)}deg`} n=${slam?.calls ?? 0} resets=${slam?.resets ?? 0}${slam?.focalPx ? ` f=${slam.focalPx.toFixed(0)}px` : ""}`,
     // 08-9: 表示の更新方針（hold = 止めている / follow = 推定に追従。dev = 推定と表示の差、held = 止めてからの時間）
-    `hold=${anchorHold.info}`,
+    `hold=${holdInfo()}`,
     `tracker=${trackerStatus}${lastTrackerError ? ` (last error: ${lastTrackerError})` : ""}`,
     (tracker || FAKE_HANDS) &&
       `hands=${lastResultHands} ${handSlots.describe() || "-"} shape=${lastShapeInfo} infer=${(tracker?.lastMs ?? 0).toFixed(0)}ms every ${detIntervalEma.toFixed(0)}ms`,
