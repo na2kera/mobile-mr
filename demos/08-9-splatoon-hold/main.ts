@@ -70,19 +70,21 @@ import type { AnchorHoldState } from "./anchor-hold";
 //   - 表示（08-9 で追加）: アンカーを 2 つに分ける。マーカーと SLAM は推定用の rawAnchor（scene に入れない）に書き込み、
 //     毎フレーム anchor-hold.ts（状態機械）に通した姿勢を表示用の anchor に写す。ゲーム側（壁・床・インク・着弾・発射・pose 送信）は anchor を読む。
 //       hold   … 表示を固定する（入った直後だけ、直前の表示との差を時定数 holdTau で縮めて固定姿勢へ滑らせる）。推定が固定姿勢から
-//                holdPos / holdDeg を超えて離れた状態が holdOutMs 続いたら follow へ（1 フレームの外れ値では動かない）。
+//                holdPos / holdDeg の holdExit 倍（既定 1.5 倍。入る側より広げて閾値の際で往復しない）を超えて離れた状態が
+//                holdOutMs 続いたら follow へ（1 フレームの外れ値では動かない）。
 //                holdSnap を超えて離れたら即 follow で表示も即推定に合わせる（再検出のスナップ・SLAM のリセット）
 //       follow … 表示は推定のまま（切り替えた直後だけ、直前の表示との差を時定数 holdTau で縮める）。直近 holdInMs の推定の
-//                平均からのばらつきの RMS が holdPos / holdDeg 以内なら、その区間の平均（ぶれの中心）で hold へ
+//                平均からのばらつきの RMS が holdPos / holdDeg 以内、かつ窓の前半と後半の平均の差が holdPos / holdDeg の holdDrift 倍
+//                （既定 0.5 倍）以内なら、その区間の平均（ぶれの中心）で hold へ（ドリフト条件は減速の尾を平均に混ぜないため）
 //     SLAM の組・増分はすべて rawAnchor で作る（止めた表示と SLAM を対応づけない）
 //   - 追加の URL パラメータ（08 / 08-4 / 08-7 のものは同名・同義）:
 //     08-4 から: ?detector=opencv|aruco2&pnp=auto|ippe|iterative&pose=board|single&maxReprojPx=4&opencvUrl=
 //     08-7 から: ?slam=0&slamW=360&slamIntervalMs=50&slamMinBaseline=0.15&slamPairMaxCorr=0.08&slamSmooth=0.5、
 //                PC 確認用 ?fakeslam=1&fakeSlamScale=0.37&fakeSlamYaw=140&fakeSlamNoise=0.002（window.__fakeMarkers.camPos で合成カメラを動かす）
-//     08-9: ?hold=1（0 で止めない = 08-4 + 08-7 と同じ表示。経路は同じで出力 = 推定）&holdPos=0.02 [m] &holdDeg=2.0 [deg]
+//     08-9: ?hold=1（0 で止めない = 08-4 + 08-7 と同じ表示。経路は同じで出力 = 推定）&holdPos=0.02 [m] &holdDeg=2.0 [deg] &holdDrift=0.5 &holdExit=1.5
 //           &holdOutMs=250 &holdInMs=600 &holdSnap=0.3 [m] &holdTau=120 [ms]。ヘッドレス確認からは window.__hold（state / devPosM / devDeg / self）を読む
 //   - HUD: 08-4 の pose= 行（末尾に 08-7 の (slam) / (holding last pose)）・08-7 の slam= 行・08-9 の hold=<hold|follow> dev=…m/…deg held=…s 行。
-//     1 行目に detector= pnp= poseSource= hold=1(pos= deg= out= in=) slam=
+//     1 行目に detector= pnp= poseSource= hold=1(pos= deg= drift= exit= out= in=) slam=
 //   - ゲームの仕様・UI・サーバー（server/splatoon.ts、同じプロトコル）は 08 のまま。以下は 08-7 の SLAM の補足と 08 の説明
 //
 // 08-7 の SLAM の補足: 原点・スケール・向き（ヨー）はマーカーで決め、SLAM からは位置の増分だけ採る。AlvaAR が無い・初期化に失敗・
@@ -145,6 +147,10 @@ const OPENCV_URL = params.get("opencvUrl") ?? defaultOpenCvUrl(import.meta.env.B
 const HOLD_ENABLED = params.get("hold") !== "0";
 const HOLD_POS_M = numParam("holdPos", DEFAULT_ANCHOR_HOLD.posM, { min: 0.001, max: 1 });
 const HOLD_DEG = numParam("holdDeg", DEFAULT_ANCHOR_HOLD.deg, { min: 0.05, max: 45 });
+/** hold に入るとき、窓の前半と後半の平均の差を holdPos / holdDeg のこの倍以内に求める（減速の尾・ゆっくりした動きで入らない） */
+const HOLD_DRIFT = numParam("holdDrift", DEFAULT_ANCHOR_HOLD.driftRatio, { min: 0.01, max: 10 });
+/** hold から出る閾値の倍率（holdPos / holdDeg のこの倍を超えたら。入る側より広げて閾値の際で往復しない） */
+const HOLD_EXIT = numParam("holdExit", DEFAULT_ANCHOR_HOLD.exitRatio, { min: 1, max: 10 });
 const HOLD_OUT_MS = numParam("holdOutMs", DEFAULT_ANCHOR_HOLD.outMs, { min: 0, max: 10000 });
 const HOLD_IN_MS = numParam("holdInMs", DEFAULT_ANCHOR_HOLD.inMs, { min: 50, max: 10000 });
 const HOLD_SNAP_M = numParam("holdSnap", DEFAULT_ANCHOR_HOLD.snapM, { min: 0.01, max: 100 });
@@ -301,6 +307,8 @@ const anchorHold = createAnchorHold({
   enabled: HOLD_ENABLED,
   posM: HOLD_POS_M,
   deg: HOLD_DEG,
+  driftRatio: HOLD_DRIFT,
+  exitRatio: HOLD_EXIT,
   outMs: HOLD_OUT_MS,
   inMs: HOLD_IN_MS,
   snapM: HOLD_SNAP_M,
@@ -1721,7 +1729,7 @@ nameForm.addEventListener("submit", (event) => {
   if (name === null) return;
   document.body.classList.add("started");
   splatSound.unlock(); // ユーザージェスチャー内（iOS の AudioContext）
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} detector=${DETECTOR} pnp=${PNP_METHOD} poseSource=${POSE_SOURCE} hold=${HOLD_ENABLED ? 1 : 0}(pos=${HOLD_POS_M} deg=${HOLD_DEG} out=${HOLD_OUT_MS}ms in=${HOLD_IN_MS}ms) slam=${SLAM_ENABLED ? (FAKE_SLAM ? "fake" : "alva") : 0} slamW=${SLAM_W}@${SLAM_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} detector=${DETECTOR} pnp=${PNP_METHOD} poseSource=${POSE_SOURCE} hold=${HOLD_ENABLED ? 1 : 0}(pos=${HOLD_POS_M} deg=${HOLD_DEG} drift=${HOLD_DRIFT} exit=${HOLD_EXIT} out=${HOLD_OUT_MS}ms in=${HOLD_IN_MS}ms) slam=${SLAM_ENABLED ? (FAKE_SLAM ? "fake" : "alva") : 0} slamW=${SLAM_W}@${SLAM_INTERVAL_MS}ms hands=${NUM_HANDS} delegate=${DELEGATE} handScale=${HAND_SCALE} gravity=${GRAVITY} matchSec=${MATCH_SEC} mode=${touch ? "gyro" : "orbit"}`;
   connect(name);
   if (FAKE_HANDS) {
     trackerStatus = "fake (scripted hand, MediaPipe 未使用)";

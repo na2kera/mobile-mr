@@ -246,7 +246,7 @@ try {
   console.log(`A: ${a0.poseLine}\n   ${a0.slamLine}\n   ${a0.holdLine}`);
   console.log(`B: ${b0.poseLine}\n   ${b0.holdLine}`);
   check("(1) A・B が OpenCV.js の経路（pose=opencv）で位置合わせしている", a0.backend === "opencv" && b0.backend === "opencv" && a0.marker.startsWith("id=") && b0.marker.startsWith("id="), `${a0.backend} / ${b0.backend}`);
-  check("HUD の 1 行目に detector= pnp= poseSource= と hold=1(pos=0.02 deg=2 out=250ms in=600ms) が出る（B は hold=0）", /detector=opencv pnp=auto poseSource=board hold=1\(pos=0\.02 deg=2 out=250ms in=600ms\) slam=fake/.test(a0.base) && /hold=0\(/.test(b0.base), a0.base.slice(0, 200));
+  check("HUD の 1 行目に detector= pnp= poseSource= と hold=1(pos=0.02 deg=2 drift=0.5 exit=1.5 out=250ms in=600ms) が出る（B は hold=0）", /detector=opencv pnp=auto poseSource=board hold=1\(pos=0\.02 deg=2 drift=0\.5 exit=1\.5 out=250ms in=600ms\) slam=fake/.test(a0.base) && /hold=0\(/.test(b0.base), a0.base.slice(0, 200));
   check("A: フェイクの SLAM が追跡中（slam=tracking）", a0.slamState.startsWith("tracking"), a0.slamLine);
   check("A: 止まっていれば hold=hold、B（?hold=0）は hold=off", a0.holdState === "hold" && b0.holdState === "off", `${a0.holdLine} / ${b0.holdLine}`);
   check("A・B とも練習で発射が受理されている（08 と同じ仕様）", a0.accepted >= 1 && b0.accepted >= 1, `${a0.accepted} / ${b0.accepted}`);
@@ -280,19 +280,38 @@ try {
   await sleep(3000);
   const w0 = await readHold(pA);
   console.log(`walk start A: ${w0.info} self=${fmt(w0.self)} 正解=${fmt(walkFrom)}`);
-  await startMotion(pA, walkFrom, walkTo, 0.25, 0); // 0.5m を 2 秒
-  await sleep(1200);
-  const [wMid, wMidTruth, wMidHud] = await Promise.all([readHold(pA), truthNow(pA), readHud(pA)]);
+  // 対照の B（?hold=0）にも同じ動きを流し、真値からの遅れを A と比べる。2 つのページはマーカー検出（100ms ごと）の位相が別々なので、
+  // 1 回だけ読むと検出 1 回分（0.25m/s × 100ms ≈ 2.5cm）ずれることがある。歩いている途中で 8 回読んだ平均で比べる
+  const tWalk = Date.now();
+  await Promise.all([startMotion(pA, walkFrom, walkTo, 0.25, 0), startMotion(pB, walkFrom, walkTo, 0.25, 0)]); // 0.5m を 2 秒
+  await sleep(900);
+  const lagsA = [];
+  const lagsB = [];
+  let wMid = null;
+  let wMidTruth = null;
+  let wMidHud = null;
+  for (let k = 0; k < 8; k++) {
+    const [ha, ta, hb, tb] = await Promise.all([readHold(pA), truthNow(pA), readHold(pB), truthNow(pB)]);
+    lagsA.push(dist(ha.self, ta));
+    lagsB.push(dist(hb.self, tb));
+    if (k === 3) [wMid, wMidTruth, wMidHud] = [ha, ta, await readHud(pA)];
+    await sleep(80);
+  }
   console.log(`walk mid A: ${wMid.info} self=${fmt(wMid.self)} 正解=${fmt(wMidTruth)} | ${wMidHud.poseLine}`);
-  // 真値との差はマーカー検出（100ms ごと）+ marker-anchor の lerp の遅れで、hold のせいではない。hold の寄与は __hold.devPosM（推定と表示の差）で別に見る
+  const mean = (xs) => xs.reduce((a, x) => a + x, 0) / xs.length;
+  const lagA = mean(lagsA);
+  const lagB = mean(lagsB);
+  console.log(`walk mid 遅れ（8 回の平均）A=${lagA.toFixed(3)}m B=${lagB.toFixed(3)}m（A: ${lagsA.map((x) => x.toFixed(3)).join(",")} / B: ${lagsB.map((x) => x.toFixed(3)).join(",")}）`);
   check("(3) 動いている間は follow で、表示は推定そのまま（推定と表示の差 dev < 1cm = 遅れの原因は hold ではない）", wMid.state === "follow" && wMid.dev < 0.01, `dev=${wMid.dev.toFixed(4)}m`);
+  check("(3) 動いている間の真値からの遅れ（8 回の平均）が ?hold=0 の B と同じ（差 < 2cm = 遅れはマーカー検出 + lerp のもので hold のせいではない）", Math.abs(lagA - lagB) < 0.02, `A=${lagA.toFixed(3)}m B=${lagB.toFixed(3)}m 差=${Math.abs(lagA - lagB).toFixed(3)}m`);
   check("(3) 動いている間 self= が合成カメラに追従している（真値から ±10cm。マーカー検出 + lerp の遅れ込み）", dist(wMid.self, wMidTruth) < 0.1 && dist(wMid.self, w0.self) > 0.1, `self=${fmt(wMid.self)} 正解=${fmt(wMidTruth)} 差=${dist(wMid.self, wMidTruth).toFixed(3)}m 動いた量=${dist(wMid.self, w0.self).toFixed(3)}m`);
-  await sleep(1500);
-  await stopMotion(pA);
+  await sleep(Math.max(0, 2700 - (Date.now() - tWalk)));
+  await Promise.all([stopMotion(pA), stopMotion(pB)]);
   await sleep(2500);
   const wEnd = await readHold(pA);
   console.log(`walk end A: ${wEnd.info} self=${fmt(wEnd.self)} 正解=${fmt(walkTo)}`);
-  check("(3) 0.5m 動いて止まると hold に戻り、self= が到達点（±5cm）", wEnd.state === "hold" && dist(wEnd.self, walkTo) < 0.05 && dist(w0.self, walkFrom) < 0.05, `start 差=${dist(w0.self, walkFrom).toFixed(3)}m end 差=${dist(wEnd.self, walkTo).toFixed(3)}m`);
+  // 固定姿勢が減速の尾で歩いてきた側に寄ると、止まった後の dev（推定と表示の差）が 1.5〜2cm 残っていた（ドリフト条件を足す前）
+  check("(3) 0.5m 動いて止まると hold に戻り、固定姿勢が推定から 1cm 以内（減速の尾を平均に混ぜない）、self= が到達点（±2cm）", wEnd.state === "hold" && wEnd.dev < 0.01 && dist(wEnd.self, walkTo) < 0.02 && dist(w0.self, walkFrom) < 0.03, `dev=${wEnd.dev.toFixed(4)}m start 差=${dist(w0.self, walkFrom).toFixed(3)}m end 差=${dist(wEnd.self, walkTo).toFixed(3)}m`);
 
   // ---- SLAM の較正（08-7 の確認と同じ動き。マーカーを見ながら 15cm 以上動く）----
   const calib = [[0, 0, 0.5], [0, 0.04, 0.8], [0.04, -0.03, 0.55], [-0.04, 0.03, 0.8], [0, -0.04, 0.6], [0.03, 0.03, 0.5], START_POS];
@@ -324,7 +343,7 @@ try {
   await sleep(2500);
   const [sEnd, sEndHud] = await Promise.all([readHold(pA), readHud(pA)]);
   console.log(`slam walk end A: ${sEnd.info} self=${fmt(sEnd.self)} 正解=${fmt(slamTo)} | ${sEndHud.poseLine}`);
-  check("(4) SLAM 駆動で止まると hold に戻り、self= が到達点（±10cm）", sEnd.state === "hold" && /\(slam\)/.test(sEndHud.poseLine) && dist(sEnd.self, slamTo) < 0.1, `${sEnd.info} 差=${dist(sEnd.self, slamTo).toFixed(3)}m`);
+  check("(4) SLAM 駆動で止まると hold に戻り、固定姿勢が推定から 1cm 以内、self= が到達点（±3cm）", sEnd.state === "hold" && sEnd.dev < 0.01 && /\(slam\)/.test(sEndHud.poseLine) && dist(sEnd.self, slamTo) < 0.03, `${sEnd.info} 差=${dist(sEnd.self, slamTo).toFixed(3)}m`);
   // SLAM 駆動で止まっている間もノイズ（fakeSlamNoise）が乗るが、hold なら self= は変わらない
   const sHeld = await sampleHold(pA, 2000);
   const sRot = rotSpread(sHeld);

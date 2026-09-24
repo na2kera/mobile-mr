@@ -18,18 +18,27 @@
 //   posM / deg（既定 2cm / 2°）: 「ぶれ」と「本当の動き」の境目。hold 中の離脱の判定と、follow 中の「止まった」の判定の両方に使う。
 //     観察されたぶれ（数 cm）より小さいと hold に入れず、大きいと歩き始めの遅れが増える。実機で調整する値（README の実機項目）。
 //     回転は PC の合成カメラに ±1cm のノイズを入れただけで推定が 0.5〜0.9° ぶれたので、1° では実機で hold に入れない恐れが高く 2° にした
-//   outMs（既定 250ms）: hold 中に閾値超えが「連続で」この時間続いたら follow へ。1 フレームの外れ値（検出の誤り・鏡像の解・
+//   outMs（既定 250ms）: hold 中に離脱の閾値（posM / deg × exitRatio）超えが「連続で」この時間続いたら follow へ。1 フレームの外れ値（検出の誤り・鏡像の解・
 //     SLAM の一瞬の飛び）では動かさないため。閾値内に戻ったら継続時間は 0 に戻す。代償として、歩き始めは
-//     outMs + 閾値に届くまでの時間だけ出力が止まったままになる（0.5m/s なら約 13cm 遅れてから寄せ始める）
+//     outMs + 離脱の閾値に届くまでの時間だけ出力が止まったままになる（離脱は posM × exitRatio = 3cm なので、0.5m/s なら約 16cm 遅れてから寄せ始める）
 //   inMs（既定 600ms）: follow 中、直近 inMs の raw の窓が「止まっている」なら hold へ。窓が inMs に満たない（follow に入った直後）
-//     うち、または窓の点が 3 個未満（長いフレーム落ちの直後）は判定しない。
+//     うち、または窓の点が 3 個未満は判定しない。inMs より長いフレーム落ち（dt > inMs）があったら窓を作り直す
+//     （古い点が 1 つ残ったまま新しい 2 点と平均されると、何秒も前の位置が固定姿勢に混ざる）。
 //     「止まっている」= 窓の平均からの**ばらつきの RMS** が閾値以内:
 //       位置: sqrt(Σ|p_i − p̄|² / n) ≤ posM、回転: sqrt(Σ angle(q_i, q̄)² / n) ≤ deg（angle は 2 つの回転の差の角度 [deg]）
 //     全点の最大値で判定すると、実機の推定（数 cm のぶれ）では 600ms の窓に外れ値が 1 回入るだけで 600ms 入れず、follow のままになりやすい。
 //     hold の維持は「閾値超えが outMs 続いたら離脱」で外れ値に強いので、入る側も外れ値 1 回で拒まない RMS にそろえた。
-//     代わりに、ゆっくりした動きでも止まっているとみなしやすくなる（ノイズ無しの等速なら、窓の長さ L のばらつきの RMS は L/√12 なので
-//     2cm / 600ms では約 11cm/s 以下の動きを止まっているとみなす。最大値判定では約 6.7cm/s 以下）。そうして止めても、
-//     動き続けていれば閾値超えが outMs 続いた時点で follow に戻る
+//     ただし RMS だけでは、ゆっくりした動きや**減速の尾**も「止まっている」になる（ノイズ無しの等速なら窓の長さ L のばらつきの RMS は
+//     L/√12 なので、2cm / 600ms では約 11cm/s 以下の動きを止まっているとみなす）。そこで次の 2 つを足した（レビューで追加）:
+//   driftRatio（既定 0.5）… **ドリフト条件**。窓を時刻で前半と後半に分け、それぞれの平均の差が位置 posM × driftRatio・
+//     回転 deg × driftRatio 以内のときだけ hold に入る（RMS 条件と AND）。raw はマーカー検出（100ms ごと）のたびに lerp 0.5 で寄るので、
+//     止まった後も 0.5 倍ずつ縮む減速の尾を引く。RMS だけだとその尾を含んだ窓で入ってしまい、固定姿勢（窓の平均）が歩いてきた側に
+//     1.5〜2cm ずれた（止まった位置との差が離脱の閾値の直下になり、ノイズで hold / follow を往復した）。前半と後半の平均の差は
+//     「窓の中で推定がまだ一方向に動いているか」を見るので、ノイズ（前後で打ち消す）では増えず、尾やゆっくりした動きでは増える
+//   exitRatio（既定 1.5）… **離脱のヒステリシス**。hold から出る閾値は posM × exitRatio / deg × exitRatio（入る側は posM / deg）。
+//     入る側が RMS ≤ posM なので、RMS が 1.5〜2cm の静止ノイズでも hold に入れるが、そのノイズは単発で posM を超えることが多い。
+//     入ると出るを同じ閾値にすると、閾値の際で outMs 続けて超えるたびに follow → 再 hold を繰り返すので、出る側を広げる。
+//     snapM の即離脱はそのまま
 //   固定姿勢は**窓の平均**（位置は算術平均、四元数は符号を揃えて足してから正規化）。直近の 1 点で止めるとぶれの端で固まり、
 //     その後のぶれが片側に偏って閾値を超えやすい。中心で止めると、同じぶれでも固定姿勢からの差が最小になる
 //   snapM（既定 0.3m）: これ以上離れた raw は即 follow にし、出力も即 raw にする（寄せない）。マーカーの再検出のスナップ
@@ -44,7 +53,7 @@
 //         follow の寄せの差が残ったまま止まったとき（?holdTau=1000 など）も同じく飛ばない
 //     差が 1mm / 0.05° 未満になったら差を 0 にする（follow では出力 = raw、hold では出力 = 固定姿勢で以後一切変えない）
 //   時間はすべて nowMs（ms）で数える（フレームレートに依存しない）。nowMs が戻ることは無い前提で、dt ≤ 0 は 0 として扱う
-//   raw に非有限の値（NaN など）が混ざったフレームは無視する（状態も時刻も進めず、直前の出力を返す）
+//   raw に非有限の値（NaN など）が混ざったフレームは無視する（状態も時刻も進めず、直前の出力を返す。最初のフレームなら単位姿勢）
 import type { Pose, Quat, V3 } from "./slam-fusion";
 
 export type AnchorHoldOptions = {
@@ -54,6 +63,10 @@ export type AnchorHoldOptions = {
   posM: number;
   /** 止める判定の回転の閾値 [deg] */
   deg: number;
+  /** hold に入るとき、窓の前半と後半の平均の差を posM × driftRatio / deg × driftRatio 以内に求める（減速の尾・ゆっくりした動きで入らない） */
+  driftRatio: number;
+  /** hold から出る閾値の倍率（posM × exitRatio / deg × exitRatio。入る側より広げて閾値の際で往復しない） */
+  exitRatio: number;
   /** hold 中、閾値超えがこの時間続いたら follow へ [ms] */
   outMs: number;
   /** follow 中、raw がこの時間ほぼ動かなかったら hold へ [ms] */
@@ -85,6 +98,8 @@ export const DEFAULT_ANCHOR_HOLD: AnchorHoldOptions = {
   enabled: true,
   posM: 0.02,
   deg: 2.0,
+  driftRatio: 0.5,
+  exitRatio: 1.5,
   outMs: 250,
   inMs: 600,
   snapM: 0.3,
@@ -254,6 +269,17 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
     if (dist(off.pos, [0, 0, 0]) < CAUGHT_UP_M && quatAngleDeg(off.quat, [0, 0, 0, 1]) < CAUGHT_UP_DEG) off = null;
   }
 
+  /** ドリフト条件: 窓を時刻で前半・後半に分け、それぞれの平均の差が posM × driftRatio / deg × driftRatio 以内か */
+  function driftWithin(w: readonly { t: number; pose: Pose }[], nowMs: number): boolean {
+    const half = w[0].t + (nowMs - w[0].t) / 2;
+    const first = w.filter((p) => p.t < half).map((p) => p.pose);
+    const second = w.filter((p) => p.t >= half).map((p) => p.pose);
+    if (first.length === 0 || second.length === 0) return false;
+    const m1 = meanPose(first);
+    const m2 = meanPose(second);
+    return dist(m1.pos, m2.pos) <= opts.posM * opts.driftRatio && quatAngleDeg(m1.quat, m2.quat) <= opts.deg * opts.driftRatio;
+  }
+
   function finish(out: Pose, raw: Pose): Pose {
     devPosM = dist(raw.pos, out.pos);
     devDeg = quatAngleDeg(raw.quat, out.quat);
@@ -264,7 +290,7 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
   function update(raw: Pose, nowMs: number): Pose {
     if (!isFinitePose(raw) || !Number.isFinite(nowMs)) {
       // 非有限の raw は無視する（hold の継続時間・窓・時刻を進めない）
-      return lastOut ?? copyPose(raw);
+      return lastOut ?? { pos: [0, 0, 0], quat: [0, 0, 0, 1] };
     }
     const dt = started && Number.isFinite(lastMs) ? Math.max(0, nowMs - lastMs) : 0;
     lastMs = nowMs;
@@ -288,7 +314,7 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
       if (dPos > opts.snapM) {
         // 大きな飛び（再検出のスナップ・SLAM のリセット）: 即 follow、出力も即 raw
         enterFollow(raw, null);
-      } else if (dPos > opts.posM || dDeg > opts.deg) {
+      } else if (dPos > opts.posM * opts.exitRatio || dDeg > opts.deg * opts.exitRatio) {
         if (Number.isNaN(exceedSinceMs)) exceedSinceMs = nowMs;
         if (nowMs - exceedSinceMs >= opts.outMs) {
           // 閾値超えが outMs 続いた = 本当に動いた。直前の出力との差を持ったまま follow に入り、その差を縮めて寄せる（飛ばない）
@@ -307,6 +333,8 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
     // follow
     if (off) off = decayOffset(off, dt, opts.catchUpTauMs);
     const out = off ? applyOffset(raw, off) : copyPose(raw);
+    // inMs より長いフレーム落ちの後は窓を作り直す（何秒も前の点を平均に混ぜない）
+    if (dt > opts.inMs) win = [];
     win.push({ t: nowMs, pose: copyPose(raw) });
     // 窓は「最古の点が now − inMs 以前」を 1 点だけ残す（窓の長さが inMs 以上あるかを判定できるように）
     while (win.length >= 2 && nowMs - win[1].t >= opts.inMs) win.shift();
@@ -314,7 +342,7 @@ export function createAnchorHold(opts: AnchorHoldOptions): AnchorHold {
       const poses = win.map((w) => w.pose);
       const mean = meanPose(poses);
       const rms = spreadRms(poses, mean);
-      if (rms.posM <= opts.posM && rms.deg <= opts.deg) {
+      if (rms.posM <= opts.posM && rms.deg <= opts.deg && driftWithin(win, nowMs)) {
         // 窓の中心で止める（ぶれの端で止めない）。このフレームの出力は follow のままの out（差を持ち越すので飛ばない）
         enterHold(mean, out, nowMs);
       }
