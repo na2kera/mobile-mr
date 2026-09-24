@@ -73,6 +73,8 @@ export type MarkerAnchorOptions = {
 export type MarkerAnchor = {
   /** 描画ループから毎フレーム呼ぶ。新しい映像フレームがあり間引き条件を満たせば検出する */
   update(now: number): void;
+  /** 追跡座標系が変わったときに旧観測を捨て、次の新しい映像フレームで再スナップする */
+  invalidate?(): void;
   /** HUD 用（"id=0+1 err=0.03,0.05 spread=0.02m tilt=3deg Δ=0.02m 18ms" / "lost (1.2s)" / "searching"）。Δ は補正量（correctionM） */
   readonly info: string;
   /** 直近に観測を採用した時刻 [ms]。一度も無ければ -Infinity */
@@ -138,6 +140,14 @@ export function createMarkerAnchor(opts: MarkerAnchorOptions): MarkerAnchor {
     correctionM: 0,
     isTracking(now: number, lostMs: number) {
       return now - self.lastAcceptedMs <= lostMs;
+    },
+    invalidate() {
+      lastDetVideoTime = video.currentTime;
+      lastDetMs = -Infinity;
+      self.lastAcceptedMs = -Infinity;
+      self.everDetected = false;
+      self.usedIds = [];
+      self.info = "relock: searching";
     },
     update(now: number) {
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;

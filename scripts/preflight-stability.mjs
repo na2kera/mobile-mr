@@ -1,4 +1,4 @@
-// 比較実験（08-2〜08-8。docs/space-stability-options.md）を実機で試す前に、その方式が本当に動く状態かを確かめる。
+// 比較実験（08-2〜08-8、08-10。docs/space-stability-options.md）を実機で試す前に、その方式が本当に動く状態かを確かめる。
 // `node scripts/preflight-stability.mjs`（全方式）/ `node scripts/preflight-stability.mjs 08-4 08-5`（指定した方式だけ）。
 //
 // なぜ要るか: どの方式も「外部のものが読めなければ 08 と同じ経路に落ちる」フォールバックを持っている。
@@ -98,6 +98,19 @@ const METHODS = [
     ],
     hud: ["トラッカーの枠に人物が出て、割当が付く", "スマホの track= と self=(…)"],
   },
+  {
+    id: "08-10",
+    dir: "demos/08-10-splatoon-8thwall",
+    name: "8th Wall（SLAM 込みの配布バイナリ）",
+    needs: [
+      { path: "node_modules/@8thwall/engine-binary/dist/xr.js", minMB: 0.9, how: "npm ci" },
+      { path: "node_modules/@8thwall/engine-binary/dist/xr-slam.js", minMB: 5, how: "npm ci" },
+      { path: "node_modules/@8thwall/engine-binary/dist/LICENSE", minMB: 0, how: "npm ci" },
+    ],
+    ports: [5213, 9353],
+    physical: ["08 と同じ紙の ArUco"],
+    hud: ["mode=8thwall", "xr=NORMAL", "relock=ready", "marker=id=..."],
+  },
 ];
 
 /** 全方式で要るもの（08 と同じ） */
@@ -159,7 +172,7 @@ for (const m of methods) {
 
 console.log("\n== room 名 ==");
 console.log("  試行ごとに一意の room 名を使う（例: stability-08-4-r03）。");
-console.log("  08 / 08-2 / 08-4 / 08-5 / 08-6 / 08-7 は同じ WebSocket のパスを使うので、room 名が同じで設定も同じだと別方式の端末が混ざる。");
+console.log("  08 / 08-2 / 08-4 / 08-5 / 08-6 / 08-7 / 08-10 は同じ WebSocket のパスを使うので、room 名が同じで設定も同じだと別方式の端末が混ざる。");
 console.log("  空の room はサーバーに 60 秒残るので、同じ名前をすぐ再利用しない。");
 const vendor = at("public/vendor");
 if (existsSync(vendor)) {
