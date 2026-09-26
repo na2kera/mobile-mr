@@ -112,6 +112,8 @@ export async function openBackCameraStream(
 }
 
 export type PassthroughOptions = BackCameraOptions & {
+  /** 外部のカメラ所有者（8th Wall 等）が取得済みの video を共有する。getUserMedia は呼ばない */
+  existingVideo?: HTMLVideoElement;
   /** 指定があれば実カメラの代わりにこれを使う（?fakecam=1） */
   fakeStream?: () => MediaStream;
   /** 実カメラの水平 FOV [deg] の上書き（?camFov=）。未指定ならレンズ種別のラベルから推定 */
@@ -129,6 +131,8 @@ export type Passthrough = {
   readonly label: string;
   /** 実カメラの水平 FOV [deg]（長辺方向。マーカー姿勢推定・手の深度推定に使う） */
   readonly camHFovDeg: number;
+  /** 外部エンジンから推定した実際の水平 FOV を反映する */
+  setCamHFovDeg(fovDeg: number): void;
   /** HUD 用の要約（"1280x720 Back Ultra Wide Camera"） */
   readonly summary: string;
   /**
@@ -165,14 +169,18 @@ export async function startPassthrough(
   opts: PassthroughOptions,
   onProgress: (step: string) => void,
 ): Promise<Passthrough> {
-  const video = document.createElement("video");
+  const video = opts.existingVideo ?? document.createElement("video");
   video.playsInline = true;
   video.muted = true;
-  const stream = opts.fakeStream
-    ? opts.fakeStream()
-    : await openBackCameraStream(opts, onProgress);
-  video.srcObject = stream;
-  await video.play();
+  const stream = opts.existingVideo
+    ? (video.srcObject as MediaStream | null)
+    : opts.fakeStream
+      ? opts.fakeStream()
+      : await openBackCameraStream(opts, onProgress);
+  if (!opts.existingVideo) {
+    video.srcObject = stream;
+    await video.play();
+  }
   onProgress("play-ok");
   const texture = new THREE.VideoTexture(video);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -199,8 +207,8 @@ export async function startPassthrough(
   // 遅れて届くので、video 側の resize でも補正を取り直す（PAIN_POINTS 参照）
   video.addEventListener("resize", updateCover);
 
-  const label = stream.getVideoTracks()[0]?.label ?? "";
-  const camHFovDeg =
+  const label = stream?.getVideoTracks()[0]?.label ?? "";
+  let camHFovDeg =
     opts.camFovOverride ??
     (ULTRA_WIDE_LABEL.test(label) ? CAM_FOV_ULTRA_WIDE : CAM_FOV_WIDE);
 
@@ -208,7 +216,10 @@ export async function startPassthrough(
     video,
     texture,
     label,
-    camHFovDeg,
+    get camHFovDeg() { return camHFovDeg; },
+    setCamHFovDeg(fovDeg) {
+      if (Number.isFinite(fovDeg) && fovDeg > 0 && fovDeg < 180) camHFovDeg = fovDeg;
+    },
     summary: `${video.videoWidth}x${video.videoHeight} ${label}`.trim(),
     updateCover,
     displayViewMapping(fovDeg) {
