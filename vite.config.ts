@@ -221,6 +221,10 @@ export default defineConfig({
         "demo-08-8-splatoon-pose-cam": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/index.html", import.meta.url)),
         "demo-08-8-splatoon-pose-cam-overview": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/overview.html", import.meta.url)),
         "demo-08-8-splatoon-pose-cam-markers": fileURLToPath(new URL("./demos/08-8-splatoon-pose-cam/markers.html", import.meta.url)),
+        // 08-9: 08-4 の board + 08-7 の SLAM + 静止中はアンカーを止める
+        "demo-08-9-splatoon-hold": fileURLToPath(new URL("./demos/08-9-splatoon-hold/index.html", import.meta.url)),
+        "demo-08-9-splatoon-hold-overview": fileURLToPath(new URL("./demos/08-9-splatoon-hold/overview.html", import.meta.url)),
+        "demo-08-9-splatoon-hold-markers": fileURLToPath(new URL("./demos/08-9-splatoon-hold/markers.html", import.meta.url)),
         "demo-08-10-splatoon-8thwall": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/index.html", import.meta.url)),
         "demo-08-10-splatoon-8thwall-overview": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/overview.html", import.meta.url)),
         "demo-08-10-splatoon-8thwall-markers": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/markers.html", import.meta.url)),
