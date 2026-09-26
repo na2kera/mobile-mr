@@ -23,6 +23,8 @@
     "check:splatoon-alva": "node scripts/headless-08-7-alva.mjs",
     "test:pose-cam": "node scripts/test-08-8-pose-cam.mjs",
     "check:pose-cam": "node scripts/headless-08-8-pose-cam.mjs",
+    "test:8thwall": "node scripts/test-08-10-xr.mjs",
+    "check:8thwall": "node scripts/headless-08-10-8thwall.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",
@@ -56,6 +58,7 @@
     "ws": "^8.21.3"
   },
   "dependencies": {
+    "@8thwall/engine-binary": "1.0.0",
     "@mediapipe/tasks-vision": "^1.0.1",
     "js-aruco2": "^2.0.0",
     "three": "^0.185.1",

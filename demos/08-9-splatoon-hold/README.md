@@ -129,7 +129,7 @@ npm ci && npm run fetch:models && npm run fetch:opencv && npm run fetch:alva
 node scripts/preflight-stability.mjs 08-9
 npx tsc --noEmit && npx vite build
 npm run test:08-9-hold      # Node: anchor-hold.ts の状態機械（下の表）
-npm run check:08-9-hold     # ヘッドレス Chrome（既定 PORT=5213 CDP_PORT=9352。先に lsof -nP -iTCP:5213 -sTCP:LISTEN / :9352 で空きを確認）
+npm run check:08-9-hold     # ヘッドレス Chrome（既定 PORT=5215 CDP_PORT=9352。先に lsof -nP -iTCP:5215 -sTCP:LISTEN / :9352 で空きを確認）
 ```
 
 `test:08-9-hold` の内容（合成の raw を流す。乱数は種を固定）:

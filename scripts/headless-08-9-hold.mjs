@@ -1,5 +1,5 @@
 // demos/08-9-splatoon-hold（08-4 の board + solvePnP + 08-7 の SLAM + 静止中はアンカーを止める）のブラウザ経路をヘッドレス Chrome で確認する。
-// `npm run check:08-9-hold` で実行する（既定 PORT=5213 CDP_PORT=9352。回す前に lsof -nP -iTCP:5213 -sTCP:LISTEN / :9352 で空きを確かめる）。
+// `npm run check:08-9-hold` で実行する（既定 PORT=5215 CDP_PORT=9352。回す前に lsof -nP -iTCP:5215 -sTCP:LISTEN / :9352 で空きを確かめる）。
 // 仕組みは headless-08-7-alva.mjs と同じ（CDP を ws で直接叩く。Chrome が無ければスキップ）。確認すること:
 //   (1) OpenCV.js の経路（HUD の pose=opencv）で位置合わせしている（フォールバックしていない）
 //   (2) ページ内で __fakeMarkers.camPos に毎フレーム ±1cm のノイズを入れても、1 秒後からは自分の位置（__hold.self = HUD の self= の mm 版）が
@@ -18,7 +18,7 @@ import WebSocket from "ws";
 
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 // 別の worktree で同時に走らせるときは PORT / CDP_PORT で変える（同じポートだと別のコードを確認してしまう）
-const PORT = Number(process.env.PORT ?? "") || 5213;
+const PORT = Number(process.env.PORT ?? "") || 5215;
 const CDP_PORT = Number(process.env.CDP_PORT ?? "") || 9352;
 const BASE = `https://localhost:${PORT}/demos/08-9-splatoon-hold/`;
 // markerMm=100 / fakeMarkerPx=80: 08-7 の確認と同じ幾何（合成カメラは原点マーカーの正面 0.74m）

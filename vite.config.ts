@@ -1,4 +1,6 @@
 import { fileURLToPath, URL } from "node:url";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 // 拡張子付き import なのは Vite の configLoader: native 対応（拡張子なしだと
@@ -76,6 +78,40 @@ function jsAruco2Esm(): Plugin {
   };
 }
 
+// 8th Wall の配布ファイルを package から同じ相対パスで配信する。
+// xr.js は xr-slam.js と resources/ を自身の URL から解決する。
+function eighthWallAssets(): Plugin {
+  const root = fileURLToPath(new URL("./node_modules/@8thwall/engine-binary/dist/", import.meta.url));
+  const prefix = "/vendor/8thwall/";
+  const files = (dir = ""): string[] => readdirSync(join(root, dir)).flatMap((name) => {
+    const relative = join(dir, name);
+    return statSync(join(root, relative)).isDirectory() ? files(relative) : [relative];
+  });
+  const assetFiles = files();
+  const assetSet = new Set(assetFiles);
+  const serve: Plugin["configureServer"] = (server) => {
+    server.middlewares.use((req, res, next) => {
+      const rawPath = (req.url ?? "").split("?")[0];
+      if (!rawPath.startsWith(prefix)) return next();
+      let path: string;
+      try { path = decodeURIComponent(rawPath); }
+      catch { res.statusCode = 400; res.end("Invalid URL"); return; }
+      const relative = path.slice(prefix.length);
+      if (!assetSet.has(relative)) return next();
+      const contentType = relative.endsWith(".js") ? "text/javascript" : relative.endsWith(".svg") ? "image/svg+xml" : relative.endsWith("LICENSE") ? "text/plain" : "application/octet-stream";
+      res.setHeader("Content-Type", contentType);
+      res.end(readFileSync(join(root, relative)));
+    });
+  };
+  return {
+    name: "eighth-wall-assets",
+    configureServer: serve,
+    generateBundle() {
+      for (const file of assetFiles) this.emitFile({ type: "asset", fileName: `vendor/8thwall/${file}`, source: readFileSync(join(root, file)) });
+    },
+  };
+}
+
 // iOS Safari はセンサー/カメラ API が HTTPS 必須のため、dev サーバーを
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
@@ -83,6 +119,7 @@ export default defineConfig({
     roomListenerLimit(),
     basicSsl(),
     jsAruco2Esm(),
+    eighthWallAssets(),
     sharedRoomServer(),
     volleyballServer(),
     dartsServer(),
@@ -188,6 +225,9 @@ export default defineConfig({
         "demo-08-9-splatoon-hold": fileURLToPath(new URL("./demos/08-9-splatoon-hold/index.html", import.meta.url)),
         "demo-08-9-splatoon-hold-overview": fileURLToPath(new URL("./demos/08-9-splatoon-hold/overview.html", import.meta.url)),
         "demo-08-9-splatoon-hold-markers": fileURLToPath(new URL("./demos/08-9-splatoon-hold/markers.html", import.meta.url)),
+        "demo-08-10-splatoon-8thwall": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/index.html", import.meta.url)),
+        "demo-08-10-splatoon-8thwall-overview": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/overview.html", import.meta.url)),
+        "demo-08-10-splatoon-8thwall-markers": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/markers.html", import.meta.url)),
       },
     },
   },
