@@ -9,7 +9,10 @@
 //      1 秒未満の LIMITED では窓を捨てない（ign= が増え direct= は増えない）
 //   4. 姿勢欠損・不正 intrinsics・例外: どれも再ロック不要でコートが出たまま。例外は画面の主表示に出る
 //   5. main スレッドの停止・映像停止（repeatFrame）: 再ロック不要（姿勢の鮮度切れで invalidate しない）
-//   6. 端末の向き変更・映像サイズ変更・ウィンドウ resize・タブ復帰・bfcache 復帰: 再ロックが要求され、マーカーを見ると戻る（inv= に原因別の回数）
+//   6. 端末の向き変更・映像サイズ変更・ウィンドウ resize・タブ復帰・bfcache 復帰: 再ロックが要求され、マーカーを見ると戻る（inv= に原因別の回数）。
+//      モックは原点のリセットで world をずらし、直後の 2 フレームは古い原点の reality を返すので、再ロックが新しい原点で行われたか
+//      （古い原点で再ロックすると self= がオフセット分ずれる）を毎フレーム見張る（レビュー R3）
+//   2b. マーカーを見失って歩いて戻ると reacquire（保持していた目標との差）が HUD とログに出る（レビュー R2）
 //   7. 実バイナリ（/vendor/8thwall/）の配信と読み込みの smoke・先行読み込み（08-10 と同じ）
 //   8. ぶれの比較: 合成映像を描くカメラだけにノイズ（?fakeMarkerNoise=）+ 8th Wall のモックの姿勢にもノイズ（?fakeXrNoise=）を入れ、
 //      ?avg=1 と ?avg=0 でアンカー（コートのワールド位置）と self=（field 座標系の自分の位置）の変動を数値で比べる
@@ -283,6 +286,25 @@ try {
       return true;
     })()`);
   const visibleSeen = (p) => p.eval("({ hidden: window.__visWatch?.hidden ?? -1, frames: window.__visWatch?.frames ?? -1 })");
+  /** コートが出ている（ready）フレームの self= の、正解（合成カメラの位置）からの最大のずれを毎フレーム見張る（R3） */
+  const watchSelf = (p, truth) =>
+    p.eval(`(() => {
+      if (window.__selfWatch) cancelAnimationFrame(window.__selfWatch.raf);
+      const t = ${JSON.stringify(truth)};
+      const w = { max: 0, frames: 0, raf: 0 };
+      const tick = () => {
+        if (window.__board.ready()) {
+          const s = window.__board.self();
+          w.max = Math.max(w.max, Math.hypot(s[0] - t[0], s[1] - t[1], s[2] - t[2]));
+          w.frames++;
+        }
+        w.raf = requestAnimationFrame(tick);
+      };
+      w.raf = requestAnimationFrame(tick);
+      window.__selfWatch = w;
+      return true;
+    })()`);
+  const selfSeen = (p) => p.eval("({ max: window.__selfWatch?.max ?? -1, frames: window.__selfWatch?.frames ?? -1 })");
   /** 条件を満たすまで HUD を読み直す */
   async function waitHud(p, pred, timeoutMs = 10000) {
     const t0 = Date.now();
@@ -350,6 +372,13 @@ try {
   await setCam(pA, START_POS);
   await pA.eval("window.__fakeMarkers.hidden.delete(0); true");
   await sleep(2000);
+  {
+    // 歩いて戻った: 窓は 3 秒以上観測が無かったので空になっており、最初の観測で reacquire（保持していた目標との差）が出る
+    const h = await readHud(pA);
+    const reacq = h.avgLine.match(/reacq=(\d+)mm\/([\d.]+)deg\(gap ([\d.]+)s\)/);
+    console.log(`歩いて戻った A: ${h.avgLine}`);
+    check("歩いて戻ってマーカーを見ると HUD に reacq=（保持していた目標との差）が出て、差が小さい（< 3cm・空白 > 3 秒）", Boolean(reacq) && Number(reacq[1]) < 30 && Number(reacq[3]) > 3, reacq?.[0] ?? h.avgLine);
+  }
 
   // ---- 3. LIMITED: コートを出し続け、発射も止めない ----
   {
@@ -413,7 +442,7 @@ try {
   for (const [label, on, off, expectXr, extra] of [
     ["姿勢欠損（lost）", "x.lost = true", "x.lost = false", (h) => h.xr === "NO_REALITY", null],
     ["不正 intrinsics（badIntrinsics）", "x.badIntrinsics = true", "x.badIntrinsics = false", (h) => /badK/.test(h.xrLine), null],
-    ["onException（throw）", "x.throw = true", "x.throw = false", (h) => h.xr === "failed", async () => {
+    ["onException（throw）", "x.throw = true", "x.throw = false", (h) => /camera=exception/.test(h.xrLine), async () => {
       const msg = await board(pA, "return b.message();");
       check("onException: 画面の主表示に 8th Wall のエラーが出る（HUD だけでなく）", /カメラを開けません/.test(msg ?? "") && /8th Wall/.test(msg ?? ""), JSON.stringify(msg));
     }],
@@ -434,8 +463,10 @@ try {
     check(`${label}: 戻すと xr=NORMAL、その間コートは消えず relock=required を経由しない、未捕捉例外なし`, h2.relock === "ready" && vis.hidden === 0 && !seen.includes("required") && pA.exceptions.length === exBefore, `${h2.xrLine} vis=${JSON.stringify(vis)} 遷移=${JSON.stringify(seen)} exceptions=${pA.exceptions.slice(exBefore).join(" | ")}`);
   }
   {
+    const msgSoon = await board(pA, "return b.message();");
+    await sleep(3500);
     const msg = await board(pA, "return b.message();");
-    check("onException から戻ると主表示のエラーが消える", !/カメラを開けません/.test(msg ?? ""), JSON.stringify(msg));
+    check("onException から戻ってもエラーの主表示はすぐには消えず（1 フレームで消えない）、3 秒たつと消える（R9）", /カメラを開けません/.test(msgSoon ?? "") && !/カメラを開けません/.test(msg ?? ""), `${JSON.stringify(msgSoon)} → ${JSON.stringify(msg)}`);
   }
 
   // ---- 5. main スレッドの停止・映像停止: 再ロック不要 ----
@@ -470,12 +501,19 @@ try {
   // ---- 6. 原点が変わる出来事: 再ロックが要求され、マーカーを見ると戻る ----
   {
     await watchRelock(pA);
+    const stale0 = await fakeXr(pA, "return x.staleRealities;");
     const rotated = await fakeXr(pA, "return x.rotateDevice();");
-    await sleep(300);
+    await sleep(50);
+    await watchSelf(pA, START_POS);
+    await sleep(250);
     const h = await waitHud(pA, (h) => h.relock === "ready", 8000);
+    await sleep(3000);
     const seen = await relockSeen(pA);
-    console.log(`rotateDevice A: ${show(h)} relock遷移=${JSON.stringify(seen)}`);
+    const selfW = await selfSeen(pA);
+    const stale1 = await fakeXr(pA, "return x.staleRealities;");
+    console.log(`rotateDevice A: ${show(h)} relock遷移=${JSON.stringify(seen)} self の最大のずれ=${(selfW.max * 1000).toFixed(1)}mm（${selfW.frames} フレーム）古い原点の reality ${stale1 - stale0} 件`);
     check("端末の向き変更（rotateDevice）: relock=required → マーカー再観測で ready・inv= の orientation が 1", rotated === true && seen.includes("required") && h.relock === "ready" && h.inv.orientation === 1, `遷移=${JSON.stringify(seen)} inv=${JSON.stringify(h.inv)}`);
+    check("向き変更の後の再ロックは新しい原点で行われる（モックが古い原点の reality を返しても、再ロック後の self= が一度も正解から 5cm 以上ずれない。R3）", stale1 - stale0 >= 1 && selfW.frames > 30 && selfW.max < 0.05, `古い原点の reality ${stale1 - stale0} 件 / self の最大のずれ ${(selfW.max * 1000).toFixed(1)}mm`);
     // マーカーを隠したまま向きを変えると、見るまで戻らない
     await pA.eval("window.__fakeMarkers.hidden.add(0); true");
     await sleep(500);
@@ -490,13 +528,17 @@ try {
   {
     await watchRelock(pA);
     const r = await fakeXr(pA, "return x.setVideoSize(800, 600);");
-    await sleep(2500);
+    await sleep(100);
+    await watchSelf(pA, START_POS);
+    await sleep(2400);
     const after = await waitHud(pA, (h) => h.relock === "ready", 8000);
     const seen = await relockSeen(pA);
     const info = await fakeXr(pA, "return { projection: x.projection?.cam, video: [x.video?.videoWidth, x.video?.videoHeight], canvas: [document.querySelector('#xr-canvas').width, document.querySelector('#xr-canvas').height] };");
     console.log(`video size A: ${show(after)} relock遷移=${JSON.stringify(seen)} ${JSON.stringify(info)}`);
     check("setVideoSize(800x600): relock=required を経て、マーカー再観測で ready・inv= の projection が 1", r === "800x600" && seen.includes("required") && after.relock === "ready" && after.inv.projection === 1, `遷移=${JSON.stringify(seen)} inv=${JSON.stringify(after.inv)}`);
     check("setVideoSize: 投影の pixelRect と XR 用 canvas が 800x600・sq=1.000・self= が原点正面（±5cm）", info?.projection?.pixelRectWidth === 800 && info.canvas[0] === 800 && after.sq === 1 && dist(after.self, START_POS) < 0.05, `${JSON.stringify(info)} self=${JSON.stringify(after.self)}`);
+    const selfV = await selfSeen(pA);
+    check("setVideoSize の後の再ロックも新しい原点で行われる（self= が一度も 5cm 以上ずれない。R3）", selfV.frames > 30 && selfV.max < 0.05, `self の最大のずれ ${(selfV.max * 1000).toFixed(1)}mm（${selfV.frames} フレーム）`);
     await watchRelock(pA);
     await pA.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 500, deviceScaleFactor: 1, mobile: false });
     await sleep(1500);
@@ -526,7 +568,7 @@ try {
     const lines = `${rotated}\n${text}`.split("\n").filter((l) => l.slice(0, 24) >= TEST_START_ISO && l.includes("[8thwall-board-phone@"));
     const states = lines.filter((l) => / state: xr=/.test(l) && / avg=/.test(l) && / det=/.test(l) && / inv=/.test(l) && / jump=/.test(l) && / fps=/.test(l));
     const has = (re) => lines.some((l) => re.test(l));
-    const kinds = ["filter-config", "opencv backend=opencv", "camera video=", "intrinsics p=", "relock ", "limited-start", "limited-end", "direct-enter", "window-restart", "invalidate cause=orientation", "invalidate cause=projection", "invalidate cause=visibility", "relock-required", "xr-exception"];
+    const kinds = ["reacquire gapMs=", "filter-config", "opencv backend=opencv", "camera video=", "intrinsics p=", "relock ", "limited-start", "limited-end", "direct-enter", "window-restart", "invalidate cause=orientation", "invalidate cause=projection", "invalidate cause=visibility", "relock-required", "xr-exception"];
     const missing = kinds.filter((k) => !has(new RegExp(`\\[08-11\\] event=${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)));
     console.log(`logs/client.log: 08-11 の行 ${lines.length}（snapshot ${states.length}）。例: ${states.at(-1)?.slice(0, 220) ?? "(なし)"}`);
     check("logs/client.log に A の snapshot（xr= jump= inv= det= avg= fps=）が 1 秒ごとに書かれている（10 行以上）", states.length >= 10, `${states.length} 行`);
@@ -640,21 +682,27 @@ try {
     const [a1, a0] = samples.map((s) => spread(s.anchor));
     const [s1, s0] = samples.map((s) => spread(s.self));
     const huds = await Promise.all(noisePages.map(readHud));
+    const xrJit = huds.map((h) => Number(h.xrLine.match(/xrJit=([\d.]+)mm/)?.[1] ?? NaN));
+    console.log(`  xrJit=（8th Wall 自体のぶれ）: N1 ${xrJit[0]}mm / N0 ${xrJit[1]}mm`);
     console.log(`ぶれ（${label}）: anchor RMS avg=1 ${a1.rms.toFixed(1)}mm（最大 ${a1.max.toFixed(1)}mm） / avg=0 ${a0.rms.toFixed(1)}mm（最大 ${a0.max.toFixed(1)}mm）`);
     console.log(`                 self=  RMS avg=1 ${s1.rms.toFixed(1)}mm（最大 ${s1.max.toFixed(1)}mm） / avg=0 ${s0.rms.toFixed(1)}mm（最大 ${s0.max.toFixed(1)}mm）`);
     console.log(`  N1: ${huds[0].avgLine} | ${huds[0].detLine}`);
     console.log(`  N0: ${huds[1].avgLine} | ${huds[1].detLine}`);
-    return { ok: ok.every(Boolean) && huds[0].avgMode === "avg" && huds[1].avgMode === "lerp", a1, a0, s1, s0, n: samples.map((s) => s.anchor.length) };
+    return { ok: ok.every(Boolean) && huds[0].avgMode === "avg" && huds[1].avgMode === "lerp", a1, a0, s1, s0, xrJit, n: samples.map((s) => s.anchor.length) };
   }
   {
     const m = await measure("fakeMarkerNoise=0.01&fakeXrNoise=0.002", "マーカー側 σ=1cm + 8th Wall σ=2mm");
     check("ぶれの比較（マーカー側 σ=1cm + 8th Wall σ=2mm）: 両方 relock=ready・avg=avg / avg=lerp で 80 サンプル", m.ok && m.n.every((n) => n >= 70), `n=${m.n}`);
     check("ぶれの比較（マーカー側 σ=1cm）: avg=1 のアンカーの変動（RMS）が avg=0 の半分未満", m.a1.rms < m.a0.rms * 0.5, `avg=1 ${m.a1.rms.toFixed(1)}mm vs avg=0 ${m.a0.rms.toFixed(1)}mm`);
     check("ぶれの比較（マーカー側 σ=1cm）: avg=1 の self= の変動（RMS）が avg=0 より明確に小さい（0.7 倍未満）", m.s1.rms < m.s0.rms * 0.7, `avg=1 ${m.s1.rms.toFixed(1)}mm vs avg=0 ${m.s0.rms.toFixed(1)}mm`);
+    check("xrJit=（8th Wall 自体のぶれ）: モックの姿勢ノイズ 各軸 σ=2mm のとき 5mm 未満（√3·σ ≈ 3.5mm。R11）", m.xrJit.every((v) => v < 5), `${m.xrJit.join(" / ")}mm`);
   }
   {
     const m = await measure("fakeMarkerNoise=0&fakeXrNoise=0.01", "8th Wall σ=1cm のみ");
     check("ぶれの比較（8th Wall σ=1cm のみ）: 両方 relock=ready で 80 サンプル", m.ok && m.n.every((n) => n >= 70), `n=${m.n}`);
+    // モックのノイズは各軸 σ なので、3D の RMS は √3·σ ≈ 17mm
+    // 3 秒ぶんの標本の RMS なので回ごとに ±20% ほどばらつく（実測 16〜20mm）
+    check("xrJit=（8th Wall 自体のぶれ）: モックの姿勢ノイズ 各軸 σ=1cm のとき 10〜30mm（1 秒移動平均からの 3D の RMS ≈ √3·σ ≈ 17mm。R11）", m.xrJit.every((v) => v >= 10 && v <= 30), `${m.xrJit.join(" / ")}mm`);
     check("ぶれの比較（8th Wall σ=1cm のみ）: avg=1 のアンカー（コートのワールド位置）の変動が avg=0 の半分未満", m.a1.rms < m.a0.rms * 0.5, `avg=1 ${m.a1.rms.toFixed(1)}mm vs avg=0 ${m.a0.rms.toFixed(1)}mm（self= は avg=1 ${m.s1.rms.toFixed(1)}mm / avg=0 ${m.s0.rms.toFixed(1)}mm。カメラ自体のノイズは self= に残る）`);
   }
   const noiseEx = noisePages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
