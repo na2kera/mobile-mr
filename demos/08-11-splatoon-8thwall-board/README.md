@@ -4,6 +4,22 @@
 [docs/space-stability-options.md](../../docs/space-stability-options.md) §5 の表の 08-11。ゲーム（コート・インク・タンク・練習 → 俯瞰画面の「対戦開始」→ 対戦 → 結果）、
 UI、サーバー（`server/splatoon.ts`。同じプロトコル・同じ WebSocket のパス）は 08 / 08-10 のままです。
 
+## 実機の結果（2026-09-27、iPhone・iOS 18.7 Safari）
+
+**8th Wall が一度も `NORMAL` にならず、コートが大きくずれた。窓平均は一度も動いていない。** スプラトゥーンの比較はここで一時中断している。
+
+- 8th Wall は全試行（ページを開いた回数で 10 回以上）で `xr=LIMITED INITIALIZING`（空間を認識中）のまま、`NORMAL` に一度もならなかった（1 回あたり 20〜85 秒）。
+- 認識中の姿勢は 1 フレーム（約 30ms）で 20cm〜1.7m 飛んだ（`jump` 52 回、`xrJit=` 120〜830mm）。「LIMITED 中も表示を続ける」方針なので、コートはこのでたらめな姿勢に沿って動いた。
+- 窓は `NORMAL` の観測しか使わないので、最後まで `avg=direct n=0`。`?avg=0` も同じ理由でずれた。
+- マーカーの検出自体は動いていた（OpenCV で 5 秒あたり 30〜46 回検出、`cv=` 20〜42ms）。画面の更新は毎秒 15〜26 回。
+- 切り分け:
+  - `?detector=aruco2`（OpenCV なし）と `?markerIntervalMs=300` でも `INITIALIZING` のままだった → OpenCV の重さは主因ではない。
+  - 同じ部屋で「体ごと横に 20〜30cm ゆっくり平行移動」すると **08-10 は `NORMAL` になった**（ただしコートのぶれは大きい。08-10 にはログが無く出所は未確定）。**08-11 は同じ動かし方でも `LIMITED` のまま**だった。
+  - 8th Wall への指示（configure・pipeline・`runPreRender` / `runPostRender`・canvas 寸法）は 08-10 と同じことをコードで確認済み。
+- 未確定の仮説: 08-10 は認識中はマーカー検出を止めている（`NORMAL` のときだけ検出）が、08-11 は認識中も毎秒 10 回検出を回しているので、8th Wall の認識に使える処理時間やフレームが足りない可能性。
+  切り分けの URL（`?detector=aruco2&markerIntervalMs=2000&fakehands=1`）はまだ試していない。
+- 設計の穴（確定）: 「認識中（`INITIALIZING`。一度も `NORMAL` になっていない）」を「一時的な `LIMITED`」と同じ扱いにしていた。認識中の姿勢は追跡の結果ではないので使ってはいけない。直すなら「`NORMAL` になるまでマーカー検出を止め、コートを隠して『体ごと横にゆっくり動かしてください』と案内する」（08-10 と同じ扱い。Codex も同じ案を推奨）。
+
 ## 目的
 
 - 08-4（OpenCV の ArucoDetector + 全マーカーを 1 つの board にして solvePnP）は iPhone 実機で「コートの位置のずれは小さいが、止まって見ていても数 cm ぶれる」。
