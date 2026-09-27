@@ -638,3 +638,24 @@
 - **どう対処したか**: `server/splatoon-pose-cam.ts` で 08-3 の plugin の `configureServer` / `configurePreviewServer` を呼ぶときに、httpServer を Proxy で包んで `"upgrade"` の購読だけを差し替え、08-8 のパスへの接続を「URL だけ 08-3 のパスにした req」（元の req を prototype にした `Object.create`。元の req は書き換えないので本物の 08-3 のサーバーや Vite の HMR は影響を受けない）で渡した。Room の状態は別インスタンスになることを Node テストで確認した。副作用として "upgrade" の購読が既定の上限 10 を超えて `MaxListenersExceededWarning` が出たので、上限を 1 つ広げた。ログの接頭辞は 08-3 と同じ `[splatoon-oi]` のまま
 - **SDK ならどう解決するか（案）**: Room サーバーは「spec（メッセージ・検証・状態）」と「どこに・どの名前で載せるか（パス・ログの接頭辞・上限）」を分け、spec を export して `mount(spec, { path, tag })` の形で何度でも載せられるようにする。1 つの httpServer に "upgrade" のハンドラを N 個ぶら下げるのではなく、パス → spec の表を持つ 1 つのルーターにする（購読の上限の警告も出ない）。PAIN_POINTS「[2026-09-16] 08-3 … 役割（tracker）とメッセージを 1 つ足すために、08 のサーバー 370 行と game-client を丸ごとコピーした」の続き
 - **関連**: `server/splatoon-pose-cam.ts` の `rerouteUpgrades`、`server/room-server.ts` の `roomServerPlugin` / `attach`、`scripts/test-08-8-pose-cam.mjs` の「サーバー: 同じ room 名でも 08-3 のパスとは別の Room」
+
+## [2026-09-27] 08-11 / 08-11-splatoon-8thwall-board: マーカーのアンカーが「推定 + 平滑化 + Object3D への書き込み」を一体で持っていて、生の観測を取り出すのに回り道が要る
+
+- **何が苦しかったか**: 08-11 は「OpenCV の board + solvePnP の 1 回ごとの観測（コートのワールド姿勢）」を窓に貯めて平均したい。ところが `MarkerAnchor`（`marker-anchor.ts` / `marker-anchor-opencv.ts`）は観測を返す API を持たず、渡された `anchor`（`THREE.Object3D`）に lerp（`smooth`）・スナップの判定・連射中の `canSnap` まで済ませた姿勢を直接書く。「観測が来た」ことも `lastAcceptedMs` の変化で外から推測するしかない。診断（試行・検出・採用の回数、棄却理由）も HUD 用の文字列 `info` にしか無く、数えるには shared にカウンタを足す必要があった
+- **どう対処したか**: 非表示の `rawAnchor` を渡して `smooth=1`・`canSnap: () => true` にし（毎回の観測をそのまま写す）、描画ループで `lastAcceptedMs` が変わったフレームに `rawAnchor` のワールド姿勢を読んで窓平均フィルタ（`anchor-filter.ts`）に入れる。`marker-anchor-opencv.ts` には振る舞いを変えない読み取り専用の `counters` だけ足した。副作用として HUD の `Δ=` の意味が「表示との差」から「前回の生の観測との差」に変わる（README に明記）
+- **SDK ならどう解決するか（案）**: マーカー推定は「観測（タイムスタンプ・姿勢・使った ID・誤差・信頼度）を返すだけ」にし、平滑化・窓平均・連射中の制限は別の層（`AnchorFilter`）にする。検出の試行・棄却理由はイベント / カウンタとして構造化して出す（08-7 の較正で「生の観測と時刻が欲しい」と書いたのと同じ要求。2 回目）
+- **関連**: `demos/08-11-splatoon-8thwall-board/main.ts` の `rawAnchor` / `onObservation`、`src/shared/marker-anchor-opencv.ts` の `counters`、PAIN_POINTS「[2026-09-17] 08-7 … マーカーの推定の遅れと鏡像解がそのまま変換に入る」
+
+## [2026-09-27] 08-11 / 08-11-splatoon-8thwall-board: 8th Wall の trackingStatus からは「原点を保っているか」が分からず、LIMITED を全部「座標系が変わった」扱いにすると使えない
+
+- **何が苦しかったか**: 08-10 は LIMITED・姿勢 500ms 超のたびに invalidate（コートを隠してマーカーで再ロック）していたので、実機では「マーカーから目を離す・少し離れるだけで『マーカーを見てください』」になった。一方で 8th Wall の API（`reality.trackingStatus` / `trackingReason`）は追跡の質を言うだけで、LIMITED を越えて原点（ワールド座標系）が保たれるかは書かれていない。確実に原点が変わるのは `updateCameraProjectionMatrix`・端末の向き変更などで、これもドキュメントではなく挙動から拾うしかない
+- **どう対処したか**: invalidate は「原点が確実に変わる出来事」（向き変更・投影更新・タブ復帰・bfcache・カメラ失敗）だけにし、LIMITED 中はコートを出し続ける。代わりに診断として「姿勢の飛び」（連続する 2 回の有効な姿勢の差が 0.2m / 15° 以上。LIMITED 復帰から 1 秒以内を区別）と LIMITED の回数・長さを HUD と実機ログに出し、実機で原点が保たれるかを測る（未解決。実機未確認）
+- **SDK ならどう解決するか（案）**: `PoseSource` の状態を「追跡の質（NORMAL / LIMITED）」と「座標系の世代（原点が変わったら増える番号）」の 2 本に分けて返させる。外部 SLAM が世代を出さないなら、SDK が飛びの検出とマーカーでの再照合で世代を推定し、アプリは世代の変化だけを見て再ロックする（08-7 の PAIN_POINTS の「リセット = 座標系が変わった」を型で返す案の具体化）
+- **関連**: `demos/08-11-splatoon-8thwall-board/xr-source.ts` の `invalidate` / `jumps`、`demos/08-10-splatoon-8thwall/main.ts` の旧 invalidate の条件、`demos/08-11-splatoon-8thwall-board/README.md` の「実機で確認すること」
+
+## [2026-09-27] 08-11 / remote-log: ヘッドレス確認と実機確認が同じ logs/client.log に書くので、実機のログに PC の確認の行が混ざる
+
+- **何が苦しかったか**: 実機ログ（`src/shared/remote-log.ts` → `server/client-log.ts`）はリポジトリの `logs/client.log` 1 本に追記する。08-11 の headless 確認は「ログに snapshot とイベントが書かれること」を確かめるため実際に書くので、同じ時間帯にユーザーが実機（別ポートの dev サーバー）で試していると、同じファイルに同じタグ（`8thwall-board-phone`）の行が混ざる。区別できるのは行の `@<IP>`（ヘッドレスは `::1`）と開始行の URL（room 名）だけ
+- **どう対処したか**: headless では 1 ページだけログを書き（他は `?remoteLog=0`）、room 名を `check-8thwall-board` にして開始行で区別できるようにした。ファイルを分ける仕組みは未対応（未解決）
+- **SDK ならどう解決するか（案）**: ログの送り先をセッション（端末 + ページの読み込み）単位のファイルにする、または行にセッション ID を必ず付けて、読む側のツール（`grep` ではなく小さなビューア）でセッションごとに絞れるようにする。dev サーバーのポートごとにファイルを分けるオプションも持つ
+- **関連**: `src/shared/remote-log.ts`、`server/client-log.ts`、`scripts/headless-08-11-8thwall-board.mjs` の「9. 実機ログ」
