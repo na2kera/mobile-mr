@@ -25,6 +25,8 @@
     "check:pose-cam": "node scripts/headless-08-8-pose-cam.mjs",
     "test:8thwall": "node scripts/test-08-10-xr.mjs",
     "check:8thwall": "node scripts/headless-08-10-8thwall.mjs",
+    "test:8thwall-board": "node scripts/test-08-11-board.mjs",
+    "check:8thwall-board": "node scripts/headless-08-11-8thwall-board.mjs",
     "test:godhand": "node scripts/test-godhand.mjs",
     "check:godhand": "node scripts/headless-godhand.mjs",
     "test:person": "node scripts/test-person.mjs",

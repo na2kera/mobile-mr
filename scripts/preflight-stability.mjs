@@ -1,4 +1,4 @@
-// 比較実験（08-2〜08-10。docs/space-stability-options.md）を実機で試す前に、その方式が本当に動く状態かを確かめる。
+// 比較実験（08-2〜08-11。docs/space-stability-options.md）を実機で試す前に、その方式が本当に動く状態かを確かめる。
 // `node scripts/preflight-stability.mjs`（全方式）/ `node scripts/preflight-stability.mjs 08-4 08-5`（指定した方式だけ）。
 //
 // なぜ要るか: どの方式も「外部のものが読めなければ 08 と同じ経路に落ちる」フォールバックを持っている。
@@ -129,6 +129,24 @@ const METHODS = [
     physical: ["08 と同じ紙の ArUco"],
     hud: ["mode=8thwall", "xr=NORMAL", "relock=ready", "marker=id=..."],
   },
+  {
+    id: "08-11",
+    dir: "demos/08-11-splatoon-8thwall-board",
+    name: "8th Wall SLAM + OpenCV board + 窓平均（止まっている間のぶれを抑える）",
+    needs: [
+      { path: "public/vendor/opencv/opencv.js", minMB: 5, how: "npm run fetch:opencv" },
+      { path: "node_modules/@8thwall/engine-binary/dist/xr.js", minMB: 0.9, how: "npm ci" },
+      { path: "node_modules/@8thwall/engine-binary/dist/xr-slam.js", minMB: 5, how: "npm ci" },
+      { path: "node_modules/@8thwall/engine-binary/dist/LICENSE", minMB: 0, how: "npm ci" },
+    ],
+    ports: [5214, 9354],
+    physical: ["08 と同じ紙の ArUco（複数枚。原点 + 壁 / 床）", "実機ログを見る PC（dev サーバーの logs/client.log）"],
+    hud: [
+      "det=opencv …（先頭に !! FALLBACK が出ていたら js-aruco2 で動いている = 比較が無効）",
+      "xr=NORMAL → relock=ready",
+      "止まって数秒で avg=avg n=20〜40（?avg=0 なら avg=lerp）",
+    ],
+  },
 ];
 
 /** 全方式で要るもの（08 と同じ） */
@@ -151,7 +169,8 @@ function portFree(port) {
   });
 }
 
-const want = process.argv.slice(2).map((s) => s.replace(/^demos\//, "").slice(0, 4));
+// "08-4" / "demos/08-4-splatoon-opencv" / "08-11-splatoon-8thwall-board" → "08-4" / "08-11"（先頭 4 文字で切ると 08-10 / 08-11 が "08-1" になって選べない）
+const want = process.argv.slice(2).map((s) => s.replace(/^demos\//, "").match(/^\d+(?:-\d+)?/)?.[0] ?? s);
 const methods = METHODS.filter((m) => want.length === 0 || want.includes(m.id));
 if (methods.length === 0) {
   console.error(`知らない方式: ${want.join(" ")}（${METHODS.map((m) => m.id).join(" / ")}）`);
@@ -190,7 +209,7 @@ for (const m of methods) {
 
 console.log("\n== room 名 ==");
 console.log("  試行ごとに一意の room 名を使う（例: stability-08-4-r03）。");
-console.log("  08 / 08-2 / 08-4 / 08-5 / 08-6 / 08-7 / 08-9 / 08-10 は同じ WebSocket のパスを使うので、room 名が同じで設定も同じだと別方式の端末が混ざる。");
+console.log("  08 / 08-2 / 08-4 / 08-5 / 08-6 / 08-7 / 08-9 / 08-10 / 08-11 は同じ WebSocket のパスを使うので、room 名が同じで設定も同じだと別方式の端末が混ざる。");
 console.log("  空の room はサーバーに 60 秒残るので、同じ名前をすぐ再利用しない。");
 const vendor = at("public/vendor");
 if (existsSync(vendor)) {
