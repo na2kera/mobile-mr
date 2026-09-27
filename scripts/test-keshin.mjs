@@ -43,6 +43,8 @@ import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from 
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
 import { coverUvTransform, pickBackUltraWide } from "../src/shared/passthrough-camera.ts";
 import * as THREE from "three";
+import { assignMirror, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose } from "../demos/ex9-1-keshin/mirror-math.ts";
+import { projectToImage } from "../src/shared/fake-hands.ts";
 import { MaskHzGovernor, PersonMask, createMaskUniforms, decideMaskHzLevel, maskHzLevels } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
 
 const results = [];
@@ -381,6 +383,80 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   const g5 = new MaskHzGovernor(15, true);
   const osc = runGov(g5, (t) => (Math.floor(t / 500) % 2 ? 33 : 50), 0, 20000);
   check("回数の自動調整: 30〜45 の間（33 と 50 を交互）では動かない", osc.length === 0 && g5.hz === 15, JSON.stringify(osc));
+}
+
+// ================= 2f. 鏡モード（mirror.html）: 検出した骨格 → 頭・体の向き、割り当て、見失ったとき、反転 =================
+{
+  // iPad の前面カメラ（水平 68°、4:3）。カメラ座標系 = ワールド（x 右・y 上・z 手前、カメラは −Z を見る）
+  const m = { tanHalfFov: Math.tan(34 * DEG) * 0.75, eyeAspect: 4 / 3, repeatX: 1, repeatY: 1 };
+  const opts = { bodyScale: 1, minVisibility: 0.5, maxDepthM: 8 };
+  const person = (head, yawDeg) => ({ head, fwd: [Math.sin(yawDeg * DEG), Math.cos(yawDeg * DEG)] });
+  const solve = (p) => {
+    const r = fakeMirrorPose([p], m);
+    return mirrorPersonFromPose(r.landmarks[0], r.worldLandmarks[0], m, opts);
+  };
+  const front = solve(person([0.1, 0.25, -3.2], 0));
+  check("鏡: カメラの方を向いた人 → 頭（両目の中点）は合成の位置（差 < 1cm）・体の前はカメラの方 [0, 1]（肩の線から）", front && Math.hypot(front.head[0] - 0.1, front.head[1] - 0.25, front.head[2] + 3.2) < 0.01 && front.fwd[1] > 0.999 && front.fwdSource === "shoulders", JSON.stringify(front));
+  check("鏡: 足首が画面に入っていれば床の高さが出る（頭 − 床 = 合成の体の目の高さ 1.68m）", front && front.floorY !== null && near(front.head[1] - front.floorY, 1.68, 0.02), front && String(front.floorY));
+  const side = solve(person([0.4, 0.25, -2.6], 90));
+  check("鏡: 横（+x、画面の右）を向いた人 → 体の前は [1, 0]（肩の線が奥行き方向でも向きが出る）", side && side.fwd[0] > 0.99 && side.fwdSource === "shoulders", JSON.stringify(side?.fwd));
+  const side2 = solve(person([-0.4, 0.25, -2.6], -90));
+  check("鏡: 逆の横（−x）を向いた人 → [−1, 0]", side2 && side2.fwd[0] < -0.99, JSON.stringify(side2?.fwd));
+  const diag = solve(person([0, 0.25, -3], 45));
+  check("鏡: 斜め 45° → yaw 45°（± 1°）", diag && Math.abs(Math.atan2(diag.fwd[0], diag.fwd[1]) / DEG - 45) < 1, diag && String(Math.atan2(diag.fwd[0], diag.fwd[1]) / DEG));
+  // MediaPipe が左右の肩を取り違えた（真横に近いとき）: 鼻が前にあれば鼻の側を前にする
+  {
+    const r = fakeMirrorPose([person([0, 0.25, -3], 0)], m);
+    const L = r.landmarks[0].map((l) => ({ ...l }));
+    const W = r.worldLandmarks[0].map((l) => ({ ...l }));
+    [[L[11], L[12]], [W[11], W[12]]].forEach(([a, b]) => { const t = { ...a }; Object.assign(a, b); Object.assign(b, t); });
+    const sw = mirrorPersonFromPose(L, W, m, opts);
+    check("鏡: 左右の肩を取り違えても、鼻が前に出ている側を前にする（カメラの方のまま）", sw && sw.fwd[1] > 0.99, JSON.stringify(sw?.fwd));
+  }
+  // 肩の線が短い（肩が重なる）ときは鼻で決める
+  {
+    const placed = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: -3 }));
+    placed[11] = { x: 0.02, y: 0.5, z: -3 };
+    placed[12] = { x: -0.02, y: 0.5, z: -3 };
+    placed[0] = { x: 0.1, y: 0.7, z: -3 };
+    const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 1 }));
+    const f = mirrorBodyFacing(placed, lm, 0.5);
+    check("鏡: 肩の線が 12cm 未満なら鼻の向き（鼻が +x に出ている → [1, 0]）", f.source === "nose" && f.fwd[0] > 0.99, JSON.stringify(f));
+    const lm2 = lm.map((l, i) => (i === 0 || i === 11 || i === 12 ? { ...l, visibility: 0.1 } : l));
+    check("鏡: 肩も鼻も見えなければカメラの方を向いているとみなす", mirrorBodyFacing(placed, lm2, 0.5).source === "default");
+  }
+  check("鏡: 可視点が足りない（全部 visibility 0）なら人として扱わない", (() => { const r = fakeMirrorPose([person([0, 0.25, -3], 0)], m); return mirrorPersonFromPose(r.landmarks[0].map((l) => ({ ...l, visibility: 0 })), r.worldLandmarks[0], m, opts) === null; })());
+  check("鏡: maxDepth より遠い人は扱わない", (() => { const r = fakeMirrorPose([person([0, 0.25, -9], 0)], m); return mirrorPersonFromPose(r.landmarks[0], r.worldLandmarks[0], m, opts) === null; })());
+  // 割り当て
+  const a1 = assignMirror([3.1, 2.2, 4.0], ["pA"]);
+  check("割り当て: 化身が 1 人なら一番近い（深度の小さい）人に付ける", a1.get("pA") === 1 && a1.size === 1);
+  const a2 = assignMirror([3.1, 2.2, 4.0], ["pA", "pB"]);
+  check("割り当て: 複数なら近い順に参加順（1 番目 → 一番近い、2 番目 → 2 番目に近い）", a2.get("pA") === 1 && a2.get("pB") === 0);
+  const a3 = assignMirror([2.5], ["pA", "pB"]);
+  check("割り当て: 人が足りなければ後のプレイヤーは付かない", a3.get("pA") === 0 && !a3.has("pB"));
+  check("割り当て: 人がいなければ誰も付かない", assignMirror([], ["pA"]).size === 0);
+  // 見失ったとき
+  check("見失い: 見えている間は濃さ 1", (() => { const r = mirrorHoldFade(0, 500, 500); return r.draw && r.fade === 1 && r.phase === "seen"; })());
+  check("見失い: 0.5 秒までは最後の位置で保持（濃さ 1）", (() => { const r = mirrorHoldFade(480, 500, 500); return r.draw && r.fade === 1 && r.phase === "hold"; })());
+  check("見失い: その後 0.5 秒でフェード（0.75 秒で 0.5）", (() => { const r = mirrorHoldFade(750, 500, 500); return r.draw && near(r.fade, 0.5) && r.phase === "fading"; })());
+  check("見失い: 1 秒で消える・見つけ直したらすぐ出す（経過 0 で濃さ 1）", !mirrorHoldFade(1000, 500, 500).draw && mirrorHoldFade(-Infinity, 500, 500).fade === 1 && !mirrorHoldFade(Infinity, 500, 500).draw);
+  // 反転: 背景と 3D をまとめて左右反転しても、化身は人の背後・同じ向きに見える
+  {
+    const p = person([0.3, 0.25, -3], 60);
+    const back = 0.6;
+    const origin = [p.head[0] - p.fwd[0] * back, p.head[1] - 1.5, p.head[2] - p.fwd[1] * back];
+    const ih = projectToImage({ x: p.head[0], y: p.head[1], z: p.head[2] }, m);
+    const io = projectToImage({ x: origin[0], y: origin[1], z: origin[2] }, m);
+    const same = Math.sign(io.x - ih.x) === -Math.sign(mirrorImageX(io.x) - mirrorImageX(ih.x));
+    const pf = mirrorDir(p.fwd);
+    const kf = mirrorDir(p.fwd);
+    check("反転: 画面上の左右は入れ替わるが、化身の原点は人より奥（深度は変わらない）で、人と化身の向きは同じまま（反転後の内積 1）", same && -origin[2] > -p.head[2] && near(pf[0] * kf[0] + pf[1] * kf[1], 1) && pf[0] < 0, JSON.stringify({ ih, io, pf }));
+    // カメラの方を向いた人の本人の左手は、反転前の画像では右（x > 頭）、鏡では左（x < 頭）に写る
+    const r = fakeMirrorPose([person([0, 0.25, -3], 0)], m);
+    const lw = r.landmarks[0][15];
+    const hd = r.landmarks[0][0];
+    check("反転: カメラの方を向いた人の左手は、反転前は頭の右・鏡（反転後）では頭の左に写る", lw.x > hd.x && mirrorImageX(lw.x) < mirrorImageX(hd.x));
+  }
 }
 
 // ================= 3. フェードと信用度 =================

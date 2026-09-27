@@ -227,6 +227,7 @@ export default defineConfig({
         // ex9-1: 化身（モデルは dev サーバーだけが配る。build には入らない）
         "demo-ex9-1-keshin": fileURLToPath(new URL("./demos/ex9-1-keshin/index.html", import.meta.url)),
         "demo-ex9-1-keshin-overview": fileURLToPath(new URL("./demos/ex9-1-keshin/overview.html", import.meta.url)),
+        "demo-ex9-1-keshin-mirror": fileURLToPath(new URL("./demos/ex9-1-keshin/mirror.html", import.meta.url)),
         "demo-10-golf": fileURLToPath(new URL("./demos/10-golf/index.html", import.meta.url)),
         "demo-10-golf-overview": fileURLToPath(new URL("./demos/10-golf/overview.html", import.meta.url)),
         "demo-10-golf-joycon-test": fileURLToPath(new URL("./demos/10-golf/joycon-test.html", import.meta.url)),

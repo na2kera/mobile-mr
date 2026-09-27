@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>ex9-1. 化身 鏡モード — Mobile MR</title>
+    <style>
+      /* 見た目は ex9-1 のスマホ画面と同じ配色（開始オーバーレイ・HUD・全画面ボタン）。鏡は 1 画面・StereoEffect なし */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 鏡: 背景（前面カメラの映像）と 3D をまとめて左右反転する。HUD・文字は #app の外なので反転しない */
+      #app canvas {
+        transform: scaleX(-1);
+      }
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #start-button {
+        width: min(100%, 20rem);
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* 画面の下の案内（化身が出ていない・人が写っていないとき） */
+      #mirror-message {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(72px + env(safe-area-inset-bottom));
+        z-index: 6;
+        max-width: calc(100% - 32px);
+        box-sizing: border-box;
+        padding: 10px 20px;
+        border-radius: 12px;
+        background: rgba(20, 22, 26, 0.72);
+        color: #fdd663;
+        font-size: 1rem;
+        font-weight: 600;
+        text-align: center;
+        pointer-events: none;
+      }
+      #mirror-message[hidden] {
+        display: none;
+      }
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>ex9-1. 化身 鏡モード</h1>
+      <p>
+        iPad を<strong>前面カメラで自分を映す鏡</strong>にして、化身を確かめるページです（見る専用。化身は割り当てません）。
+        ゴーグルの人が化身ボタンを押すと、この画面に写っている人の背後に化身が出ます（近い人から、化身を出した人の参加順に付けます）。
+      </p>
+      <p>
+        iPad はスタンドに立てて固定し、カメラから 2〜3m 離れて、腰から上（できれば全身）が写るように立ちます。
+        化身の頭が画面から切れるときは、少し離れて立つか ?keshinH=2 のように小さくします（既定 room: demo。分けたいときは ?room=名前）。
+      </p>
+      <p id="room-error" hidden></p>
+      <button id="start-button" type="button">カメラを許可して開始</button>
+      <p>
+        調整: 前面カメラの画角 ?camFov=（既定はカメラ名から推定）、位置のなめらかさ ?mirrorSmoothSec=0.15、大きさ ?keshinH=3、頭から床まで ?eyeH=1.5、
+        人の形の確認 ?maskDebug=1。PC では ?fakecam=1&amp;fakeperson=1&amp;autostart=1 で確認できます
+      </p>
+      <a href="./">化身（ゴーグル用）へ</a>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="mirror-message" hidden></div>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./mirror.ts"></script>
+  </body>
+</html>

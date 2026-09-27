@@ -53,6 +53,8 @@ export type KeshinUpdate = {
   eyeWorld?: THREE.Vector3;
   /** 粒子の大きさの換算に使う片目のビューポートの高さ [px] */
   viewportH: number;
+  /** 頭から床まで [m] の上書き（鏡モードで足首から床が分かったとき。未指定なら ?eyeH=） */
+  eyeH?: number;
 };
 
 const tmpPoint = new THREE.Vector3();
@@ -240,7 +242,7 @@ export class KeshinView {
     const frame: KeshinFrameInput = {
       head: u.head,
       yaw: u.yaw,
-      eyeH: this.opts.eyeH,
+      eyeH: u.eyeH ?? this.opts.eyeH,
       back,
       cutY: this.loaded.spec.cutY,
       scale,
@@ -269,7 +271,7 @@ export class KeshinView {
       au.uSwirlR.value = 0.55 * scale * 1.6;
       au.uViewportH.value = u.viewportH;
       if (u.eyeWorld) au.uEye.value.copy(u.eyeWorld);
-      const floor: V3 = [u.head[0], u.head[1] - this.opts.eyeH, u.head[2]];
+      const floor: V3 = [u.head[0], u.head[1] - (u.eyeH ?? this.opts.eyeH), u.head[2]];
       this.aura.points.matrix.makeRotationY(u.yaw).setPosition(floor[0], floor[1], floor[2]);
       this.aura.points.matrixWorldNeedsUpdate = true;
     }

@@ -710,6 +710,105 @@ try {
   await pF.shot("stage2-maskdebug-fake.png");
   await browser.send("Target.closeTarget", { targetId: pF.targetId });
   pages.splice(pages.indexOf(pF), 1);
+  // ================= 鏡モード（mirror.html）: iPad の前面カメラを鏡に。写った人（Pose）の背後にその人の化身 =================
+  // 別の room で、スマホ 1 台（フェイク）と鏡（?fakeperson=1: 合成の人を映像に描き、Pose の代わりに同じ骨格と人の形のマスク）
+  const ROOMM = `${ROOM}m`;
+  const pP = await newWindow("M-phone", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&occlude=0&room=${ROOMM}&remoteLog=0&name=P`);
+  const sP = await waitUntil(async () => {
+    const st = await phoneState(pP);
+    return { ok: st && st.me, st };
+  }, 40000);
+  const pId = sP?.st?.me;
+  const pM = await newWindow("mirror", `${BASE}mirror.html?room=${ROOMM}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0`);
+  const mirrorState = () => pM.eval("window.__keshinMirror?.state() ?? null");
+  const m0 = await waitUntil(async () => {
+    const st = await mirrorState();
+    return { ok: st && st.me && st.persons.length === 1 && st.entries.some((e) => e.id === pId), st };
+  }, 40000);
+  console.log(`mirror: ${JSON.stringify(m0?.st && { me: m0.st.me, cam: m0.st.cam, persons: m0.st.persons, message: m0.st.message })}`);
+  const mp = m0?.st?.persons?.[0];
+  check("鏡: 見る専用で入室し、合成の人を 1 人見つける（頭 ≈ (0, 0.25, −3.2)・カメラの方を向く）", m0?.ok && mp && Math.hypot(mp.head[0], mp.head[1] - 0.25, mp.head[2] + 3.2) < 0.05 && mp.fwd[1] > 0.99, JSON.stringify(mp));
+  check("鏡: 化身が 1 人も出ていないとき画面の下に「ゴーグルの人が化身ボタンを押すと出ます」", m0?.st?.message === "ゴーグルの人が化身ボタンを押すと出ます", m0?.st?.message);
+  const tf = await pM.eval("window.__keshinMirror.transforms()");
+  check("鏡: canvas（背景と 3D）は左右反転（scaleX(-1)）、HUD と案内は反転しない", tf && tf.canvas === "matrix(-1, 0, 0, 1, 0, 0)" && tf.hud === "none" && !tf.hudInsideApp && tf.message !== "matrix(-1, 0, 0, 1, 0, 0)" && !/^matrix\(-1/.test(tf.message), JSON.stringify(tf));
+  // 画面（合成後のスクリーンショット）で左右を確かめる: 本人の左手首の赤い印は、反転前の画像では人の右、鏡では人の左に写る
+  const scr = await pM.send("Page.captureScreenshot", { format: "png" });
+  const lr = await pM.eval(`new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      let rx = 0, rn = 0, px = 0, pn = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const x = (i / 4) % c.width;
+        if (d[i] > 190 && d[i + 1] < 90 && d[i + 2] < 90) { rx += x; rn++; }
+        else if (Math.abs(d[i] - 0x5a) + Math.abs(d[i + 1] - 0x6b) + Math.abs(d[i + 2] - 0x86) <= 24) { px += x; pn++; }
+      }
+      resolve({ red: rn ? rx / rn : null, redN: rn, person: pn ? px / pn : null, personN: pn, width: c.width });
+    };
+    img.src = "data:image/png;base64,${scr.result?.data ?? ""}";
+  })`);
+  check("鏡: 画面は左右反転している（合成の人の左手の赤い印が、人の中心より画面の左に写る）", lr && lr.redN > 20 && lr.personN > 1000 && lr.red < lr.person, JSON.stringify(lr));
+  await pM.shot("mirror-1-waiting.png");
+  // スマホが化身を出す → 鏡で合成の人の背後に出る
+  await pP.eval("document.querySelector('#keshin-button').click()");
+  const m1 = await waitUntil(async () => {
+    const st = await mirrorState();
+    const e = st?.entries.find((x) => x.id === pId);
+    return { ok: e && e.drawn && e.world, e, st };
+  }, 15000);
+  await sleep(1800);
+  const m1b = await mirrorState();
+  const me1 = m1b?.entries.find((x) => x.id === pId);
+  console.log(`mirror keshin: ${JSON.stringify(me1)}`);
+  const behind = me1?.world && me1.head ? me1.head[2] - me1.world.origin[2] : NaN;
+  check("鏡: 化身が出たら合成の人に割り当て（person 0）、人の背後（原点が頭より 0.2m 以上奥）に・カメラの方を向いて（同じ向き）出る", m1?.ok && me1?.personIndex === 0 && behind > 0.2 && me1.world.front[1] > 0.95 && Math.abs(me1.world.origin[0] - me1.head[0]) < 0.05, JSON.stringify({ behind, front: me1?.world?.front, head: me1?.head }));
+  check("鏡: 足首が見えているので床は足首から（頭 − 床 ≈ 1.68m）", me1 && Math.abs(me1.eyeH - 1.68) < 0.05, String(me1?.eyeH));
+  check("鏡: 化身が出ている間は案内を出さない", m1b?.message === "", m1b?.message);
+  const mOn = await pM.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, true)`);
+  const mOff = await pM.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, false)`);
+  console.log(`mirror pixels（カメラの方を向いた人の背後の化身）: occlude=on ${JSON.stringify(mOn)} / off ${JSON.stringify(mOff)}`);
+  check("鏡: 人の形の上にも化身が描かれる配置（確認の前提）", mOff && mOff.inside > 300, `inside=${mOff?.inside}`);
+  check("鏡: 人の頭・体の上の化身は隠れる（隠さないときの 5% 未満）", mOn && mOff && mOn.inside < mOff.inside * 0.05, `on=${mOn?.inside} off=${mOff?.inside}`);
+  check("鏡: 人のいない所の化身は残る（90% 以上）", mOn && mOff && mOn.outside > 1000 && mOn.outside >= mOff.outside * 0.9, `on=${mOn?.outside} off=${mOff?.outside}`);
+  await pM.shot("mirror-2-keshin.png");
+  await pM.eval("window.__keshinMirror.setOcclusionDisabled(true)");
+  await sleep(300);
+  await pM.shot("mirror-3-no-occlusion.png");
+  await pM.eval("window.__keshinMirror.setOcclusionDisabled(false)");
+  // 見失う → 0.5 秒保持 → 0.5 秒で消える → 見つけ直したらすぐ出す
+  await pM.eval("window.__keshinMirror.setFakePeople([])");
+  await sleep(350);
+  const hold = (await mirrorState())?.entries.find((x) => x.id === pId);
+  const gone = await waitUntil(async () => {
+    const e = (await mirrorState())?.entries.find((x) => x.id === pId);
+    return { ok: e && !e.drawn && e.reason === "lost", e };
+  }, 4000, 100);
+  check("鏡: 見失っても 0.5 秒は保持し（濃さ 1）、その後フェードで消える（reason=lost）", hold && hold.drawn && hold.fade === 1 && gone?.ok, JSON.stringify({ hold: hold && { drawn: hold.drawn, fade: hold.fade, reason: hold.reason }, gone: gone?.e && { drawn: gone.e.drawn, reason: gone.e.reason } }));
+  await pM.eval("window.__keshinMirror.setFakePeople([{ head: [0.3, 0.25, -3.0], yawDeg: 0 }])");
+  const back = await waitUntil(async () => {
+    const e = (await mirrorState())?.entries.find((x) => x.id === pId);
+    return { ok: e && e.drawn && e.fade === 1, e };
+  }, 3000, 100);
+  check("鏡: 見つけ直したらすぐ出す（新しい位置へ即座に・濃さ 1）", back?.ok && Math.abs(back.e.head[0] - 0.3) < 0.05, JSON.stringify(back?.e && { head: back.e.head, fade: back.e.fade }));
+  // 化身を消すと消える
+  await pP.eval("document.querySelector('#keshin-button').click()");
+  const m2 = await waitUntil(async () => {
+    const st = await mirrorState();
+    const e = st?.entries.find((x) => x.id === pId);
+    return { ok: e && !e.drawn && e.reason === "off" && st.message === "ゴーグルの人が化身ボタンを押すと出ます", e, st };
+  }, 8000);
+  check("鏡: スマホが化身を消すと鏡でも消える（消える演出の後。案内が戻る）", m2?.ok, JSON.stringify(m2?.e && { drawn: m2.e.drawn, reason: m2.e.reason, message: m2.st?.message }));
+  const mLogs = pM.logs.filter((l) => /\[keshin-mirror\] event=(camera|person-found|assign|keshin-on|keshin-shown|keshin-hidden|keshin-off)/.test(l));
+  console.log(`mirror events: ${mLogs.slice(0, 14).join(" | ")}`);
+  check("鏡: 出来事のログ（カメラ・人を見つけた・割り当て・化身の on / off・表示 / 非表示）", ["camera", "person-found", "assign", "keshin-on", "keshin-shown", "keshin-hidden", "keshin-off"].every((k) => mLogs.some((l) => l.includes(`event=${k}`))), mLogs.length + " 件");
+  const hudM = await pM.eval("document.querySelector('#hud')?.textContent ?? ''");
+  console.log(`mirror HUD:\n${hudM}`);
+  check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人・割り当てが出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)/.test(hudM) && /→person/.test(hudM));
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
   const shader2 = pages.flatMap((p) => p.logs.filter((l) => /Shader Error|WebGLProgram|THREE\.WebGLRenderer/.test(l)).map((l) => `${p.name}: ${l.slice(0, 200)}`));

@@ -215,7 +215,13 @@ export class PersonMask {
 // ---- PC 確認用のフェイクの人（?fakeperson=1）----
 
 /** フェイクの人の形（画像の px）: 頭の円・胴の四角形・手足の太い線 */
-export type PersonShape = { head: { x: number; y: number; r: number }; torso: [number, number][]; limbs: { a: [number, number]; b: [number, number]; w: number }[] };
+export type PersonShape = {
+  head: { x: number; y: number; r: number };
+  torso: [number, number][];
+  limbs: { a: [number, number]; b: [number, number]; w: number }[];
+  /** 本人の左手首（画像の px。鏡モードの確認で左右を見分ける印に使う） */
+  leftHand: [number, number];
+};
 
 /**
  * 相手の申告位置（頭・体の向き。マーカー座標系）に fake-body.ts の合成の体を立たせ、フェイクカメラ（カメラ → field の姿勢・
@@ -260,7 +266,7 @@ export function projectFakePerson(
     b: [P[b][0], P[b][1]] as [number, number],
     w: px(0.13, (P[a][2] + P[b][2]) / 2),
   }));
-  return { head, torso, limbs };
+  return { head, torso, limbs, leftHand: [P[15][0], P[15][1]] };
 }
 
 /** 人の形を 2D canvas に塗る（scale で画像の px → canvas の px） */
@@ -402,11 +408,22 @@ export type OcclusionOptions = {
   debug: boolean;
   /** delegate = auto で GPU の人数が 0 のままこれだけ続いたら、CPU でも回して比べる [ms] */
   probeAfterMs: number;
+  /**
+   * 1 回の結果の骨格（画像の正規化座標 landmarks と実寸の worldLandmarks。人ごと）を受け取る（鏡モードが人の位置を出すのに使う）。
+   * コールバックの中で呼ぶので、受け取った側は必要なら写してから持つ
+   */
+  onPoses?: (landmarks: BodyLandmarkLike[][], worldLandmarks: BodyLandmarkLike[][], now: number) => void;
+  /** ?fakeperson=1 のときの合成の骨格（onPoses に渡す。MediaPipe の代わり） */
+  fakePoses?: () => { landmarks: BodyLandmarkLike[][]; worldLandmarks: BodyLandmarkLike[][] };
   log: (kind: string, detail: string) => void;
 };
 
+/** MediaPipe の NormalizedLandmark / Landmark（使う部分） */
+export type BodyLandmarkLike = { x: number; y: number; z: number; visibility?: number };
+
 type PoseCallbackResult = {
-  landmarks?: unknown[];
+  landmarks?: BodyLandmarkLike[][];
+  worldLandmarks?: BodyLandmarkLike[][];
   segmentationMasks?: { width: number; height: number; getAsFloat32Array(): Float32Array }[];
 };
 
@@ -559,7 +576,9 @@ export class OcclusionController {
         else this.mask.clear();
         this.maskMs = performance.now() - t0;
         this.updates.push(now);
-        this.lastPoses = img ? (this.mask.hasPerson ? 1 : 0) : 0;
+        const fp = this.opts.fakePoses?.();
+        if (fp) this.opts.onPoses?.(fp.landmarks, fp.worldLandmarks, now);
+        this.lastPoses = fp ? fp.landmarks.length : img ? (this.mask.hasPerson ? 1 : 0) : 0;
         this.lastMasks = img ? 1 : 0;
         this.lastInput = img ? `${img.width}x${img.height}` : "-";
         if (video && video.videoWidth > 0) {
@@ -594,6 +613,7 @@ export class OcclusionController {
         (landmarker as PoseCallbackLandmarker).detectForVideo(source, ts, (result) => {
           try {
             poses = result.landmarks?.length ?? 0;
+            this.opts.onPoses?.(result.landmarks ?? [], result.worldLandmarks ?? [], now);
             const masks = result.segmentationMasks ?? [];
             masksN = masks.length;
             if (masks.length > 0) this.mask.setFromFloat(masks.map((m) => m.getAsFloat32Array()), masks[0].width, masks[0].height);

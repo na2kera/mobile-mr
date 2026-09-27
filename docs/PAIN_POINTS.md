@@ -725,3 +725,11 @@
 - **どう対処したか**: 選び方を純粋関数 `pickBackUltraWide(devices)` にした（名前に `前面|front|FaceTime|user` を含む超広角は外し、`背面|back|rear` を含むものを優先、前後を名乗らないものは次点）。開いた後も `getSettings().facingMode === "user"` なら超広角をやめて `facingMode: environment` で開き直す。どのカメラを・なぜ選んだか（`CameraChoice`: ラベル・facingMode・理由）を `Passthrough.choice` に出し、ex9-1 は HUD の `cam=` とログの `event=camera` に出す。Node テスト（iPhone の日本語 / 英語、iPad の前面だけ超広角、超広角なし、ラベル空）を `test:keshin` に入れた。**実機（iPad）で背面が選ばれることは未確認**
 - **SDK ならどう解決するか（案）**: SDK のカメラ層が「背面・一番広い画角」を意味で指定できる API を持ち、ラベルの言語差・前後の判定・開き直しの儀式・開いた後の検証（facingMode と実際の画角）を吸収する。選んだ結果と理由を診断として必ず返す
 - **関連**: `src/shared/passthrough-camera.ts` の `pickBackUltraWide` / `openBackCameraStream`、`demos/ex9-1-keshin/main.ts` の `cameraChoice`、`scripts/test-keshin.mjs` の「カメラ選び」
+
+## [2026-09-28] ex9-1 化身（鏡モード）: 前面カメラの画角がブラウザから取れず、写った人の距離（= 化身の大きさと足元）が推定値頼みになる
+
+- **何が苦しかったか**: iPad の前面カメラを鏡にして、写った人を PoseLandmarker + 09 の `body-math.ts`（worldLandmarks の実寸を画像上の見え方に当てはめる最小二乗）で 3D 化し、その背後に化身を置く。距離はカメラの画角に比例して変わるが、`MediaTrackSettings` / `getCapabilities` に画角は無く、ラベル（`前面超広角カメラ` 等。OS の言語で変わる）から推定するしかない（背面の 106° / 68° と同じ問題が前面にもある）。iPad の前面の超広角は Center Stage で切り抜かれることもあり、推定がさらに当てにならない。
+  さらに鏡は「表示だけ左右反転」なので、ML（Pose・マスク）は反転前の映像で回し、背景と 3D は CSS でまとめて反転する、という二重の座標系を意識する必要があった（three のシーンの中で反転すると、背景の UV・人の形のマスクの座標・カリング（面の向き）が全部ずれる）
+- **どう対処したか**: 画角は `?camFov=` で上書きでき、既定はラベルから推定（超広角 106 / それ以外 68）して HUD に `fov=68(label-estimate)` と出所付きで出す。人までの距離を HUD の `persons=1 #0:d2.95` に出し、実機で実測と比べて `?camFov=` を合わせる手順を README に書いた（未実測）。反転は canvas に CSS の `scaleX(-1)` を掛けるだけにして、three・マスク・Pose はすべて反転前の座標のまま扱う（HUD と文字は canvas の外なので反転しない）。ヘッドレスでは合成の人の左手首に赤い印を描き、合成後のスクリーンショットで左右が入れ替わっていることを確かめた
+- **SDK ならどう解決するか（案）**: カメラ層が「前面 / 背面」「画角（実測の校正値を端末ごとに保存）」を持ち、校正用の手順（既知の大きさの物や 2 点の距離を写す）を用意する。鏡表示は「表示の反転」フラグとして SDK が持ち、ML の座標は常に反転前で返す
+- **関連**: `demos/ex9-1-keshin/mirror.ts` の `startCamera`、`demos/ex9-1-keshin/mirror-math.ts`、`demos/ex9-1-keshin/mirror.html` の `#app canvas { transform: scaleX(-1) }`
