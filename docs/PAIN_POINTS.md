@@ -717,3 +717,11 @@
 - **どう対処したか**: 表示中の位置と向き（自分のワールド）を最新の目標へ時定数 0.25s で寄せる（状態は表示中の値だけ。3m 以上は即座に移す）。跳びの大きさ（目標と表示の差の 1 秒の最大）を HUD とログに出して実機で測る。跳びそのものは減らない（未解決。段階 3 の「見た位置による補正」で相手の位置は直せる見込み）
 - **SDK ならどう解決するか（案）**: 共有座標のアンカーに「世代（見直しで何 m 動いたか）」を持たせ、受信側が自分のアンカーの跳びと相手の申告の跳びを分けて扱えるようにする（自分の跳びは全員の表示を同時に寄せ、相手の跳びは相手の化身だけ寄せる）。08-11 の「座標系の世代」の案と同じ
 - **関連**: `demos/ex9-1-keshin/remote-keshins.ts`、`demos/ex9-1-keshin/keshin-math.ts` の `smoothToward`
+
+## [2026-09-28] 共有 passthrough-camera / ex9-1 化身: 「名前が超広角のカメラ」を選ぶと、iPad では前面カメラが選ばれる
+
+- **何が苦しかったか**: `src/shared/passthrough-camera.ts` は、一度 `facingMode: environment` で開いて許可を取り、`enumerateDevices()` のラベルが `/ultra wide|超広角/i` に合うカメラを `deviceId` で開き直していた。iPhone（`背面超広角カメラ` / `Back Ultra Wide Camera`）では正しいが、iPad（iOS の Chrome、2026-09-27）は超広角が**前面にしか無く**（Center Stage 用。ラベル `前面超広角カメラ`）、HUD に `cam=1280x720 前面超広角カメラ`・`camFov=106` と出て、前面カメラの映像を背景にしていた。映像とジャイロから出すカメラの向きが合わず、マーカーも本人の顔越しにしか見えない。
+  カメラの前後は `MediaDeviceInfo` に無く、ラベルの文字（言語で変わる）か、開いた後の `track.getSettings().facingMode` でしか分からない。`deviceId` で開くと `facingMode` の指定は効かない。ラベルは許可を取った後にしか読めないので「一度開く → 止める → 開き直す」儀式も要る。08 系・09・10 などこの共有コードを使う全デモが同じ問題を持っていた
+- **どう対処したか**: 選び方を純粋関数 `pickBackUltraWide(devices)` にした（名前に `前面|front|FaceTime|user` を含む超広角は外し、`背面|back|rear` を含むものを優先、前後を名乗らないものは次点）。開いた後も `getSettings().facingMode === "user"` なら超広角をやめて `facingMode: environment` で開き直す。どのカメラを・なぜ選んだか（`CameraChoice`: ラベル・facingMode・理由）を `Passthrough.choice` に出し、ex9-1 は HUD の `cam=` とログの `event=camera` に出す。Node テスト（iPhone の日本語 / 英語、iPad の前面だけ超広角、超広角なし、ラベル空）を `test:keshin` に入れた。**実機（iPad）で背面が選ばれることは未確認**
+- **SDK ならどう解決するか（案）**: SDK のカメラ層が「背面・一番広い画角」を意味で指定できる API を持ち、ラベルの言語差・前後の判定・開き直しの儀式・開いた後の検証（facingMode と実際の画角）を吸収する。選んだ結果と理由を診断として必ず返す
+- **関連**: `src/shared/passthrough-camera.ts` の `pickBackUltraWide` / `openBackCameraStream`、`demos/ex9-1-keshin/main.ts` の `cameraChoice`、`scripts/test-keshin.mjs` の「カメラ選び」

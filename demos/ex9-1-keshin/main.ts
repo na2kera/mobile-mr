@@ -99,6 +99,8 @@ const SNAP_M = numParam("snapM", 3, { min: 0.1, max: 100 });
 /** gyro の ageMs がこれで化身が半分の薄さ、以降はその薄さで最後の位置に止める [ms]（俯瞰画面と同じ） */
 const STALE_MS = numParam("staleMs", 3000, { min: 100, max: 60000 });
 /** pose がこれだけ届かなければ marker でも gyro 扱い [ms]（俯瞰画面と同じ） */
+/** gyro の ageMs がこれを超えたら相手の化身をフェードで消す [ms]（マーカーを見直したらまた出す） */
+const STALE_HIDE_MS = numParam("staleHideMs", 8000, { min: 100, max: 600000 });
 const NO_POSE_MS = numParam("noPoseMs", 1000, { min: 100, max: 60000 });
 /** pose がこれだけ届かなければ通信切れとして相手の化身を描かない [ms] */
 const PEER_LOST_MS = numParam("peerLostMs", 5000, { min: 500, max: 120000 });
@@ -117,7 +119,13 @@ const MASK_EDGE: [number, number] = (() => {
   return v.length === 2 && v.every((x) => Number.isFinite(x) && x >= 0 && x <= 1) && v[0] < v[1] ? [v[0], v[1]] : [0.3, 0.7];
 })();
 /** 人の形の検出に渡す画像の長辺 [px]（マスクの大きさもこれ） */
-const MASK_DET_W = numParam("maskDetW", 320, { min: 64, max: 1280 });
+const MASK_DET_W = numParam("maskDetW", 512, { min: 64, max: 1280 });
+/** fps を見て検出の回数を自動で下げる（15 → 10 → 6 → 4。?maskHz= が上限）。?maskHzAuto=0 で止める */
+const MASK_HZ_AUTO = params.get("maskHzAuto") !== "0";
+/** ?maskDebug=1: 相手がいなくても人の形の検出を回し、Pose に渡した入力と最新のマスクを画面の隅に小さく出す */
+const MASK_DEBUG = params.get("maskDebug") === "1";
+/** delegate = auto で GPU の人数が 0 のままこれだけ続いたら CPU でも回して比べる [ms] */
+const MASK_PROBE_AFTER_MS = numParam("maskProbeAfterMs", 10000, { min: 1000, max: 600000 });
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
 const DELEGATE: "GPU" | "CPU" | "auto" = delegateRaw === "gpu" ? "GPU" : delegateRaw === "cpu" ? "CPU" : "auto";
 const POSE_MODEL_URLS = params.get("poseModel")
@@ -413,17 +421,39 @@ const occlusion = new OcclusionController(
     enabled: OCCLUDE,
     fake: FAKE_PERSON,
     maskHz: MASK_HZ,
+    maskHzAuto: MASK_HZ_AUTO,
     maxPoses: MASK_POSES,
     detW: MASK_DET_W,
     delegate: DELEGATE,
     modelUrls: POSE_MODEL_URLS,
     staleOffMs: 1000,
+    debug: MASK_DEBUG && OCCLUDE,
+    probeAfterMs: MASK_PROBE_AFTER_MS,
     log: logEvent,
   },
   MASK_DILATE_PX,
   MASK_DEPTH_MARGIN,
   MASK_EDGE,
 );
+// ?maskDebug=1: 画面の右上に Pose に渡した入力（上）と最新のマスク（下。白 = 人）を小さく出す（実機で目で見て確かめる用）
+if (MASK_DEBUG && OCCLUDE) {
+  const box = document.createElement("div");
+  box.id = "mask-debug";
+  box.style.cssText =
+    "position:fixed;top:calc(8px + env(safe-area-inset-top));right:calc(8px + env(safe-area-inset-right));z-index:6;pointer-events:none;display:flex;flex-direction:column;gap:4px;";
+  const mk = () => {
+    const c = document.createElement("canvas");
+    c.width = 192;
+    c.height = 108;
+    c.style.cssText = "width:192px;height:auto;background:#000;border:1px solid rgba(255,255,255,0.4);";
+    box.appendChild(c);
+    return c;
+  };
+  const input = mk();
+  const mask = mk();
+  document.body.appendChild(box);
+  occlusion.setDebugCanvases({ input, mask });
+}
 const remotes = new RemoteKeshins(
   scene,
   {
@@ -435,6 +465,7 @@ const remotes = new RemoteKeshins(
     smoothSec: REMOTE_SMOOTH_SEC,
     snapM: SNAP_M,
     staleMs: STALE_MS,
+    staleHideMs: STALE_HIDE_MS,
     noPoseMs: NO_POSE_MS,
     lostMs: PEER_LOST_MS,
   },
@@ -830,6 +861,7 @@ function diagSummary(): string {
     `look=${lookDeg.toFixed(0)}deg fade=${selfFade.toFixed(2)}`,
     `model=${selfModel().status}`,
     `ws=${netStatus} me=${selfId || "-"} players=${players.size} sent=${posesSent}`,
+    `cam=${cameraChoice || "-"}`,
     occlusion.describe(),
     remotes.diag(),
   ].join(" ");
@@ -838,6 +870,8 @@ function diagSummary(): string {
 // ---- HUD（デバッグ用） ----
 const hud = document.querySelector<HTMLDivElement>("#hud")!;
 const hudState = { base: "", sensor: "", cam: "", fsResult: "", fsChange: "", wake: "" };
+/** 開いたカメラの facingMode と選んだ理由（HUD の cam= と実機ログ） */
+let cameraChoice = "";
 let lastHudText = "";
 function renderHud() {
   const now = performance.now();
@@ -901,7 +935,7 @@ nameForm.addEventListener("submit", (event) => {
   const name = readPlayerName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} mode=${touch ? "gyro" : "orbit"}`;
   logEvent("start", `name=${name} room=${ROOM} ${hudState.base}`);
   connect(name);
   runStartFlow(touch, {
@@ -915,8 +949,12 @@ nameForm.addEventListener("submit", (event) => {
         await startCameraAndMarker((step) => {
           hudState.cam = step;
         });
-        hudState.cam = passthrough!.summary;
+        const choice = passthrough!.choice;
+        // どのカメラを・なぜ選んだか（iPad の「前面超広角カメラ」問題の確認用。facing=environment が背面）
+        cameraChoice = choice ? `facing=${choice.facingMode} why=${choice.reason}` : FAKE_CAM ? "facing=fake" : "facing=-";
+        hudState.cam = `${passthrough!.summary} ${cameraChoice}`;
         hudState.base += ` camFov=${passthrough!.camHFovDeg}`;
+        logEvent("camera", `${passthrough!.summary} ${cameraChoice} camFov=${passthrough!.camHFovDeg}`);
       } catch (e: unknown) {
         hudState.cam = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         cameraError = hudState.cam;
@@ -1039,7 +1077,7 @@ if (FAKE_CAM) {
       return { pos: [p.x, p.y, p.z], quat: [q.x, q.y, q.z, q.w] };
     },
     occlusionState() {
-      return { status: occlusion.status, detail: occlusion.detail, on: occlusion.uniforms.uMaskOn.value, hz: occlusion.hz, poseMs: occlusion.poseMs, ageMs: occlusion.ageMs, person: occlusion.mask.hasPerson, everMasked: occlusion.everMasked, text: occlusion.describe() };
+      return { status: occlusion.status, detail: occlusion.detail, on: occlusion.uniforms.uMaskOn.value, hz: occlusion.hz, poseMs: occlusion.poseMs, ageMs: occlusion.ageMs, person: occlusion.mask.hasPerson, everMasked: occlusion.everMasked, lastPoses: occlusion.lastPoses, lastMasks: occlusion.lastMasks, lastInput: occlusion.lastInput, lastLuma: occlusion.lastLuma, delegate: occlusion.delegate, maskHz: occlusion.governor.hz, maskHzLevels: occlusion.governor.levels, runs: occlusion.runs, runsWithPerson: occlusion.runsWithPerson, probe: occlusion.probe, text: occlusion.describe() };
     },
     /** 隠す処理を一時的に止める / 戻す（確認用） */
     setOcclusionDisabled(off: boolean) {

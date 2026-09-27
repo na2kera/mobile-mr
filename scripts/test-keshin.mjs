@@ -41,9 +41,9 @@ import { KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLA
 import { parseClientMessage } from "../server/keshin.ts";
 import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
-import { coverUvTransform } from "../src/shared/passthrough-camera.ts";
+import { coverUvTransform, pickBackUltraWide } from "../src/shared/passthrough-camera.ts";
 import * as THREE from "three";
-import { PersonMask, createMaskUniforms } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
+import { MaskHzGovernor, PersonMask, createMaskUniforms, decideMaskHzLevel, maskHzLevels } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -244,6 +244,16 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("表示: marker でも 2 秒次が来なければ gyro 扱い（2s → 0.667）", (() => { const r = remoteDisplay(true, mk, 2000, o2); return r.track === "gyro" && near(r.fade, 1 - 0.5 * 2000 / 3000); })());
   check("表示: none・pose 無しは描かない", remoteDisplay(true, { track: "none", ageMs: null }, 0, o2).reason === "peer-none" && remoteDisplay(true, undefined, 0, o2).reason === "no-pose");
   check("表示: pose が lostMs（5s）届かない = 通信切れは描かない", (() => { const r = remoteDisplay(true, mk, 5001, o2); return !r.draw && r.reason === "lost"; })());
+  // 長く見失った相手（stage2-fix2 の 2）: gyro の経過が staleHideMs（8s）を超えたら HIDE_FADE_MS（0.8s）かけて消し、以降は描かない
+  const o3 = { ...o2, staleHideMs: 8000 };
+  const gy = (age) => remoteDisplay(true, { track: "gyro", ageMs: age }, 100, o3);
+  check("消す: gyro 7.9s（staleHideMs 手前）は今までどおり 0.5 の薄さで描く", (() => { const r = gy(7800); return r.draw && r.fade === 0.5 && r.reason === "ok" && r.freeze; })());
+  check("消す: 超えた直後はフェード中（0.4s で 0.25 = 半分の半分・reason=stale-hiding）", (() => { const r = gy(8300); return r.draw && near(r.fade, 0.25) && r.reason === "stale-hiding"; })(), JSON.stringify(gy(8300)));
+  check("消す: フェードは経過に対して単調に下がる（途中で戻らない）", (() => { let prev = 1; for (let a = 7000; a <= 9000; a += 50) { const f = gy(a - 100).fade; if (f > prev + 1e-12) return false; prev = f; } return true; })());
+  check("消す: 8.8s 以降は描かない（reason=stale）。40s（実機の B）も同じ", (() => { const a = gy(8800); const b = gy(39800); return !a.draw && a.reason === "stale" && a.fade === 0 && !b.draw && b.reason === "stale"; })());
+  check("消す: マーカーを見直した pose（marker）が届けばまた描く（状態を持たない）", (() => { const r = remoteDisplay(true, { track: "marker", ageMs: 0 }, 50, o3); return r.draw && r.fade === 1 && r.reason === "ok"; })());
+  check("消す: marker の pose が途絶えて gyro 扱いになった経過（sinceMs）でも同じく消す", (() => { const r = remoteDisplay(true, { track: "marker", ageMs: 0 }, 4900, { ...o3, staleHideMs: 3000 }); return !r.draw && r.reason === "stale"; })());
+  check("消す: staleHideMs を渡さなければ（俯瞰画面）今までどおり 0.5 のまま", (() => { const r = remoteDisplay(true, { track: "gyro", ageMs: 39800 }, 100, o2); return r.draw && r.fade === 0.5; })());
 
   // 人の形のマスクの座標: 背景と同じ UV 変換（cover・camZoom）で、眼ごとのビューポートの中の位置から出す
   const cov = coverUvTransform(16 / 9, 640 / 720, 1);
@@ -271,6 +281,34 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   const pv = new THREE.Vector3(0.3, 0.8, 1).applyMatrix3(tex.matrix);
   const mu = maskUvFromFragment([0.3 * 640, 0.8 * 720], L, zoom.repeat, zoom.offset);
   check("three の texture.matrix（背景と同じ変換）でも同じ座標になる（上下の反転だけ違う）", near(pv.x, mu[0], 1e-9) && near(1 - pv.y, mu[1], 1e-9));
+}
+
+// ================= 2c'. 共有コード: 背面の超広角だけ選ぶ（stage2-fix2 の 1。iPad で「前面超広角カメラ」が選ばれていた）=================
+{
+  const cam = (label, id = label) => ({ kind: "videoinput", label, deviceId: id });
+  const mic = { kind: "audioinput", label: "iPhone マイク", deviceId: "mic" };
+  const iphoneJa = [cam("前面カメラ"), cam("背面カメラ"), cam("背面超広角カメラ", "uw"), cam("背面デュアル広角カメラ"), cam("背面望遠カメラ"), mic];
+  const r1 = pickBackUltraWide(iphoneJa);
+  check("カメラ選び: iPhone（日本語）→ 背面超広角カメラ", r1.device?.deviceId === "uw" && r1.reason === "back-ultra-wide", JSON.stringify(r1));
+  const iphoneEn = [cam("Front Camera"), cam("Back Camera"), cam("Back Ultra Wide Camera", "uw"), cam("Back Dual Wide Camera"), cam("Back Triple Camera")];
+  const r2 = pickBackUltraWide(iphoneEn);
+  check("カメラ選び: iPhone（英語）→ Back Ultra Wide Camera", r2.device?.deviceId === "uw", JSON.stringify(r2));
+  // 前面の超広角（Center Stage 対応の iPad）が先に並んでいても背面を選ぶ
+  const both = [cam("Front Ultra Wide Camera", "fuw"), cam("Back Ultra Wide Camera", "buw")];
+  check("カメラ選び: 前面と背面の超広角があれば背面（前面が先に並んでいても）", pickBackUltraWide(both).device?.deviceId === "buw");
+  const ipadJa = [cam("前面超広角カメラ", "fuw"), cam("背面カメラ")];
+  const r3 = pickBackUltraWide(ipadJa);
+  check("カメラ選び: iPad（超広角が前面だけ「前面超広角カメラ」）→ 選ばない（facingMode: environment のまま）", r3.device === null && r3.reason.startsWith("front-only"), JSON.stringify(r3));
+  const ipadEn = [cam("Front Ultra Wide Camera", "fuw"), cam("Back Camera")];
+  check("カメラ選び: iPad（英語 Front Ultra Wide Camera）→ 選ばない", pickBackUltraWide(ipadEn).device === null);
+  const none = [cam("前面カメラ"), cam("背面カメラ"), cam("FaceTime HD Camera")];
+  const r4 = pickBackUltraWide(none);
+  check("カメラ選び: 超広角が無い → 選ばない（reason=no-ultra-wide）", r4.device === null && r4.reason === "no-ultra-wide");
+  check("カメラ選び: 許可前（ラベルが空）→ 選ばない", pickBackUltraWide([cam(""), cam("")]).device === null);
+  const unknownSide = [cam("Ultra Wide Camera", "uw")];
+  const r5 = pickBackUltraWide(unknownSide);
+  check("カメラ選び: 前後を名乗らない超広角は次点で選ぶ（開いた後の facingMode で確かめる）", r5.device?.deviceId === "uw" && r5.reason.startsWith("ultra-wide"), JSON.stringify(r5));
+  check("カメラ選び: 音声入力は対象外", pickBackUltraWide([{ kind: "audioinput", label: "超広角", deviceId: "x" }]).device === null);
 }
 
 // ================= 2d. 段階 2: 人の形のマスク（MediaPipe の confidence mask → 1 枚の R8）=================
@@ -303,6 +341,46 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("マスク: 裾の切り方は変えられる（?maskEdge=。0.1〜0.9 で 0.5 → 128 前後）", Math.abs(pm.pixels[0] - 128) <= 1);
   pm.setFromFloat([new Float32Array(8 * 2).fill(1)], 8, 2);
   check("マスク: 大きさが変わったらテクスチャを作り直す", pm.size[0] === 8 && pm.size[1] === 2 && u.uMaskTex.value.image.width === 8);
+}
+
+// ================= 2e. 遅い端末では人の形の検出の回数を自動で下げる（stage2-fix2 の 4）=================
+{
+  check("maskHz の段: 上限 15 → 15/10/6/4、上限 8 → 8/6/4、上限 3 → 3、上限 20 → 20/15/10/6/4", JSON.stringify(maskHzLevels(15)) === "[15,10,6,4]" && JSON.stringify(maskHzLevels(8)) === "[8,6,4]" && JSON.stringify(maskHzLevels(3)) === "[3]" && JSON.stringify(maskHzLevels(20)) === "[20,15,10,6,4]");
+  check("段の判定: 直近 2 秒の平均 fps が 30 未満なら 1 段下げる（理由付き）", (() => { const d = decideMaskHzLevel(0, 4, [20, 18]); return d.level === 1 && /fps2s=19<30/.test(d.reason); })(), JSON.stringify(decideMaskHzLevel(0, 4, [20, 18])));
+  check("段の判定: 1 秒だけでは下げない（2 秒ぶん要る）", decideMaskHzLevel(0, 4, [10]).level === 0);
+  check("段の判定: 平均が 30 以上なら下げない（35 と 26 → 30.5）", decideMaskHzLevel(0, 4, [35, 26]).level === 0);
+  check("段の判定: 一番下（4Hz）からは下げない", decideMaskHzLevel(3, 4, [10, 10]).level === 3);
+  check("段の判定: 5 秒続けて 45 超なら 1 段戻す", (() => { const d = decideMaskHzLevel(2, 4, [50, 55, 60, 46, 58]); return d.level === 1 && /fps>45 for 5s/.test(d.reason); })());
+  check("段の判定: 4 秒ではまだ戻さない・1 秒でも 45 以下なら戻さない", decideMaskHzLevel(2, 4, [50, 55, 60, 46]).level === 2 && decideMaskHzLevel(2, 4, [50, 55, 45, 46, 58]).level === 2);
+  check("段の判定: 一番上（上限）からは上げない", decideMaskHzLevel(0, 4, [60, 60, 60, 60, 60]).level === 0);
+  // 描画の fps を与えて、実機の iPad（Pose を回すと 14〜20fps）の流れを再現: 下げた後は新しい 2 秒を見てから次を決める
+  const runGov = (gov, fpsAt, fromMs, toMs, running = true) => {
+    const changes = [];
+    let t = fromMs;
+    while (t < toMs) {
+      const c = gov.frame(t, running);
+      if (c) changes.push([Math.round(t), c]);
+      t += 1000 / fpsAt(t);
+    }
+    return changes;
+  };
+  const g = new MaskHzGovernor(15, true);
+  const down = runGov(g, () => 17, 0, 12000);
+  check("回数の自動調整: fps 17 が続くと 15 → 10 → 6 → 4 と 1 段ずつ（段ごとに 2 秒以上見てから）下げる", g.hz === 4 && down.length === 3 && down.every(([, c], i) => c.startsWith(`${[15, 10, 6][i]}→${[10, 6, 4][i]}`)) && down[1][0] - down[0][0] >= 2000 && down[2][0] - down[1][0] >= 2000, JSON.stringify(down));
+  const up = runGov(g, () => 58, 12000, 30000);
+  check("回数の自動調整: fps 58 に戻ると 5 秒ごとに 1 段ずつ戻す（4 → 6 → 10 → 15）", g.hz === 15 && up.length === 3 && up[1][0] - up[0][0] >= 5000, JSON.stringify(up));
+  const g2 = new MaskHzGovernor(15, true);
+  runGov(g2, () => 17, 0, 5000, false);
+  check("回数の自動調整: 検出を回していない間の fps では変えない", g2.hz === 15);
+  const g3 = new MaskHzGovernor(8, true);
+  runGov(g3, () => 17, 0, 12000);
+  check("回数の自動調整: ?maskHz=8 は上限（8 → 6 → 4）", g3.levels[0] === 8 && g3.hz === 4);
+  const g4 = new MaskHzGovernor(15, false);
+  runGov(g4, () => 10, 0, 10000);
+  check("回数の自動調整: ?maskHzAuto=0 なら変えない", g4.hz === 15);
+  const g5 = new MaskHzGovernor(15, true);
+  const osc = runGov(g5, (t) => (Math.floor(t / 500) % 2 ? 33 : 50), 0, 20000);
+  check("回数の自動調整: 30〜45 の間（33 と 50 を交互）では動かない", osc.length === 0 && g5.hz === 15, JSON.stringify(osc));
 }
 
 // ================= 3. フェードと信用度 =================

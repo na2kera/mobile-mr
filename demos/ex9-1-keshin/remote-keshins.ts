@@ -1,7 +1,8 @@
 // 段階 2: 相手の化身を自分の画面（スマホ）に描く。俯瞰画面と同じ keshin-view.ts の「他人用」を使い、
 // 相手の申告した頭の位置と体の向き（マーカー座標系）を自分のアンカーで自分のワールドに直して、その背後・同じ向きに置く。
 //   - 信用できるか（教訓 2）: 俯瞰画面と同じ effectiveTrack / poseReceivedLocal（keshin-math.ts の remoteDisplay）。
-//     marker は通常、gyro は経過が伸びるほど薄く（staleMs で半分）位置は最後の値で止める、none・通信切れ・自分のアンカー無しは描かない
+//     marker は通常、gyro は経過が伸びるほど薄く（staleMs で半分）位置は最後の値で止め、staleHideMs を超えたらフェードで消す。
+//     none・通信切れ・自分のアンカー無しは描かない
 //   - 跳びをなめらかに: 見た目の位置と向き（自分のワールド）を最新の目標へ時定数 smoothSec で寄せる。持つ状態はこの「表示中の値」だけ
 //     （教訓 4）。自分のアンカーの跳び（マーカーを見直したとき）でも目標が動くので同じ仕組みでなめらかになる。snapM 以上は即座に移す
 //   - 見上げ角に関係なく描く。演出は全員同じ timeline（段階 1 と同じ経路）
@@ -26,6 +27,8 @@ export type RemoteOptions = {
   /** これ以上離れた目標へは寄せずに即座に移す [m]（?snapM=） */
   snapM: number;
   staleMs: number;
+  /** gyro の経過がこれを超えたら化身をフェードで消す [ms]（?staleHideMs=。マーカーを見直したらまた出す） */
+  staleHideMs: number;
   noPoseMs: number;
   /** pose がこれだけ届かなければ通信切れとして描かない [ms]（?peerLostMs=） */
   lostMs: number;
@@ -200,7 +203,7 @@ export class RemoteKeshins {
       e.shownYaw = sm.snapped || e.shownYaw === null ? targetYaw : smoothYaw(e.shownYaw, targetYaw, dtSec, this.opts.smoothSec);
       e.dist = Math.hypot(sm.pos[0] - ctx.camWorldPos.x, sm.pos[1] - ctx.camWorldPos.y, sm.pos[2] - ctx.camWorldPos.z);
       e.view.update({ head: e.shownHead, yaw: e.shownYaw, visual, fade: disp.fade, aura: true, timeSec: now / 1000, viewportH: ctx.viewportH });
-      this.setDrawn(e, !visual.hidden && e.view.modelVisible, visual.hidden ? "off" : "ok");
+      this.setDrawn(e, !visual.hidden && e.view.modelVisible, visual.hidden ? "off" : disp.reason);
       e.active = !visual.hidden && (e.view.modelVisible || e.view.auraVisible);
     }
   }
@@ -211,6 +214,9 @@ export class RemoteKeshins {
       this.log("remote-first-draw", `${e.id} keshin=${e.view.spec.index} dist=${e.dist.toFixed(2)}m model=${e.view.isFallback ? "fallback" : "loaded"}`);
     } else if (!drawn && e.drawn) {
       this.log("remote-hidden", `${e.id} reason=${reason}`);
+    } else if (drawn && !e.drawn) {
+      // 一度消えた後にまた描いた（例: stale で消えた相手がマーカーを見直した）
+      this.log("remote-shown", `${e.id} after=${e.reason} track=${e.track}`);
     }
     e.drawn = drawn;
     e.reason = reason;

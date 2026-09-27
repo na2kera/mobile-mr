@@ -289,6 +289,93 @@ export function drawPersonShape(ctx: CanvasRenderingContext2D, s: PersonShape, f
   ctx.restore();
 }
 
+// ---- 遅い端末では検出の回数を自動で下げる（stage2-fix2 の 4）----
+
+/** 検出の回数の段 [回/s]。URL の ?maskHz= が上限（先頭）になる */
+export const MASK_HZ_STEPS = [15, 10, 6, 4] as const;
+/** 直近 DOWN_SAMPLES 秒の fps の平均がこれを下回ったら 1 段下げる */
+export const MASK_HZ_DOWN_FPS = 30;
+export const MASK_HZ_DOWN_SAMPLES = 2;
+/** 直近 UP_SAMPLES 秒の fps がすべてこれを超えたら 1 段戻す */
+export const MASK_HZ_UP_FPS = 45;
+export const MASK_HZ_UP_SAMPLES = 5;
+
+/** 上限 cap（?maskHz=）から段の並びを作る: 15 → [15, 10, 6, 4]、8 → [8, 6, 4]、3 → [3]、20 → [20, 15, 10, 6, 4] */
+export function maskHzLevels(cap: number): number[] {
+  return [cap, ...MASK_HZ_STEPS.filter((hz) => hz < cap)];
+}
+
+/**
+ * 段を決める純粋関数（scripts/test-keshin.mjs でテスト）。level = 今の段（maskHzLevels の添字）、samples = 今の段になってからの
+ * 1 秒ごとの fps（古い順）。段を変えたら呼び出し側は samples を捨てる（下げた効果を見てから次を決める。持つ状態は「今の段」だけ）
+ */
+export function decideMaskHzLevel(level: number, levelCount: number, samples: readonly number[]): { level: number; reason: string | null } {
+  if (samples.length >= MASK_HZ_DOWN_SAMPLES && level < levelCount - 1) {
+    const last = samples.slice(-MASK_HZ_DOWN_SAMPLES);
+    const mean = last.reduce((a, b) => a + b, 0) / last.length;
+    if (mean < MASK_HZ_DOWN_FPS) return { level: level + 1, reason: `fps${MASK_HZ_DOWN_SAMPLES}s=${mean.toFixed(0)}<${MASK_HZ_DOWN_FPS}` };
+  }
+  if (samples.length >= MASK_HZ_UP_SAMPLES && level > 0) {
+    const last = samples.slice(-MASK_HZ_UP_SAMPLES);
+    if (last.every((f) => f > MASK_HZ_UP_FPS)) return { level: level - 1, reason: `fps>${MASK_HZ_UP_FPS} for ${MASK_HZ_UP_SAMPLES}s(min=${Math.min(...last).toFixed(0)})` };
+  }
+  return { level, reason: null };
+}
+
+/**
+ * 描画の fps を 1 秒ごとに数えて decideMaskHzLevel に渡す。数えるのは人の形の検出を回している間だけ（止まっている間の fps は
+ * 検出の重さと関係ないので捨てる）。段が変わったら「from→to 理由」を返す（ログ用）
+ */
+export class MaskHzGovernor {
+  readonly levels: number[];
+  level = 0;
+  private samples: number[] = [];
+  private bucketStartMs = -1;
+  private frames = 0;
+  private readonly adaptive: boolean;
+
+  constructor(cap: number, adaptive: boolean) {
+    this.levels = adaptive ? maskHzLevels(cap) : [cap];
+    this.adaptive = adaptive;
+  }
+
+  get hz(): number {
+    return this.levels[this.level];
+  }
+
+  get cap(): number {
+    return this.levels[0];
+  }
+
+  /** 毎フレーム呼ぶ。running = このフレームで人の形の検出を回す状態か */
+  frame(now: number, running: boolean): string | null {
+    if (!this.adaptive) return null;
+    if (!running) {
+      this.samples = [];
+      this.bucketStartMs = -1;
+      return null;
+    }
+    if (this.bucketStartMs < 0) {
+      this.bucketStartMs = now;
+      this.frames = 0;
+      return null;
+    }
+    this.frames++;
+    const span = now - this.bucketStartMs;
+    if (span < 1000) return null;
+    this.samples.push((this.frames * 1000) / span);
+    if (this.samples.length > MASK_HZ_UP_SAMPLES) this.samples.shift();
+    this.bucketStartMs = now;
+    this.frames = 0;
+    const d = decideMaskHzLevel(this.level, this.levels.length, this.samples);
+    if (d.level === this.level) return null;
+    const from = this.hz;
+    this.level = d.level;
+    this.samples = [];
+    return `${from}→${this.hz} reason=${d.reason}`;
+  }
+}
+
 // ---- 人の形の検出を回す（PoseLandmarker の segmentation mask / フェイク）----
 
 export type OcclusionOptions = {
@@ -298,6 +385,8 @@ export type OcclusionOptions = {
   fake: boolean;
   /** 検出の回数の上限 [回/s]（?maskHz=） */
   maskHz: number;
+  /** fps を見て検出の回数を自動で下げる（?maskHzAuto=0 で止める） */
+  maskHzAuto: boolean;
   /** 同時に検出する人数の上限（?maskPoses=） */
   maxPoses: number;
   /** 推論に渡す画像の長辺 [px]（?maskDetW=。マスクの大きさもこれになる） */
@@ -306,16 +395,24 @@ export type OcclusionOptions = {
   modelUrls: string[];
   /** マスクがこれより古くなったら隠すのをやめる [ms] */
   staleOffMs: number;
+  /**
+   * ?maskDebug=1: 相手がいなくても・視野に化身が無くても読み込んで回す（実機で人の形が出るかを 1 台で確かめる）。
+   * 画面の隅の縮小画像（debugCanvases）もこのときだけ描く
+   */
+  debug: boolean;
+  /** delegate = auto で GPU の人数が 0 のままこれだけ続いたら、CPU でも回して比べる [ms] */
+  probeAfterMs: number;
   log: (kind: string, detail: string) => void;
+};
+
+type PoseCallbackResult = {
+  landmarks?: unknown[];
+  segmentationMasks?: { width: number; height: number; getAsFloat32Array(): Float32Array }[];
 };
 
 /** 使う PoseLandmarker の部分（コールバック版の detectForVideo。結果のマスクはコールバックの中でだけ有効） */
 type PoseCallbackLandmarker = {
-  detectForVideo(
-    source: HTMLVideoElement | HTMLCanvasElement,
-    timestampMs: number,
-    callback: (result: { segmentationMasks?: { width: number; height: number; getAsFloat32Array(): Float32Array }[] }) => void,
-  ): void;
+  detectForVideo(source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number, callback: (result: PoseCallbackResult) => void): void;
 };
 
 type PoseTrackerLike = {
@@ -323,20 +420,38 @@ type PoseTrackerLike = {
   modelUrl: string;
   modelBuffer: ArrayBuffer;
   lastMs: number;
+  lastInput: string;
   detectWith(video: HTMLVideoElement, run: (landmarker: unknown, source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number) => void): boolean;
   close(): void;
 };
+
+/** 入力の明るさを測る間隔 [ms]（真っ黒の映像を渡していないか。iOS の drawImage 対策の切り分け） */
+const LUMA_EVERY_MS = 1000;
+/** ?maskDebug=1 の縮小画像を描く間隔 [ms] */
+const DEBUG_DRAW_EVERY_MS = 150;
+/** GPU と CPU を同じフレームで比べる回数 */
+const PROBE_RUNS = 3;
+/** 比べて CPU でも 0 人だったら（人が写っていないだけかもしれない）、次に比べるまで待つ [ms] と、比べる回数の上限 */
+const PROBE_RETRY_MS = 30000;
+const PROBE_MAX = 4;
+
+/** ?maskDebug=1 の画面の隅の縮小画像（Pose に渡した入力と、最新のマスク） */
+export type MaskDebugCanvases = { input: HTMLCanvasElement; mask: HTMLCanvasElement };
 
 /**
  * 人の形のマスクを ?maskHz= 以下で更新する。
  *   - 読み込み（モデル・wasm・GPU の初期化）は、隠す処理が有効で相手が 1 人でも入室したら先に済ませる（初めて視野に入った瞬間に
  *     重い初期化が走らないように）。人数は最初から ?maskPoses= で作り、使っている最中に作り直さない（GL コンテキストが 2 組になる山を避ける）
  *   - 回すのは、相手の化身（モデルかオーラ）が視野に入っていそうな間だけ。マーカー検出と同じフレームでは回さない
+ *   - 回数は fps を見て自動で下げる（MaskHzGovernor。15 → 10 → 6 → 4、?maskHz= が上限）
  *   - Pose の読み込み・推論に失敗したら隠さずに描く（化身は止めない）
+ *   - 診断（HUD と実機ログの 1 行）: 1 回の結果の人数（landmarks）・マスクの枚数・入力の大きさ・入力の平均の明るさ・delegate
+ *   - delegate = auto で GPU が 0 人のまま続いたら、CPU でも同じフレームを回して比べ、CPU だけ人が出るなら CPU に切り替える
  */
 export class OcclusionController {
   readonly uniforms: MaskUniforms;
   readonly mask: PersonMask;
+  readonly governor: MaskHzGovernor;
   private readonly opts: OcclusionOptions;
   status: "off" | "idle" | "loading" | "ready" | "failed" = "idle";
   detail = "";
@@ -353,12 +468,44 @@ export class OcclusionController {
   everMasked = false;
   /** 確認用: 隠す処理を一時的に止める（検出は続ける） */
   disabled = false;
+  // ---- 診断 ----
+  /** 直近 1 回の結果の人数（landmarks.length）とマスクの枚数（segmentationMasks.length）。null = まだ回していない */
+  lastPoses: number | null = null;
+  lastMasks: number | null = null;
+  /** 直近に Pose に渡した入力の大きさ（"512x288"） */
+  lastInput = "";
+  /** 入力の平均の明るさ（0〜255、1 秒ごと）。null = まだ測っていない */
+  lastLuma: number | null = null;
+  private lumaAtMs = -Infinity;
+  /** 回した回数と、そのうち人が 1 人以上出た回数（読み込んでから） */
+  runs = 0;
+  runsWithPerson = 0;
+  /** GPU → CPU の比べ方（delegate = auto のときだけ） */
+  probe: "-" | "waiting" | "loading" | "running" | "kept-gpu" | "switched-cpu" | "failed" = "-";
+  private zeroSinceMs: number | null = null;
+  private gpuProven = false;
+  private probeCount = 0;
+  private probeTracker: PoseTrackerLike | null = null;
+  private probeRuns = 0;
+  private probeCpuFound = 0;
+  private probeGpuFound = 0;
+  private nextProbeAtMs = 0;
+  // ---- ?maskDebug=1 ----
+  private debugCanvases: MaskDebugCanvases | null = null;
+  private debugDrawnMs = -Infinity;
+  private lumaCanvas: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
 
   constructor(opts: OcclusionOptions, dilatePx: number, depthMarginM: number, edge: [number, number]) {
     this.opts = opts;
     this.uniforms = createMaskUniforms(dilatePx, depthMarginM);
     this.mask = new PersonMask(this.uniforms, edge);
+    this.governor = new MaskHzGovernor(opts.maskHz, opts.maskHzAuto);
     if (!opts.enabled) this.status = "off";
+  }
+
+  /** ?maskDebug=1 の縮小画像の描き先 */
+  setDebugCanvases(c: MaskDebugCanvases | null) {
+    this.debugCanvases = c;
   }
 
   /** 背景の VideoTexture の UV 変換（cover・camZoom）をマスクの uniform に写す（毎フレーム） */
@@ -378,6 +525,11 @@ export class OcclusionController {
     return performance.now() - this.mask.updatedMs;
   }
 
+  /** 実際に使っている delegate（フェイクは "fake"、読み込み前は "-"） */
+  get delegate(): string {
+    return this.opts.fake ? "fake" : (this.tracker?.delegate ?? "-");
+  }
+
   /**
    * 毎フレーム呼ぶ。need = 相手の化身（モデルかオーラ）が視野に入っていそう、markerRan = このフレームでマーカー検出をした、
    * others = 相手の人数（1 人でもいれば読み込みだけ先に済ませる）、fakeImage = フェイクの人の形（?fakeperson=1 のとき）
@@ -387,14 +539,18 @@ export class OcclusionController {
       this.uniforms.uMaskOn.value = 0;
       return;
     }
-    if (!this.opts.fake && this.status === "idle" && others > 0) void this.load(this.opts.maxPoses);
-    if (need !== this.running) {
-      this.running = need;
-      this.opts.log(need ? "mask-start" : "mask-stop", `${this.opts.fake ? "fake" : "pose"} status=${this.status}`);
-      if (!need) this.mask.clear();
+    if (!this.opts.fake && this.status === "idle" && (others > 0 || this.opts.debug)) void this.load(this.opts.maxPoses);
+    // ?maskDebug=1 は化身が視野に無くても回す（隠すのは化身が視野にあるときだけなのは同じ）
+    const run = need || this.opts.debug;
+    if (run !== this.running) {
+      this.running = run;
+      this.opts.log(run ? "mask-start" : "mask-stop", `${this.opts.fake ? "fake" : "pose"} status=${this.status} maskHz=${this.governor.hz}`);
+      if (!run) this.mask.clear();
     }
-    const dueMs = 1000 / this.opts.maskHz;
-    if (need && !markerRan && now - this.lastRunMs >= dueMs) {
+    const change = this.governor.frame(now, run && (this.opts.fake || this.status === "ready"));
+    if (change) this.opts.log("mask-hz", `${change} cap=${this.governor.cap}`);
+    const dueMs = 1000 / this.governor.hz;
+    if (run && !markerRan && now - this.lastRunMs >= dueMs) {
       if (this.opts.fake) {
         this.lastRunMs = now;
         const t0 = performance.now();
@@ -403,6 +559,13 @@ export class OcclusionController {
         else this.mask.clear();
         this.maskMs = performance.now() - t0;
         this.updates.push(now);
+        this.lastPoses = img ? (this.mask.hasPerson ? 1 : 0) : 0;
+        this.lastMasks = img ? 1 : 0;
+        this.lastInput = img ? `${img.width}x${img.height}` : "-";
+        if (video && video.videoWidth > 0) {
+          if (now - this.lumaAtMs >= LUMA_EVERY_MS) this.measureLuma(video, now);
+          this.drawDebug(video, now, false);
+        }
       } else if (this.status === "ready" && this.tracker && video) {
         this.lastRunMs = now;
         this.runPose(video, now);
@@ -418,13 +581,21 @@ export class OcclusionController {
     const t0 = performance.now();
     let error: string | null = null;
     let ran = false;
+    let poses = 0;
+    let masksN = 0;
+    let inputSource: HTMLVideoElement | HTMLCanvasElement | null = null;
     try {
       ran = tracker.detectWith(video, (landmarker, source, ts) => {
+        inputSource = source;
+        // 入力の明るさ（1 秒ごと）: Pose に渡すのと同じ画像を測る（video → canvas の drawImage が黒くなっていないか）
+        if (now - this.lumaAtMs >= LUMA_EVERY_MS) this.measureLuma(source, now);
         // コールバック版: マスクはこの中でだけ有効（外へ持ち出さない。読み戻して自前の R8 にコピーする）。
         // 返り値の版はマスクを複製するので、コピーが 1 回多い
         (landmarker as PoseCallbackLandmarker).detectForVideo(source, ts, (result) => {
           try {
+            poses = result.landmarks?.length ?? 0;
             const masks = result.segmentationMasks ?? [];
+            masksN = masks.length;
             if (masks.length > 0) this.mask.setFromFloat(masks.map((m) => m.getAsFloat32Array()), masks[0].width, masks[0].height);
             else this.mask.clear();
           } catch (e: unknown) {
@@ -443,6 +614,194 @@ export class OcclusionController {
     this.poseMs = tracker.lastMs;
     this.maskMs = performance.now() - t0;
     this.updates.push(now);
+    this.lastPoses = poses;
+    this.lastMasks = masksN;
+    this.lastInput = tracker.lastInput;
+    this.runs++;
+    if (poses > 0) this.runsWithPerson++;
+    const src = inputSource as HTMLVideoElement | HTMLCanvasElement | null;
+    if (src) this.drawDebug(src, now, true);
+    this.probeStep(video, now, poses);
+  }
+
+  /** 入力の平均の明るさ（0〜255）を小さな canvas に縮めて測る */
+  private measureLuma(source: HTMLVideoElement | HTMLCanvasElement, now: number) {
+    this.lumaAtMs = now;
+    try {
+      if (!this.lumaCanvas) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 32;
+        canvas.height = 18;
+        this.lumaCanvas = { canvas, ctx: canvas.getContext("2d", { willReadFrequently: true })! };
+      }
+      const { ctx, canvas } = this.lumaCanvas;
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+      const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      this.lastLuma = sum / (d.length / 4);
+    } catch {
+      this.lastLuma = -1;
+    }
+  }
+
+  /** ?maskDebug=1: 入力の縮小画像と、最新のマスク（白 = 人）を画面の隅に描く */
+  private drawDebug(source: HTMLVideoElement | HTMLCanvasElement, now: number, real: boolean) {
+    const dc = this.debugCanvases;
+    if (!dc || now - this.debugDrawnMs < DEBUG_DRAW_EVERY_MS) return;
+    this.debugDrawnMs = now;
+    const ictx = dc.input.getContext("2d");
+    if (ictx) {
+      const sw = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
+      const sh = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
+      if (sw > 0 && sh > 0) {
+        dc.input.height = Math.round((dc.input.width * sh) / sw);
+        ictx.drawImage(source, 0, 0, dc.input.width, dc.input.height);
+      }
+      ictx.fillStyle = "rgba(0,0,0,0.6)";
+      ictx.fillRect(0, 0, dc.input.width, 12);
+      ictx.fillStyle = "#fff";
+      ictx.font = "10px monospace";
+      ictx.fillText(`${real ? "pose in" : "fake"} ${this.lastInput} lum=${this.lastLuma === null ? "-" : this.lastLuma.toFixed(0)}`, 2, 10);
+    }
+    const mctx = dc.mask.getContext("2d");
+    if (mctx) {
+      const [w, h] = this.mask.size;
+      const px = this.mask.pixels;
+      if (w > 0 && h > 0 && px.length === w * h) {
+        if (dc.mask.width !== w || dc.mask.height !== h) {
+          dc.mask.width = w;
+          dc.mask.height = h;
+        }
+        const img = mctx.createImageData(w, h);
+        for (let i = 0; i < px.length; i++) {
+          const v = px[i];
+          img.data[i * 4] = v;
+          img.data[i * 4 + 1] = v;
+          img.data[i * 4 + 2] = v;
+          img.data[i * 4 + 3] = 255;
+        }
+        mctx.putImageData(img, 0, 0);
+      } else {
+        mctx.fillStyle = "#000";
+        mctx.fillRect(0, 0, dc.mask.width, dc.mask.height);
+      }
+      const fs = Math.max(10, Math.round(dc.mask.height / 12));
+      mctx.fillStyle = "rgba(0,0,0,0.6)";
+      mctx.fillRect(0, 0, dc.mask.width, fs + 4);
+      mctx.fillStyle = this.lastPoses ? "#7fff7f" : "#ff8080";
+      mctx.font = `${fs}px monospace`;
+      mctx.fillText(`mask poses=${this.lastPoses ?? "-"} masks=${this.lastMasks ?? "-"} ${this.delegate}`, 2, fs);
+    }
+  }
+
+  /**
+   * delegate = auto で GPU の人数が 0 のまま probeAfterMs 続いたら、CPU の PoseLandmarker を作って同じフレームで PROBE_RUNS 回比べる。
+   * CPU だけ人が出たら CPU に切り替える（GPU を閉じる）。CPU でも 0 人なら GPU のまま（人が写っていないだけかもしれない）で、
+   * PROBE_RETRY_MS 後にまた比べる（PROBE_MAX 回まで）。GPU で一度でも人が出たら比べない
+   */
+  private probeStep(video: HTMLVideoElement, now: number, gpuPoses: number) {
+    if (this.opts.delegate !== "auto" || this.tracker?.delegate !== "GPU" || this.gpuProven) return;
+    if (gpuPoses > 0 && this.probe !== "running") {
+      this.gpuProven = true;
+      this.zeroSinceMs = null;
+      if (this.probe === "waiting" || this.probe === "kept-gpu") this.probe = "-";
+      return;
+    }
+    if (this.probe === "running" && this.probeTracker) {
+      let cpuPoses = 0;
+      let cpuError: string | null = null;
+      try {
+        this.probeTracker.detectWith(video, (landmarker, source, ts) => {
+          (landmarker as PoseCallbackLandmarker).detectForVideo(source, ts, (result) => {
+            cpuPoses = result.landmarks?.length ?? 0;
+          });
+        });
+      } catch (e: unknown) {
+        cpuError = e instanceof Error ? e.message : String(e);
+      }
+      if (cpuError) {
+        this.endProbe("failed", `cpu-error ${cpuError.slice(0, 80)}`);
+        return;
+      }
+      this.probeRuns++;
+      if (cpuPoses > 0) this.probeCpuFound++;
+      if (gpuPoses > 0) this.probeGpuFound++;
+      if (this.probeRuns < PROBE_RUNS) return;
+      const counts = `cpu=${this.probeCpuFound}/${PROBE_RUNS} gpu=${this.probeGpuFound}/${PROBE_RUNS} cpuMs=${this.probeTracker.lastMs.toFixed(0)}`;
+      if (this.probeCpuFound > 0 && this.probeGpuFound === 0) {
+        const gpu = this.tracker!;
+        this.tracker = this.probeTracker;
+        this.probeTracker = null;
+        try {
+          gpu.close();
+        } catch {
+          // 閉じる失敗は無視
+        }
+        this.probe = "switched-cpu";
+        this.detail = `CPU numPoses=${this.opts.maxPoses} (auto: GPU 0 people)`;
+        this.opts.log("mask-delegate", `GPU→CPU reason=gpu-0-people ${counts}`);
+      } else if (this.probeGpuFound > 0) {
+        this.gpuProven = true;
+        this.endProbe("-", `keep=GPU reason=gpu-found ${counts}`);
+      } else {
+        this.endProbe("kept-gpu", `keep=GPU reason=both-0(no person in view?) ${counts} retryIn=${PROBE_RETRY_MS / 1000}s`);
+      }
+      return;
+    }
+    if (this.probe === "loading" || this.probe === "switched-cpu" || this.probe === "failed") return;
+    if (this.zeroSinceMs === null) this.zeroSinceMs = now;
+    if (this.probe === "-") this.probe = "waiting";
+    if (now - this.zeroSinceMs >= this.opts.probeAfterMs && now >= this.nextProbeAtMs && this.probeCount < PROBE_MAX) void this.startProbe(now);
+  }
+
+  private async startProbe(now: number) {
+    this.probe = "loading";
+    this.probeCount++;
+    this.opts.log("mask-delegate-probe", `start #${this.probeCount} gpu-0-people for ${((now - (this.zeroSinceMs ?? now)) / 1000).toFixed(1)}s runs=${this.runs}`);
+    try {
+      const { createPoseTracker } = await import("../../src/shared/pose-tracker");
+      const cpu = await createPoseTracker(
+        {
+          numPoses: this.opts.maxPoses,
+          delegate: "CPU",
+          modelUrls: this.opts.modelUrls,
+          modelBuffer: this.tracker?.modelBuffer,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          inputMaxSide: this.opts.detW,
+          inputMaxSideCpu: this.opts.detW,
+          outputSegmentationMasks: true,
+        },
+        () => {},
+      );
+      if (this.probe !== "loading" || !this.tracker) {
+        cpu.close();
+        return;
+      }
+      this.probeTracker = cpu as unknown as PoseTrackerLike;
+      this.probeRuns = 0;
+      this.probeCpuFound = 0;
+      this.probeGpuFound = 0;
+      this.probe = "running";
+    } catch (e: unknown) {
+      this.endProbe("failed", `cpu-load ${e instanceof Error ? e.message.slice(0, 80) : String(e)}`);
+    }
+  }
+
+  private endProbe(state: OcclusionController["probe"], detail: string) {
+    const t = this.probeTracker;
+    this.probeTracker = null;
+    try {
+      t?.close();
+    } catch {
+      // 閉じる失敗は無視
+    }
+    this.probe = state;
+    this.zeroSinceMs = null;
+    this.nextProbeAtMs = performance.now() + PROBE_RETRY_MS;
+    this.opts.log("mask-delegate-probe", detail);
   }
 
   private async load(numPoses: number) {
@@ -471,7 +830,7 @@ export class OcclusionController {
       this.tracker = tracker as unknown as PoseTrackerLike;
       this.status = "ready";
       this.detail = `${tracker.delegate} numPoses=${numPoses}`;
-      this.opts.log("mask-ready", `${tracker.delegate} numPoses=${numPoses} load=${(performance.now() - t0).toFixed(0)}ms model=${tracker.modelUrl.startsWith("http") ? "remote" : "local"}`);
+      this.opts.log("mask-ready", `${tracker.delegate} numPoses=${numPoses} detW=${this.opts.detW} load=${(performance.now() - t0).toFixed(0)}ms model=${tracker.modelUrl.startsWith("http") ? "remote" : "local"}`);
     } catch (e: unknown) {
       this.fail(`load: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -484,19 +843,32 @@ export class OcclusionController {
     this.uniforms.uMaskOn.value = 0;
     const tracker = this.tracker;
     this.tracker = null;
-    try {
-      tracker?.close();
-    } catch {
-      // close の失敗は無視（描画ループへ上げない）
+    for (const t of [tracker, this.probeTracker]) {
+      try {
+        t?.close();
+      } catch {
+        // close の失敗は無視（描画ループへ上げない）
+      }
     }
+    this.probeTracker = null;
     // 隠さずに描き続ける（化身の表示は止めない）
     this.opts.log("mask-failed", this.detail);
   }
 
-  /** HUD / ログの 1 行 */
+  /**
+   * HUD / ログの 1 行。人の形が出ない原因を実機のログ 1 行で切り分けられるように、1 回の結果の人数（poses = landmarks.length）・
+   * マスクの枚数（masks = segmentationMasks.length）・入力の大きさ（in=）・入力の平均の明るさ（lum=、0 に近ければ真っ黒）・
+   * delegate（dg=）・読み込んでから人が出た回数（found=人が出た回数/回した回数）・検出の回数の段（maskHz=今/上限）を入れる
+   */
   describe(): string {
     if (this.status === "off") return "occlude=off";
     const age = Number.isFinite(this.ageMs) ? `${this.ageMs.toFixed(0)}ms` : "-";
-    return `occlude=${this.opts.fake ? "fake" : this.status}${this.detail ? `(${this.detail})` : ""} run=${this.running ? 1 : 0} on=${this.uniforms.uMaskOn.value} pose=${this.poseMs.toFixed(0)}ms mask=${this.maskMs.toFixed(0)}ms hz=${this.hz} age=${age} person=${this.mask.hasPerson ? 1 : 0}`;
+    const lum = this.lastLuma === null ? "-" : this.lastLuma.toFixed(0);
+    return (
+      `occlude=${this.opts.fake ? "fake" : this.status}${this.detail ? `(${this.detail})` : ""} run=${this.running ? 1 : 0} on=${this.uniforms.uMaskOn.value} ` +
+      `pose=${this.poseMs.toFixed(0)}ms mask=${this.maskMs.toFixed(0)}ms hz=${this.hz} maskHz=${this.governor.hz}/${this.governor.cap} age=${age} person=${this.mask.hasPerson ? 1 : 0} ` +
+      `poses=${this.lastPoses ?? "-"} masks=${this.lastMasks ?? "-"} in=${this.lastInput || "-"} lum=${lum} dg=${this.delegate} found=${this.runsWithPerson}/${this.runs}` +
+      (this.probe !== "-" ? ` probe=${this.probe}` : "")
+    );
   }
 }

@@ -75,13 +75,15 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
 - **相手の化身をスマホに描く**（`remote-keshins.ts`）: 俯瞰画面と同じ `keshin-view.ts` の「他人用」。相手の申告した頭の位置と体の向き（マーカー座標系）を、自分のアンカーで自分のワールドに直し、その背後・同じ向きに置く（`keshin-math.ts` の `markerToWorld` / `markerFwdToWorldYaw`）。
   見上げ角に関係なく描く。不透明度 `?otherOpacity=0.85`。演出は全員同じ timeline。自分のアンカーが無い（`track=none`）間は描かず、視界内に「壁のマーカーを見てください（相手の化身の位置が分かりません）」。
 - **信用できるか**: 俯瞰画面と同じ `effectiveTrack` / `poseReceivedLocal`（`remoteDisplay`）。`marker` は通常、`gyro` は経過が伸びるほど薄く（`?staleMs=3000` で半分、以降その薄さで位置を止める）、`none`・通信切れ（`?peerLostMs=5000` 届かない）は描かない。
+  **長く見失った相手は消す**: `gyro` の経過が `?staleHideMs=8000` を超えたら 0.8 秒のフェードで消し（HUD の理由 `stale-hiding` → `stale`、ログ `event=remote-hidden ... reason=stale`）、マーカーを見直した pose が届けばまた出す（`event=remote-shown ... after=stale`）。
+  経過だけで決まる純粋関数（`remoteDisplay`）で状態を持たない。俯瞰画面は今までどおり（半分の薄さのまま）。
 - **跳びをなめらかに**: 表示中の頭の位置と向き（自分のワールド）を最新の目標へ時定数 `?remoteSmoothSec=0.25` で寄せる（`smoothToward`。持つ状態は表示中の値だけ）。
   自分のアンカーの跳び（マーカーを見直したとき。段階 1 の実機で最大 1.6m）でも目標が動くので同じ仕組みでなめらかになる。`?snapM=3` 以上離れたら即座に移す。跳びの大きさ（目標と表示の差の直前 1 秒の最大）を HUD とログの `jump=` に出す。
 - **人の形で隠す**（`keshin-occlusion.ts`）: カメラに人が写っている画素のうち、**持ち主（相手）の頭よりカメラから遠い部分**の相手の化身（とその足元・腰のオーラ）を描かない。自分の化身・視界の周りのオーラは隠さない。
   - 前後の判定: 断片のカメラからの距離が「持ち主の頭（表示中の、なめらかにした位置）までの距離 − `?maskDepthMargin=0.15`（m）」より遠いときだけ捨てる。距離は眼ごとのカメラ位置で出す（深度の前描画も同じ条件）。
     相手が**こちらを向いている**と化身は相手の向こう側なので、相手の体の輪郭の分だけ隠れる（相手の体が化身より手前）。相手が**向こうを向いている**と化身は自分と相手の間（人より手前）に来るので、人の形の上でも隠さない。
   - 人の形は MediaPipe PoseLandmarker の segmentation mask（`src/shared/pose-tracker.ts` の `outputSegmentationMasks`。既定 false で 09 は変わらない。モデルは `public/models/pose_landmarker_lite.task`、無ければ公式 URL）。
-    `numPoses` は最初から `?maskPoses=3`（使っている最中に作り直さない。GL コンテキストが 2 組になる山を避ける）。推論に渡す画像の長辺 `?maskDetW=320`（マスクもこの大きさ）。
+    `numPoses` は最初から `?maskPoses=3`（使っている最中に作り直さない。GL コンテキストが 2 組になる山を避ける）。推論に渡す画像の長辺 `?maskDetW=512`（マスクもこの大きさ。320 では iPad で一度も人が出なかったので上げた。09 は 640）。
     推論はコールバック版の `detectForVideo` で、マスクはコールバックの中でだけ読む（`getAsFloat32Array`。MediaPipe の GL コンテキストは three と別なので CPU で読み戻す）。複数人は画素ごとの最大で 1 枚の R8 テクスチャにまとめる。
     確信度は `?maskEdge=0.3,0.7` の smoothstep で裾を切ってから 0..255 にする（確信度をそのままディザの確率にすると、人の周りに点状の穴が散るため）。
     **前提: マスクの行 0 は画像の上**（d.ts には書かれていない。MediaPipe の `MPImage.getAsImageData` が同じ `readPixels` で上下を反転せずに ImageData にしていることからの推定。逆なら人の形が上下反転して見えるので、実機で最初に確かめる）。
@@ -91,10 +93,21 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
   - **マスクは Pose の検出の時点のもの**なので、相手が速く動くと隠れる範囲が少し遅れる（最大で 1/`maskHz` 秒 + 推論の時間。仕様）。
   - 重さ: Pose の読み込み（モデル・wasm・GPU の初期化）は、隠す処理が有効で相手が 1 人でも入室したら先に済ませる（時間は `event=mask-ready ... load=..ms`）。
     回すのは相手の化身（モデルかオーラ。出現の最初と消える終わりのオーラだけの時間も含む）が視野に入っていそうな間だけで、回数は `?maskHz=15` が上限、マーカー検出をしたフレームでは回さない。
+    **遅い端末では回数を自動で下げる**（`MaskHzGovernor`。`?maskHzAuto=0` で止める）: 検出を回している間の fps を 1 秒ごとに数え、直近 2 秒の平均が 30 未満なら 1 段下げ（15 → 10 → 6 → 4）、5 秒続けて 45 を超えたら 1 段戻す。
+    `?maskHz=` は上限（8 なら 8 → 6 → 4）。持つ状態は「今の段」だけで、段を変えたら fps の記録を捨てて新しい 2 秒 / 5 秒を見てから次を決める（純粋関数 `decideMaskHzLevel`、Node テスト済み）。変えたらログ `event=mask-hz 15→10 reason=fps2s=19<30`。
     `?occlude=0` で丸ごと止める（Pose も読み込まない）。Pose の読み込み・推論に失敗したら隠さずに描く（HUD とログに理由）。
-  - HUD / ログ: `occlude=ready(GPU numPoses=3) run=1 on=1 pose=18ms mask=21ms hz=14 age=40ms person=1`（`pose=` は推論 1 回、`mask=` はマスクの更新 1 回の全体 = 推論 + 読み戻し + 変換。
-    テクスチャのアップロード自体は次の描画で行われる。`hz=` はマスクの更新回数 / 秒、`age=` はマスクの古さ）と、相手ごとに
-    `remote 名前(id) #番号 track 経過 dist=距離 drawn=描いているか(理由) fade=薄さ jump=跳び`。出来事は `remote-first-draw` / `remote-hidden`（理由）/ `remote-snap` / `mask-start` / `mask-stop` / `mask-ready` / `mask-failed`。
+  - **GPU で人が出ないとき CPU に切り替える**（`?delegate=auto` のときだけ）: GPU で 0 人のまま `?maskProbeAfterMs=10000` 続いたら、CPU の PoseLandmarker を（モデルを使い回して）作り、同じフレームで 3 回比べる。
+    CPU だけ人が出たら CPU に切り替える（`event=mask-delegate GPU→CPU reason=gpu-0-people cpu=2/3 gpu=0/3`）。両方 0 人なら人が写っていないだけかもしれないので GPU のまま、30 秒後にまた比べる（4 回まで。`event=mask-delegate-probe keep=GPU reason=both-0 ...`）。GPU で一度でも人が出たら比べない。
+    手で比べるなら `?delegate=cpu` / `?delegate=gpu`。
+  - HUD / ログ（1 秒ごとの `state:` 行にも同じものが入る）:
+    `occlude=ready(GPU numPoses=3) run=1 on=1 pose=18ms mask=21ms hz=14 maskHz=15/15 age=40ms person=1 poses=1 masks=1 in=512x288 lum=97 dg=GPU found=120/130`
+    - `pose=` 推論 1 回、`mask=` マスクの更新 1 回の全体（推論 + 読み戻し + 変換。テクスチャのアップロード自体は次の描画）、`hz=` マスクの更新回数 / 秒、`maskHz=今の段/上限`、`age=` マスクの古さ
+    - **人の形が出ないときの切り分け用**: `poses=` 1 回の結果の人数（`landmarks.length`）、`masks=` マスクの枚数（`segmentationMasks.length`）、`in=` Pose に渡した入力の大きさ、
+      `lum=` 入力の平均の明るさ（0〜255。0 に近ければ video → canvas の drawImage が黒い）、`dg=` 実際の delegate、`found=人が出た回数/回した回数`、`probe=` GPU と CPU の比べ方の状態
+    - 相手ごとに `remote 名前(id) #番号 track 経過 dist=距離 drawn=描いているか(理由) fade=薄さ jump=跳び`
+    - 出来事は `remote-first-draw` / `remote-hidden`（理由）/ `remote-shown` / `remote-snap` / `mask-start` / `mask-stop` / `mask-ready` / `mask-failed` / `mask-hz` / `mask-delegate` / `mask-delegate-probe` / `camera`
+  - **`?maskDebug=1`**: 相手がいなくても・化身が視野に無くても Pose を読み込んで回し、画面の右上に「Pose に渡した入力の縮小画像（`in=` と `lum=`）」と「最新のマスク（白 = 人。`poses=` `masks=` delegate）」を小さく出す。
+    実機で人の形が出るかを 1 台で目で見て確かめる用（隠す処理そのものは相手の化身が視野にあるときだけなのは同じ）。
 - PC 確認用のフェイク（`?fakeperson=1`）: 相手の申告位置に `fake-body.ts` の合成の体を立たせ、フェイクカメラの映像に描いて、同じ形をマスクにも使う（MediaPipe の代わり。マスク → テクスチャ → シェーダーの経路を確かめる）。
 
 ## ファイル
@@ -127,6 +140,7 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
 | `auraN` | 400 | オーラの粒子数（足元の柱 + 腰の渦。視界の周りはこの 0.6 倍） |
 | `yawSmoothSec` | 0.25 | 体の向きの平滑化の時定数 [s]（送信側） |
 | `trackOkMs` / `staleMs` | 500 / 3000 | marker とみなす時間 / gyro で半分の薄さになる時間 [ms] |
+| `staleHideMs` | 8000 | gyro の経過がこれを超えたら相手の化身をフェードで消す [ms]（スマホだけ。マーカーを見直したらまた出す） |
 | `markerId` / `markerMm` | 0 / 150 | マーカー（room 内で一致が必要） |
 | `room` / `name` / `sendHz` | demo / - / 15 | 通信 |
 | `fov` / `eyeSep` / `camZoom` | auto / 0.064 / 0.7 | 表示（06〜09 と同じ） |
@@ -135,9 +149,13 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
 | `remoteSmoothSec` / `snapM` | 0.25 / 3 | 相手の化身の表示を目標へ寄せる時定数 [s] / 即座に移す距離 [m] |
 | `noPoseMs` / `peerLostMs` | 1000 / 5000 | 相手の pose が来ないとき marker でも gyro 扱いにする時間 / 通信切れとして描かない時間 [ms] |
 | `occlude` | 1 | 0 で人の形で隠す処理を止める（Pose も読み込まない） |
-| `maskHz` / `maskPoses` / `maskDetW` / `maskDilatePx` | 15 / 3 / 320 / 3 | 人の形の検出の回数の上限 / 人数（最初からこの人数で作る）/ 推論に渡す画像の長辺 [px] / 縁を膨らませる量 [マスクの px] |
+| `maskHz` / `maskPoses` / `maskDetW` / `maskDilatePx` | 15 / 3 / 512 / 3 | 人の形の検出の回数の上限 / 人数（最初からこの人数で作る）/ 推論に渡す画像の長辺 [px] / 縁を膨らませる量 [マスクの px] |
+| `maskHzAuto` | 1 | 0 で検出の回数を fps で自動に下げない（`maskHz` 固定） |
+| `maskDebug` | - | 1 で相手がいなくても人の形の検出を回し、入力とマスクを画面の右上に出す |
+| `maskProbeAfterMs` | 10000 | `delegate=auto` で GPU が 0 人のままこれだけ続いたら CPU でも回して比べる [ms] |
 | `maskDepthMargin` / `maskEdge` | 0.15 / 0.3,0.7 | 持ち主の頭よりこれだけ手前までは隠さない [m] / マスクの確信度の裾の切り方（smoothstep の 2 つの端） |
-| `delegate` / `poseModel` | auto / - | Pose の実行先（gpu / cpu）/ モデルの URL |
+| `delegate` / `poseModel` | auto / - | Pose の実行先（gpu / cpu。auto は GPU → 失敗や 0 人が続けば CPU）/ モデルの URL |
+| `lens` | - | `wide` で超広角を使わない（既定は**背面の**超広角があれば使う。前面の超広角は使わない） |
 | `fakeperson` | - | PC 確認用（`fakecam` と一緒に。相手の申告位置に合成の体を描いて、同じ形をマスクに使う） |
 
 ## PC で確認する
@@ -158,6 +176,18 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × �
 
 どの設定でも化身は本人と同じ向きなので、顔を前から見ることはない（前へ出すほど背中側、上に置くほどあご側から見る）。
 
+### Mac の Chrome で実カメラの Pose を確かめる（ヘッドレスではなく手で）
+
+ヘッドレスはフェイクカメラ（人がいない）なので、本物の Pose が人を見つけるかは確かめられない。Mac の内蔵カメラで自分を写して確かめる手順:
+
+1. `npm run dev` のあと、Mac の Chrome で `https://localhost:5173/demos/ex9-1-keshin/?maskDebug=1&name=Mac`（ポートは dev サーバーの表示に合わせる。`fakecam` は付けない）
+2. 名前を入れて開始し、カメラを許可する。HUD の `cam=` に選んだカメラと `facing=` `why=` が出る（Mac は超広角が無いので `why=environment(no-ultra-wide)`）
+3. カメラから 1.5〜2.5m 離れて、**腰から上（できれば膝まで）**が写るように立つ。右上の縮小画像の上段が入力、下段がマスク
+4. 見ること: 下段に自分の形が白く出る・`poses=1 masks=1`・`found=` の左が増える・`lum=` が 30 以上。`dg=` と `pose=..ms` を記録
+5. 顔だけが大きく写る距離（0.5m 以内）まで近づくと `poses=0` になるかも記録する（iPad の前面カメラで一度も人が出なかった原因の候補）
+6. `?delegate=cpu` と `?delegate=gpu` で開き直して、`poses=` と `pose=..ms` の差を記録する
+7. ログは `grep keshin-phone logs/client.log | grep -o 'occlude=.*' | tail`
+
 手で見るなら `npm run dev` のあと、`/demos/ex9-1-keshin/?camZoom=1&fakecam=1&autostart=1&name=PC` と `overview.html` を並べて、`K` キーで出し入れ・マウスで見上げる。
 
 ## 実機の確認手順（PC の確認は実機で効く証明にならない）
@@ -167,6 +197,7 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × �
 
 | # | 見ること | 測り方 | 目安（合格） |
 | --- | --- | --- | --- |
+| 0 | 背面カメラ | HUD の `cam=` とログの `event=camera` | **iPad でも iPhone でも `facing=environment`**（背面）。iPhone は `背面超広角カメラ` / `Back Ultra Wide Camera` で `why=back-ultra-wide`・`camFov=106`。iPad（超広角が前面だけ）は `why=environment(front-only(前面超広角カメラ))` で広角・`camFov=68`。`facing=user` なら失敗 |
 | 1 | ログが出る | `grep keshin-phone logs/client.log \| tail` | 1 秒ごとに `state: fps=...` の行、入室で `event=welcome`・モデルで `event=model-loaded`（読み込み時間 ms） |
 | 2 | 重さ（化身 off） | HUD / ログの `fps=` `render=` | fps ≥ 50、`render=`（CPU 側、2 眼込み）≤ 5ms |
 | 3 | 重さ（化身 on・見上げて化身が見えている） | 同上 + `tris=` `calls=` | **fps ≥ 30**。tris は魔神約 8 万・ペガサス約 26 万・ランスロット約 19 万（2 眼 × 深度の前描画込み）。ペガサスで 30 を切るなら `?auraN=200` と `?selfOpacity=` での差を記録 |
@@ -196,17 +227,24 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × �
 | S3 | 自分の化身は隠れない | A も化身を出して見上げる | 自分の化身は（B が写っていても）欠けない |
 | S4 | 重さ | A の HUD / ログの `fps=` `occlude=... pose=..ms mask=..ms hz=..`、`event=mask-ready ... load=` | **fps ≥ 30**（B の化身が出ていて、A の化身も出ている状態で）。`mask=`（マスクの更新 1 回の全体）は 40ms 以下、`hz=` は 10〜15。Pose の読み込みは B が入室した時点で終わっている（B の化身が初めて視野に入ってもカクつかない）。30 を切るときの下げ方は下 |
 | S5 | 跳び | A がマーカーから目を離して戻す（アンカーの見直し）。HUD / ログの `jump=` | B の化身が瞬間移動せず 0.5 秒ほどで滑る（`jump=` に跳びの大きさが出る）。3m 以上の跳びは即座に移る（`event=remote-snap`） |
-| S6 | 信用度 | B がマーカーから目を離す / B の通信を切る | A 側で B の化身が薄くなり（3 秒で半分、位置は止まる）、B がマーカーを見直すと戻る。B を閉じると 5 秒で消える |
+| S6 | 信用度 | B がマーカーから目を離す / B の通信を切る | A 側で B の化身が薄くなり（3 秒で半分、位置は止まる）、**8 秒でフェードして消える**（`drawn=0(stale)`・`event=remote-hidden ... reason=stale`）。B がマーカーを見直すとまた出る（`event=remote-shown`）。B を閉じると 5 秒で消える |
+| S6b | マスクが人の形に出るか | A を `?maskDebug=1` で開き、B（または別の人）を 1.5〜3m 先に全身か腰から上が入るように写す | 右上の下段に人の形が白く出る・`poses=1 masks=1`・`lum=` 30 以上。**上下が反転していないか**も見る。出ないときは `poses=` `masks=` `in=` `lum=` `dg=` `probe=` をログから記録（下の「人の形が出ないとき」） |
 | S7 | 自分のアンカーが無いとき | A がマーカーを見ていない（開いた直後） | B の化身は出ず、視界に「壁のマーカーを見てください（相手の化身の位置が分かりません）」 |
 | S8 | 隠す処理を止める | A を `?occlude=0` で開き直す | B の体の上にも化身が描かれる（比較用）。fps の差を記録 |
 
-**fps が 30 を切るときの下げ方**（`mask=` を見て、効く順）: `mask=` × `hz=` が 1 秒あたり 300ms を超えていれば `?maskHz=8`（検出の回数を半分に）→ `mask=` が大きければ `?maskDetW=256`（推論とマスクを小さく）→ `?maskPoses=1`（相手が 1 人なら）→
+**人の形が出ないとき**（`person=0` のまま。ログの `occlude=` の行で切り分ける）:
+`lum=` が 0〜10 → 入力が真っ黒（video → canvas の drawImage の問題）。`poses=0 masks=0` で `lum=` が普通 → Pose が人を見つけていない: 近すぎないか（顔だけ・上半身の一部だけだと見つからない。全身か腰から上を入れる）、
+`dg=GPU` なら `probe=` が `switched-cpu` になったか（なっていなければ `?delegate=cpu` で比べる）、`in=` が小さすぎないか（`?maskDetW=640`）。`poses=1 masks=0` → マスクだけが返っていない（MediaPipe 側）。`poses=1 masks=1 person=0` → マスクの確信度が低い（`?maskEdge=0.1,0.5`）。
+
+**fps が 30 を切るときの下げ方**（検出の回数は自動で 15 → 10 → 6 → 4 まで下がる。`maskHz=今/上限` とログの `event=mask-hz` を見る）（`mask=` を見て、効く順）: `mask=` × `hz=` が 1 秒あたり 300ms を超えていれば `?maskHz=8`（検出の回数を半分に）→ `mask=` が大きければ `?maskDetW=256`（推論とマスクを小さく）→ `?maskPoses=1`（相手が 1 人なら）→
 `?delegate=cpu` / `gpu`（ログの `mask-ready` に出た実行先と逆を試す）→ 最後に `?occlude=0`。`mask=` が小さいのに fps が低いなら、隠す処理ではなく描画（`tris=` `calls=`）の重さなので `?auraN=` や `?otherOpacity=` 側で比べる。
 どれで何 fps になったかを README に記録する。
 
 ## 既知の制約・未確認
 
 - 段階 1 は実機確認済み（2026-09-27）。**段階 2 は実機未確認**（上の S1〜S8）。
+- 段階 2 の最初の実機（2026-09-27）で分かったこと: iPad で前面の超広角カメラが選ばれていた（共有の `passthrough-camera.ts` を背面だけ選ぶように直した）、40 秒見失った相手の化身が半分の薄さで出続けた（`?staleHideMs=` で消すようにした）、
+  iPad で一度も人の形が出なかった（前面カメラに本人の顔が大きく写っていた。原因は未確定なので診断と `?maskDebug=1` を足した）、iPad は Pose を回すと fps 14〜20（検出の回数を自動で下げるようにした）。
 - 段階 1 の実機で、マーカーを見直したときに自己位置が最大 1.6m 跳んだ（`event=marker-found ... Δ=1.59m`）。段階 2 では相手の化身もその分だけ動いて見えるが、`?remoteSmoothSec=` でなめらかに寄せる（跳びそのものは減らない）。
 - 人の形で隠す前後の判定は「持ち主の頭までの距離 − 0.15m」だけで決めている。相手の体の奥行き（腕を前に出す等）や、別の人（持ち主ではない人）がどの距離にいるかは見ていない（別の人の形の上でも、持ち主の頭より奥の部分は隠れる）。
 - PC の確認（`?fakeperson=1`）は MediaPipe の代わりに合成の形のマスクを使う（化身を描かないフレームの背景の画素がフェイクの人の色かどうかで人の中・外を分けて数え、シェーダーと同じ式を使わずにマスクの座標が背景と一致することも確かめている）。

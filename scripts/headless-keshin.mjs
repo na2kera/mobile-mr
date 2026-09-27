@@ -579,6 +579,28 @@ try {
   const rgs = (await pA.eval("window.__keshin.remoteState()")).find((x) => x.id === vId);
   check("段階 2: gyro が staleMs を過ぎたら半分の薄さで位置を止める（申告が 0.5m 動いても表示は動かない）", rgs && rgs.drawn && Math.abs(rgs.fade - 0.5) < 1e-6 && Math.abs(rgs.head[0] - vm.r.head[0]) < 0.05, JSON.stringify(rgs && { fade: rgs.fade, head: rgs.head, before: vm?.r?.head }));
   clearInterval(vgs);
+  // 長く見失った相手（gyro の経過が ?staleHideMs=8000 を超えた）: フェードで消す → マーカーを見直したらまた出す
+  const vgf = setInterval(() => vSend({ pos: vHead, quat: [0, 1, 0, 0], fwd: vFwd, track: "gyro", ageMs: 8300 }), 100);
+  await sleep(600);
+  const rgf = (await pA.eval("window.__keshin.remoteState()")).find((x) => x.id === vId);
+  clearInterval(vgf);
+  check("段階 2: gyro が staleHideMs（8s）を超えるとフェードで薄くなっていく（0.5 より薄い・reason=stale-hiding）", rgf && rgf.drawn && rgf.fade > 0.02 && rgf.fade < 0.45 && rgf.reason === "stale-hiding", JSON.stringify(rgf && { drawn: rgf.drawn, fade: rgf.fade, reason: rgf.reason, ageMs: rgf.ageMs }));
+  const vgh = setInterval(() => vSend({ pos: vHead, quat: [0, 1, 0, 0], fwd: vFwd, track: "gyro", ageMs: 9500 }), 100);
+  const rgh = await waitUntil(async () => {
+    const r = (await pA.eval("window.__keshin.remoteState()")).find((x) => x.id === vId);
+    return { ok: r && !r.drawn && r.reason === "stale", r };
+  }, 4000);
+  clearInterval(vgh);
+  const hiddenLog = pA.logs.find((l) => /event=remote-hidden/.test(l) && l.includes(vId) && /reason=stale\b/.test(l)) ?? "";
+  check("段階 2: 長く見失った相手（gyro 9.5s）の化身は消える（reason=stale）・ログに remote-hidden reason=stale", rgh?.ok && hiddenLog !== "", `${JSON.stringify(rgh?.r && { drawn: rgh.r.drawn, reason: rgh.r.reason })} | ${hiddenLog}`);
+  const vmk = setInterval(() => vSend({ pos: vHead, quat: [0, 1, 0, 0], fwd: vFwd, track: "marker", ageMs: 0 }), 100);
+  const rgm = await waitUntil(async () => {
+    const r = (await pA.eval("window.__keshin.remoteState()")).find((x) => x.id === vId);
+    return { ok: r && r.drawn && r.fade === 1, r };
+  }, 4000);
+  clearInterval(vmk);
+  const shownLog = pA.logs.find((l) => /event=remote-shown/.test(l) && l.includes(vId) && /after=stale/.test(l)) ?? "";
+  check("段階 2: マーカーを見直した pose が届くと、また出す（薄さ 1・ログに remote-shown after=stale）", rgm?.ok && shownLog !== "", `${JSON.stringify(rgm?.r && { drawn: rgm.r.drawn, fade: rgm.r.fade })} | ${shownLog}`);
   vSend({ track: "none", ageMs: null });
   await sleep(500);
   const rn = (await pA.eval("window.__keshin.remoteState()")).find((x) => x.id === vId);
@@ -627,7 +649,67 @@ try {
   check("段階 2: 人が写っていなければ隠さず描く", rR && rR.drawn, JSON.stringify(rR && { drawn: rR.drawn }));
   const hudA = await pA.eval("document.querySelector('#hud')?.textContent ?? ''");
   console.log(`A HUD:\n${hudA}`);
-  check("段階 2: HUD に相手ごとの行（track・距離・描画・薄さ・跳び）と occlusion（Pose の ms・Hz・マスクの古さ）", /remote B\(p\d+\) #2o(n|ff) marker( [\d.]+s)? dist=[\d.]+m drawn=[01]\(\w+\) fade=[\d.]+ jump=[\d.]+m/.test(hudA) && /occlude=fake .* pose=\d+ms mask=\d+ms hz=\d+ age=\d+ms/.test(hudA));
+  check("段階 2: HUD に相手ごとの行（track・距離・描画・薄さ・跳び）と occlusion（Pose の ms・Hz・段・マスクの古さ・人数・マスクの枚数・入力・明るさ・delegate）", /remote B\(p\d+\) #2o(n|ff) marker( [\d.]+s)? dist=[\d.]+m drawn=[01]\(\w+\) fade=[\d.]+ jump=[\d.]+m/.test(hudA) && /occlude=fake .* pose=\d+ms mask=\d+ms hz=\d+ maskHz=\d+\/15 age=\d+ms person=[01] poses=\d masks=\d in=\d+x\d+ lum=\d+ dg=fake found=/.test(hudA));
+  check("段階 2: HUD の cam= に facingMode と選んだ理由（フェイクカメラは facing=fake）", /cam=\d+x\d+ .*facing=fake/.test(hudA), (hudA.match(/cam=.*/) ?? [""])[0]);
+  // 本物の Pose の診断（1 回の結果の人数・マスクの枚数・入力の大きさ・明るさ・delegate）
+  const oRd = await pR.eval("window.__keshin.occlusionState()");
+  console.log(`real pose diag: ${oRd.text}`);
+  check("段階 2: 本物の Pose の診断が出る（入力は長辺 ?maskDetW=512・明るさは真っ黒でない・delegate・人数とマスクの枚数）", oRd.lastInput === "512x384" && oRd.lastLuma > 20 && /^(GPU|CPU)$/.test(oRd.delegate) && Number.isInteger(oRd.lastPoses) && Number.isInteger(oRd.lastMasks) && /poses=\d masks=\d in=512x384 lum=\d+ dg=(GPU|CPU) found=\d+\/\d+/.test(oRd.text), JSON.stringify({ in: oRd.lastInput, lum: oRd.lastLuma, dg: oRd.delegate, poses: oRd.lastPoses, masks: oRd.lastMasks }));
+  const hzLogs = pages.flatMap((p) => p.logs.filter((l) => /event=mask-hz/.test(l)).map((l) => `${p.name}: ${l}`));
+  console.log(`mask-hz events: ${hzLogs.length ? hzLogs.join(" | ") : "(none)"}`);
+  await browser.send("Target.closeTarget", { targetId: pR.targetId });
+  pages.splice(pages.indexOf(pR), 1);
+
+  // ?maskDebug=1（本物の Pose）: 相手の化身が視野に無くても回し、入力の縮小画像とマスクを画面の隅に出す。
+  // あわせて GPU → CPU の比べ方（?maskProbeAfterMs=3000 に縮める）: フェイクカメラの映像には人がいないので GPU も CPU も 0 人 → GPU のまま。
+  // 実機ログ（logs/client.log）の 1 行に診断が全部入ることも確かめる（このページだけ remoteLog を有効にする）
+  const logSize2 = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0;
+  const S2log = S2.replace("&remoteLog=0", "");
+  const pD = await newWindow("A-maskdebug", `${BASE}?${S2log}&maskDebug=1&maskProbeAfterMs=3000&fakeCamPos=0.9,0,3.6&fakeYaw=180&name=D`);
+  const oD = await waitUntil(async () => {
+    const o = await pD.eval("window.__keshin?.occlusionState() ?? null");
+    return { ok: o && ((o.status === "ready" && o.runs > 3 && o.lastLuma !== null) || o.status === "failed"), o };
+  }, 90000, 1000);
+  const dbg = await pD.eval(`(() => {
+    const box = document.querySelector("#mask-debug");
+    if (!box) return null;
+    const [inp, mask] = box.querySelectorAll("canvas");
+    const nonBlack = (c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 60) n++; return n; };
+    return { inW: inp.width, inH: inp.height, inLit: nonBlack(inp), maskW: mask.width, maskH: mask.height };
+  })()`);
+  check("段階 2: ?maskDebug=1 は相手の化身が視野に無くても Pose を回し（run=1）、画面の隅に入力の縮小画像とマスクを出す", oD?.o?.status === "ready" && /run=1/.test(oD.o.text) && dbg && dbg.inLit > 500 && dbg.maskW > 0, `${oD?.o?.text} | ${JSON.stringify(dbg)}`);
+  await pD.shot("stage2-maskdebug-realpose.png");
+  if (oD?.o?.delegate === "GPU") {
+    const pr = await waitUntil(async () => {
+      const o = await pD.eval("window.__keshin.occlusionState()");
+      return { ok: o.probe === "kept-gpu" || o.probe === "switched-cpu" || o.probe === "failed", o };
+    }, 60000, 1000);
+    const probeLogs = pD.logs.filter((l) => /event=mask-delegate/.test(l));
+    console.log(`probe: ${pr?.o?.probe} / ${probeLogs.join(" | ")}`);
+    check("段階 2: GPU で 0 人が続くと CPU でも同じフレームを回して比べ、両方 0 人なら GPU のまま（ログに理由）", pr?.o?.probe === "kept-gpu" && probeLogs.some((l) => /keep=GPU reason=both-0/.test(l)), `${pr?.o?.probe} | ${probeLogs.join(" | ")}`);
+  } else {
+    console.log(`probe: delegate=${oD?.o?.delegate} なので比べない（GPU のときだけ）`);
+  }
+  await sleep(2500);
+  const logText2 = existsSync(LOG_FILE) ? readFileSync(LOG_FILE).subarray(logSize2).toString("utf8") : "";
+  const diagLine = logText2.split("\n").filter((l) => l.includes("keshin-phone") && /poses=/.test(l)).at(-1) ?? "";
+  console.log(`diag log line: ${diagLine}`);
+  check("段階 2: 実機ログの 1 行に診断が全部入る（人数・マスクの枚数・入力の大きさ・明るさ・delegate・段・カメラ）", /poses=\d masks=\d in=512x384 lum=\d+ dg=(GPU|CPU)/.test(diagLine) && /maskHz=\d+\/15/.test(diagLine) && /cam=facing=fake/.test(diagLine), diagLine.slice(0, 400));
+  await browser.send("Target.closeTarget", { targetId: pD.targetId });
+  pages.splice(pages.indexOf(pD), 1);
+  // ?maskDebug=1（フェイクの人）: マスクが人の形に出るところの画面
+  const pF = await newWindow("A-maskdebug-fake", `${BASE}?${S2}&maskDebug=1&fakeperson=1&fakeCamPos=0.3,0,3.6&name=F`);
+  await waitUntil(async () => ((await phoneState(pF))?.track === "marker" ? { ok: true } : null), 40000);
+  const oF = await waitUntil(async () => {
+    const o = await pF.eval("window.__keshin?.occlusionState() ?? null");
+    return { ok: o && o.person === true, o };
+  }, 30000);
+  await sleep(500);
+  const maskLit = await pF.eval(`(() => { const c = document.querySelectorAll("#mask-debug canvas")[1]; if (!c) return -1; const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 200 && d[i + 2] > 200) n++; return n; })()`);
+  check("段階 2: ?maskDebug=1 のマスクの縮小画像に人の形（白）が出る（フェイクの人）", oF?.ok && maskLit > 200, `${oF?.o?.text} | white=${maskLit}`);
+  await pF.shot("stage2-maskdebug-fake.png");
+  await browser.send("Target.closeTarget", { targetId: pF.targetId });
+  pages.splice(pages.indexOf(pF), 1);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
   const shader2 = pages.flatMap((p) => p.logs.filter((l) => /Shader Error|WebGLProgram|THREE\.WebGLRenderer/.test(l)).map((l) => `${p.name}: ${l.slice(0, 200)}`));

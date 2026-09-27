@@ -73,41 +73,86 @@ export type BackCameraOptions = {
   preferUltraWide: boolean;
 };
 
-/** 超広角カメラ優先・解像度指定・フォールバック（02〜05 と同じ） */
+/** 前面カメラの名前（iPad は「前面超広角カメラ」/ "Front Ultra Wide Camera" があり、超広角は前面だけ）。Mac の FaceTime も前面 */
+export const FRONT_LABEL = /前面|front|facetime|user/i;
+/** 背面カメラの名前（iPhone の「背面超広角カメラ」/ "Back Ultra Wide Camera"） */
+export const BACK_LABEL = /背面|back|rear|environment/i;
+
+export type CameraDeviceLike = { kind: string; label: string; deviceId: string };
+
+/**
+ * 背面の超広角カメラを選ぶ（純粋関数。scripts/test-keshin.mjs でテスト）。名前が「超広角」に合うもののうち、
+ * 前面（前面|front|FaceTime|user）は外し、背面（背面|back|rear）を名乗るものを優先する（名乗らないものは次点）。
+ * iPad は超広角が前面にしか無く、以前は前面が選ばれて映像とジャイロの向きが合わなかった（ex9-1 の実機。PAIN_POINTS 参照）
+ */
+export function pickBackUltraWide(devices: readonly CameraDeviceLike[]): { device: CameraDeviceLike | null; reason: string } {
+  const ultras = devices.filter((d) => d.kind === "videoinput" && ULTRA_WIDE_LABEL.test(d.label));
+  if (ultras.length === 0) return { device: null, reason: "no-ultra-wide" };
+  const notFront = ultras.filter((d) => !FRONT_LABEL.test(d.label));
+  if (notFront.length === 0) return { device: null, reason: `front-only(${ultras.map((d) => d.label).join("/")})` };
+  const back = notFront.find((d) => BACK_LABEL.test(d.label));
+  if (back) return { device: back, reason: "back-ultra-wide" };
+  return { device: notFront[0], reason: "ultra-wide(no-side-in-label)" };
+}
+
+/** 開いたカメラの記録（HUD / ログ用） */
+export type CameraChoice = { label: string; facingMode: string; reason: string };
+
+/** 超広角カメラ優先（背面だけ）・解像度指定・フォールバック（02〜05 と同じ流れ） */
 export async function openBackCameraStream(
   opts: BackCameraOptions,
   onProgress: (step: string) => void,
+  onChoice?: (choice: CameraChoice) => void,
 ): Promise<MediaStream> {
   const camSize = {
     width: { ideal: opts.camRes[0] },
     height: { ideal: opts.camRes[1] },
   };
-  let stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: "environment" }, ...camSize },
-    audio: false,
-  });
+  const openEnvironment = () =>
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, ...camSize },
+      audio: false,
+    });
+  const facingOf = (s: MediaStream) => {
+    const t = s.getVideoTracks()[0];
+    return { label: t?.label ?? "", facingMode: (t?.getSettings?.().facingMode as string | undefined) ?? "-" };
+  };
+  let stream = await openEnvironment();
   onProgress("gum-ok");
-  if (!opts.preferUltraWide) return stream;
+  if (!opts.preferUltraWide) {
+    onChoice?.({ ...facingOf(stream), reason: "environment(lens=wide)" });
+    return stream;
+  }
   // ラベルは許可取得後にしか取れないので「一度開いて → 止めて → 開き直す」
   const devices = await navigator.mediaDevices.enumerateDevices();
-  const ultra = devices.find(
-    (d) => d.kind === "videoinput" && ULTRA_WIDE_LABEL.test(d.label),
-  );
-  if (!ultra) return stream;
+  const pick = pickBackUltraWide(devices);
+  if (!pick.device) {
+    onChoice?.({ ...facingOf(stream), reason: `environment(${pick.reason})` });
+    return stream;
+  }
   stream.getTracks().forEach((t) => t.stop());
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: ultra.deviceId }, ...camSize },
+      video: { deviceId: { exact: pick.device.deviceId }, ...camSize },
       audio: false,
     });
     onProgress("ultra-ok");
   } catch {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, ...camSize },
-      audio: false,
-    });
+    stream = await openEnvironment();
     onProgress("ultra-fail-fallback");
+    onChoice?.({ ...facingOf(stream), reason: "environment(ultra-open-failed)" });
+    return stream;
   }
+  // 開いた後も確かめる: 前面（facingMode = user）だったら超広角をやめて背面に戻す
+  const opened = facingOf(stream);
+  if (opened.facingMode === "user") {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = await openEnvironment();
+    onProgress("ultra-was-front-fallback");
+    onChoice?.({ ...facingOf(stream), reason: `environment(ultra-was-front: ${opened.label})` });
+    return stream;
+  }
+  onChoice?.({ ...opened, reason: pick.reason });
   return stream;
 }
 
@@ -135,6 +180,8 @@ export type Passthrough = {
   setCamHFovDeg(fovDeg: number): void;
   /** HUD 用の要約（"1280x720 Back Ultra Wide Camera"） */
   readonly summary: string;
+  /** どのカメラを・なぜ選んだか（facingMode 込み。フェイクカメラ・既存の video では null） */
+  readonly choice: CameraChoice | null;
   /**
    * カメラ映像と片目ビューポートの縦横比補正（object-fit: cover 相当）を再計算する。
    * window の resize で呼ぶ。video の resize（iOS の回転で映像の縦横が入れ替わる）は内部で拾う
@@ -194,11 +241,14 @@ export async function startPassthrough(
   const video = opts.existingVideo ?? document.createElement("video");
   video.playsInline = true;
   video.muted = true;
+  let choice: CameraChoice | null = null;
   const stream = opts.existingVideo
     ? (video.srcObject as MediaStream | null)
     : opts.fakeStream
       ? opts.fakeStream()
-      : await openBackCameraStream(opts, onProgress);
+      : await openBackCameraStream(opts, onProgress, (c) => {
+          choice = c;
+        });
   if (!opts.existingVideo) {
     video.srcObject = stream;
     await video.play();
@@ -233,6 +283,7 @@ export async function startPassthrough(
       if (Number.isFinite(fovDeg) && fovDeg > 0 && fovDeg < 180) camHFovDeg = fovDeg;
     },
     summary: `${video.videoWidth}x${video.videoHeight} ${label}`.trim(),
+    choice,
     updateCover,
     displayViewMapping(fovDeg) {
       return {

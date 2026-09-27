@@ -277,12 +277,15 @@ export function smoothToward(
  *   自分のアンカーが無い → 描かない（相手の位置が自分の世界のどこか分からない）
  *   pose 無し / none → 描かない、受け取ってから lostMs を超えた（通信切れ）→ 描かない
  *   marker → 1、gyro → trackFade（staleMs で半分、以降 0.5 で位置を止める）
+ *   gyro の経過が staleHideMs を超えたら hideFadeMs かけて薄さを 0 へ落とし（reason = stale-hiding）、その後は描かない（reason = stale）。
+ *   経過（ageMs）だけで決まるので状態を持たない。マーカーを見直した pose（marker）が届けば、また描く
  */
+export const HIDE_FADE_MS = 800;
 export function remoteDisplay(
   selfHasAnchor: boolean,
   pose: { track: "marker" | "gyro" | "none"; ageMs: number | null } | undefined,
   sinceMs: number,
-  opts: { noPoseMs: number; lostMs: number; staleMs: number },
+  opts: { noPoseMs: number; lostMs: number; staleMs: number; staleHideMs?: number; hideFadeMs?: number },
 ): { draw: boolean; fade: number; freeze: boolean; reason: string; track: "marker" | "gyro" | "none" | "nopose"; ageMs: number | null } {
   const eff = effectiveTrack(pose, sinceMs, opts.noPoseMs);
   const base = { track: eff.track, ageMs: eff.ageMs };
@@ -291,7 +294,14 @@ export function remoteDisplay(
   if (eff.track === "none") return { ...base, draw: false, fade: 0, freeze: false, reason: "peer-none" };
   if (sinceMs > opts.lostMs) return { ...base, draw: false, fade: 0, freeze: false, reason: "lost" };
   const fade = trackFade(eff.track, eff.ageMs, opts.staleMs) ?? 0;
-  return { ...base, draw: true, fade, freeze: isPositionFrozen(eff.track, eff.ageMs, opts.staleMs), reason: "ok" };
+  const freeze = isPositionFrozen(eff.track, eff.ageMs, opts.staleMs);
+  if (eff.track === "gyro" && opts.staleHideMs !== undefined) {
+    const over = (eff.ageMs ?? Infinity) - opts.staleHideMs;
+    const fadeMs = Math.max(1, opts.hideFadeMs ?? HIDE_FADE_MS);
+    if (over >= fadeMs) return { ...base, draw: false, fade: 0, freeze, reason: "stale" };
+    if (over > 0) return { ...base, draw: true, fade: fade * (1 - over / fadeMs), freeze, reason: "stale-hiding" };
+  }
+  return { ...base, draw: true, fade, freeze, reason: "ok" };
 }
 
 /**
