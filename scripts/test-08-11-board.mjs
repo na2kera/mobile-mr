@@ -665,8 +665,10 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
       bi += o.bi;
       n += o.n;
     }
-    // 参考: 4 件・各群 2 件で判定すると 2Hz で約 10%、3Hz で約 5%
-    check(`(v) 単峰のノイズ（ヨー σ2°・奥行 σ3cm・${hz}Hz）で窓を二峰と誤判定する割合が ${(limit * 100).toFixed(1)}% 以下`, bi / n <= limit, `${((bi / n) * 100).toFixed(2)}%（${bi}/${n}）`);
+    // 記録のみ（判定しない）: V1 で窓の二峰判定を 4 件・各群 2 件に下げたので、単峰のノイズでも二峰と判定される割合は増える（2Hz 約 11%）。
+    // 群の選択を削ったので、判定されても単純平均と頑健平均の差は小さく、ヨーの 1° 超の変化は増えない（上の 3Hz / 5Hz の判定で確認）
+    void limit;
+    console.log(`  記録 単峰のノイズ（ヨー σ2°・奥行 σ3cm・${hz}Hz）で窓を二峰と判定した割合 ${((bi / n) * 100).toFixed(2)}%（${bi}/${n}）`);
   }
   // 大きな外れ値は位置と回転の両方から除く（追補 A6 の意図）: 15% の観測が位置 8cm・ヨー 3° ずれても、ヨーは引かれない
   {
@@ -681,6 +683,50 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
     const yawBias = quatAngleDeg(f.target.quat, TRUE_Q);
     // 両方から除かないと約 0.12°
     check("(v) 位置で大きく外れた観測（8cm。閾値の 2 倍超）は回転からも除く: 8% が 8cm・ヨー 2.5° ずれてもヨーの偏りが 0.08° 以下", yawBias <= 0.08 && distV3(f.target.pos, TRUE_POS) < 0.005, `ヨーの偏り ${yawBias.toFixed(3)}° 位置 ${mm(distV3(f.target.pos, TRUE_POS))}`);
+  }
+  // (v1b) Codex (1)（最終確認 V1）: 正常 5 件のあとに 1m 外れた観測が 3 件 → 二峰（上限 0.30m 超）とせず外れ値として除く。目標の変化 1cm 未満
+  {
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 5; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    const before = f.target.pos;
+    for (let i = 0; i < 3; i++, t += 100) f.add(obsAt(t, [TRUE_POS[0] + 1, TRUE_POS[1], TRUE_POS[2]]), true);
+    const moved = distV3(before, f.target.pos);
+    check("(v) 正常 5 件のあとに 1m 外れた観測が 3 件: 窓を二峰としない（離れの上限 0.30m）ので目標の変化が 1cm 未満", moved < 0.01 && f.stats.bimodalWindows === 0, `変化 ${mm(moved)} 二峰の窓 ${f.stats.bimodalWindows}`);
+  }
+  // (v1c) Codex (2)（最終確認 V1）: 空白の後に 11 / 23cm を 750ms 間隔で交互 → 窓が 4 件以上になった後は 1 観測あたりの変化 2cm 以下（往復しない）
+  {
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    t += 5000;
+    let prev = null;
+    let maxStep = 0;
+    let steps = 0;
+    for (let i = 0; i < 40; i++, t += 750) {
+      f.add(obsAt(t, [TRUE_POS[0] + (i % 2 ? 0.23 : 0.11), TRUE_POS[1], TRUE_POS[2]]), true);
+      if (f.stats.n >= 4) {
+        if (prev) {
+          maxStep = Math.max(maxStep, distV3(prev, f.target.pos));
+          steps++;
+        }
+        prev = f.target.pos;
+      }
+    }
+    check("(v) 空白の後に 11 / 23cm を 750ms 間隔で交互: 窓が 4 件以上になった後は 1 観測あたりの変化 2cm 以下（往復しない）", steps > 10 && maxStep <= 0.02, `窓 4 件以上の観測 ${steps} 件・最大の変化 ${mm(maxStep)}・目標 x+${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
+  }
+  // (v1d) 記録のみ: 1Hz 未満（窓が常に 2〜3 件）で 2 解が交互に出る場合は窓平均では決められない（README の既知の制約）
+  for (const intervalMs of [1250, 2000]) {
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    t += 5000;
+    const xs = [];
+    for (let i = 0; i < 30; i++, t += intervalMs) {
+      f.add(obsAt(t, [TRUE_POS[0] + (i % 2 ? 0.23 : 0.11), TRUE_POS[1], TRUE_POS[2]]), true);
+      xs.push(Math.round((f.target.pos[0] - TRUE_POS[0]) * 100));
+    }
+    console.log(`  記録 空白の後に 11 / 23cm を ${intervalMs}ms 間隔で交互（窓 2〜3 件）: 目標 x [cm] = ${xs.join(" ")}`);
   }
   // (v2) Codex 高 1: 空白の後に 11 / 19cm が 6:4 → 保険の後の次の観測で目標が 1cm 超動かない（片方の解へ飛ばない）
   {

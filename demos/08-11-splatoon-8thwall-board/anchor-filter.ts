@@ -34,8 +34,8 @@
 //     - 固着の保険: 窓が 3 件未満の状態が windowMs 続き、直近 windowMs の観測のうち目標から遠い観測が 3 件以上かつ過半数なら、
 //       まとまりの条件なしでその間の観測を窓にして作り直す（推定は窓の推定と同じ。fallbackReseeds。再レビュー S2・最終レビュー T2 / T4）
 //     - 作り直しの候補が二峰（2 解が交互に出るなど）なら作り直さない（bimodalRejected。二峰の判定は bimodalSplit）
-//     - 窓の推定は状態を持たない（窓の中身だけで決まる）: 各軸の中央値を基準にした頑健な平均。窓が二峰（8 件以上・各群 3 件以上・
-//       位置 0.05m / 回転 5° 以上）なら単純平均（2 解の中間寄り。bimodalWindows）。最終確認 U1
+//     - 窓の推定は状態を持たない（窓の中身だけで決まる）: 各軸の中央値を基準にした頑健な平均。窓が二峰（4 件以上・各群 2 件以上・
+//       位置 0.05〜0.30m / 回転 5〜20°）なら単純平均（2 解の中間寄り。bimodalWindows）。最終確認 U1・V1
 //     - 持続的なずれで窓を作り直す: 推定から reseedPosM 以上 / reseedDeg 以上離れた観測が連続 reseedN 件、
 //       または連続 reseedMinN 件以上かつ reseedMs 以上続き、**かつ候補どうしがまとまっている**（候補の平均が目標から閾値以上離れ、
 //       候補の平均からのばらつきの RMS が閾値の半分未満。ノイズが大きいだけで作り直して 7〜12cm 飛ぶのを防ぐ。レビュー R5）なら、
@@ -258,11 +258,35 @@ function plainMean(obs: readonly { pos: readonly number[]; quat: readonly number
 }
 
 /**
+ * 台形の重みの平均（窓の最古と最新の観測だけ重み 1/2。窓は時刻順）。二峰の窓で使う（最終確認 V1）: 2 解が交互に出る列では、
+ * 窓の件数の偶奇で片方の解が 1 件多くなり、単純平均が 1 件ごとに (離れ ÷ 件数) ずつ往復した（750ms 間隔・11 / 23cm で 2.4cm）。
+ * 両端を半分にすると交互の列はちょうど釣り合い、出入りする観測の影響も半分になる（状態は持たない）
+ */
+function trapezoidMean(obs: readonly { pos: readonly number[]; quat: readonly number[] }[]): { pos: Vec3T; quat: QuatT } {
+  const n = obs.length;
+  if (n < 3) return plainMean(obs);
+  const wts = obs.map((_, i) => (i === 0 || i === n - 1 ? 0.5 : 1));
+  const total = wts.reduce((a, b) => a + b, 0);
+  const pos: Vec3T = [0, 0, 0];
+  obs.forEach((w, k) => {
+    for (let i = 0; i < 3; i++) pos[i] += (w.pos[i] * wts[k]) / total;
+  });
+  const ref = obs[0].quat;
+  const sum = [0, 0, 0, 0];
+  obs.forEach((w, k) => {
+    const q = w.quat;
+    const sgn = q[0] * ref[0] + q[1] * ref[1] + q[2] * ref[2] + q[3] * ref[3] < 0 ? -1 : 1;
+    for (let i = 0; i < 4; i++) sum[i] += sgn * wts[k] * q[i];
+  });
+  return { pos, quat: normalizeQuat(sum) };
+}
+
+/**
  * 窓の推定（状態を持たない。窓の中身だけで決まる。最終確認 U1）。
  * - 原則: 中央値を基準にした頑健な平均。位置は各軸の中央値、回転は窓の正規化平均を基準に、位置が
  *   max(k·σ_pos, minOutlierPosM) を超える観測を位置から、回転が max(k·σ_rot, minOutlierDeg) を超える観測を回転から除く
  *   （σ_pos = median(3D 距離) / 1.538、σ_rot = 1.4826 × median(角度)）。どちらかで閾値の 2 倍を超えた観測は両方から除く
- * - 例外: 窓が二峰（WINDOW_BIMODAL_*）なら外れ値を除かず窓の単純な平均（2 解の中間寄り）。交互の 2 解では各軸の中央値が群の間を
+ * - 例外: 窓が二峰（WINDOW_BIMODAL_*）なら外れ値を除かず窓の単純な平均（両端の観測は重み 1/2。2 解の中間寄り）。交互の 2 解では各軸の中央値が群の間を
  *   1 件ごとに飛び移り、MAD も 0 に潰れて目標が観測ごとに往復した（再レビュー S5）ため。群の選択はしない。
  * 以前（T3）は群の選択（6 割ルール）と「前回選んだ群・いまの目標の周りを採る」ヒステリシスを持たせていたが、隠れた状態のせいで
  * 少数件の窓でノイズを二峰と誤判定して推定が入れ替わる・保険の直後に片方の解へ飛ぶ・誤った群に張り付く、が起きたので削った
@@ -271,7 +295,7 @@ export function robustMean(
   win: readonly { pos: readonly number[]; quat: readonly number[] }[],
   o: Pick<AnchorFilterOptions, "outlierK" | "minOutlierPosM" | "minOutlierDeg" | "reseedPosM" | "reseedDeg">,
 ): Robust {
-  const bi = bimodalSplit(win, WINDOW_BIMODAL_SEP_M_OF(o), WINDOW_BIMODAL_SEP_DEG_OF(o), WINDOW_BIMODAL_MIN_N, WINDOW_BIMODAL_MIN_GROUP) !== null;
+  const bi = bimodalSplit(win, WINDOW_BIMODAL_SEP_M_OF(o), WINDOW_BIMODAL_SEP_DEG_OF(o), WINDOW_BIMODAL_MIN_N, WINDOW_BIMODAL_MIN_GROUP, WINDOW_BIMODAL_MAX_SEP_M, WINDOW_BIMODAL_MAX_SEP_DEG) !== null;
   let inlier: boolean[];
   let src: { pos: readonly number[]; quat: readonly number[] }[];
   if (bi) {
@@ -303,7 +327,7 @@ export function robustMean(
     const spreadDeg = Math.sqrt(src.reduce((acc, w) => acc + quatAngleDeg(w.quat, quat) ** 2, 0) / src.length);
     return { pos, quat, inlier, spreadMm, spreadDeg, bimodal: false };
   }
-  const { pos, quat } = plainMean(src);
+  const { pos, quat } = trapezoidMean(src);
   const spreadMm = Math.sqrt(src.reduce((s, w) => s + distV3(w.pos, pos) ** 2, 0) / src.length) * 1000;
   const spreadDeg = Math.sqrt(src.reduce((s, w) => s + quatAngleDeg(w.quat, quat) ** 2, 0) / src.length);
   return { pos, quat, inlier, spreadMm, spreadDeg, bimodal: bi };
@@ -335,6 +359,8 @@ export function bimodalSplit(
   minSepDeg: number,
   minN = 4,
   minGroup = 2,
+  maxSepM = Infinity,
+  maxSepDeg = Infinity,
 ): { ga: number[]; gb: number[] } | null {
   if (cand.length < minN) return null;
   const split = (dist: (i: number, j: number) => number) => {
@@ -369,7 +395,7 @@ export function bimodalSplit(
       const axis = sep > 0 ? [0, 1, 2].map((k) => (cb[k] - ca[k]) / sep) : [1, 0, 0];
       const x = (i: number) => [0, 1, 2].reduce((acc, k) => acc + (cand[i].pos[k] - ca[k]) * axis[k], 0);
       const gap = Math.min(...g.gb.map(x)) - Math.max(...g.ga.map(x));
-      if (sep >= minSepM && sep > BIMODAL_SEP_RATIO * within && gap >= BIMODAL_GAP_RATIO * sep) return g;
+      if (sep >= minSepM && sep <= maxSepM && sep > BIMODAL_SEP_RATIO * within && gap >= BIMODAL_GAP_RATIO * sep) return g;
     }
   }
   // 回転
@@ -383,7 +409,7 @@ export function bimodalSplit(
       // 2 群の平均の間の「どちら寄りか」（角度の差の半分）で 1 次元に並べたときの群の間の隙間
       const x = (i: number) => (quatAngleDeg(cand[i].quat, qa) - quatAngleDeg(cand[i].quat, qb)) / 2;
       const gap = Math.min(...g.gb.map(x)) - Math.max(...g.ga.map(x));
-      if (sep >= minSepDeg && sep > BIMODAL_SEP_RATIO * within && gap >= BIMODAL_GAP_RATIO * sep) return g;
+      if (sep >= minSepDeg && sep <= maxSepDeg && sep > BIMODAL_SEP_RATIO * within && gap >= BIMODAL_GAP_RATIO * sep) return g;
     }
   }
   return null;
@@ -396,12 +422,19 @@ export const BIMODAL_SEP_RATIO = 4;
  */
 export const BIMODAL_GAP_RATIO = 0.25;
 /**
- * 窓全体の二峰判定（最終確認 U1）: 件数の少ない窓ではノイズを二峰と誤判定しやすい（n=6・ヨー σ1.5〜3° で 20〜39%）ので、
- * 窓が 8 件以上・各群 3 件以上・群の中心が位置 0.05m / 回転 5° 以上離れているときだけ二峰とする。
- * 作り直しの候補（5 件）の二峰判定は従来どおり 4 件以上・各群 2 件以上・0.05m / 2.5°
+ * 窓全体の二峰判定（最終確認 U1・V1）: 4 件以上・各群 2 件以上、群の中心が位置 0.05m〜0.30m / 回転 5°〜20° 離れているときだけ二峰とする。
+ * - 上限: それより離れた群は「2 解のあいまいさ」ではなく誤検出なので二峰とせず、頑健平均の外れ値として除く（上限が無いと、正常 5 件に
+ *   1m の外れ 3 件で二峰 → 単純平均になり目標が 37.5cm 動いた）
+ * - 件数の下限 4 件・各群 2 件: 8 件・各群 3 件だと 1Hz 前後（窓 3〜4 件）の 2 解の交互を二峰と見られず、中央値側の解が入れ替わって
+ *   12cm 往復した。群の選択を削ったので、ノイズを二峰と誤判定しても単純平均と頑健平均の差は小さい（ヨーの 1° 超の変化は増えない）
+ * 作り直しの候補（5 件）の二峰判定は 4 件以上・各群 2 件以上・0.05m / 2.5°（上限なし。30cm 以上離れた候補はまとまりの条件
+ * RMS < 5cm を満たさないので、上限を付けても結果は変わらない）
  */
-export const WINDOW_BIMODAL_MIN_N = 8;
-export const WINDOW_BIMODAL_MIN_GROUP = 3;
+export const WINDOW_BIMODAL_MIN_N = 4;
+export const WINDOW_BIMODAL_MIN_GROUP = 2;
+/** 窓の二峰とみなす離れの上限（最終確認 V1） */
+export const WINDOW_BIMODAL_MAX_SEP_M = 0.3;
+export const WINDOW_BIMODAL_MAX_SEP_DEG = 20;
 // 位置は作り直しの候補と同じ 0.05m（reseedPosM / 2）: 0.10m にすると、典型的な 2 解の交互（11cm / 19cm = 8cm 離れ）を二峰と見られず、
 // 中央値が 1 件ごとに群の間を飛び移って目標が 8cm 往復した（S5 の退行）。誤判定が問題になったのはヨー（回転）なので回転は 5° のまま
 const WINDOW_BIMODAL_SEP_M_OF = (o: Pick<AnchorFilterOptions, "reseedPosM">) => o.reseedPosM / 2;
