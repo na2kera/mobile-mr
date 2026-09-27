@@ -29,12 +29,19 @@ UI、サーバー（`server/splatoon.ts`。同じプロトコル・同じ WebSoc
 ### 窓平均フィルタ（[anchor-filter.ts](./anchor-filter.ts)）
 
 - `?avg=1`（既定）: 8th Wall が NORMAL の観測（1 回ごとの「カメラ姿勢 × PnP」= コートのワールド姿勢）を直近 `?avgWindowMs=3000` ms・最大 `?avgMaxN=40` 件の窓に入れる。
-  位置は各軸の中央値、回転は半球をそろえた四元数の平均を基準に、位置が `max(3σ, 2cm)` を超えるか回転が `max(3σ, 2°)` を超える観測を外れ値として除いて平均する（σ = MAD × 1.4826）。
-- 持続的なずれ（推定から 10cm 以上 / 5° 以上離れた観測が連続 `?avgReseedN=5` 件、または 3 件以上・1000ms 以上）で窓をその観測で作り直す（8th Wall のドリフト・再推定の段差に追従。全履歴の平均は古い座標系に引かれるので使わない）。
+  位置は各軸の中央値、回転は半球をそろえた四元数の平均を基準に、位置が `max(3σ, 2cm)` を超えるか回転が `max(3σ, 2°)` を超える観測を外れ値として除いて平均する
+  （位置の σ = 3D 距離の中央値 / 1.538、回転の σ = 角度の中央値 × 1.4826）。
+- 窓が 3 件未満の間は中央値が当てにならないので、基準は「いまの目標」にし、目標から 10cm / 5° 以上離れた観測は窓に入れない（鏡像解などの外れ値 1 件でコートが動かないように）。目標は窓が 3 件そろうまで書き換えない。
+  目標が無いとき（invalidate 後の再ロック）だけは 1 件目で目標を作る。
+- マーカーを 3 秒超見なかった後・配置変更・直接モードの後の最初の観測は**再取得（reacquire）**: 目標は保持したまま新しい窓を始め、保持していた目標との差をログ（`event=reacquire`）と HUD（`reacq=`）に出す。
+- 持続的なずれ（推定から 10cm 以上 / 5° 以上離れた観測が連続 `?avgReseedN=5` 件、または 3 件以上・1000ms 以上）で、**候補どうしがまとまっていれば**（候補の平均が目標から閾値以上離れ、候補のばらつきの RMS が 5cm / 2.5° 未満）窓をその観測で作り直す
+  （8th Wall のドリフト・再推定の段差に追従。全履歴の平均は古い座標系に引かれるので使わない。ばらつきの条件はノイズが大きいだけで誤って作り直さないため。`reseed=N(rej M)` の M が見送った回数）。
+- 頭を速く回している間（8th Wall の姿勢の角速度が `?maxObsDegPerSec=90` 超）の観測は、映像とカメラ姿勢の時刻ずれで偏りうるので窓に入れない（`ign=` に数える）。
 - LIMITED の観測は窓にも表示にも使わない（一瞬の LIMITED ではコートを動かさない）。LIMITED が `?limitedDirectMs=1000` 以上続いている間に観測が来たら**直接モード**（窓を空にし、08-4 と同じ lerp で生の観測へ寄せる）。NORMAL に戻ったら新しい窓を始める。
 - 表示は目標（窓の推定）へ毎フレーム寄せる。撃っていなければ目標そのまま、**連射中（発射後 300ms 以内）は 1 フレーム最大 5mm・0.3°** だけ寄せる（作り直し・直接モード・配置変更のどれでも発射の向きが飛ばないように）。再ロック直後（発射できない状態）は制限なし。
 - 追加マーカーの配置が変わったら窓を捨てる（表示の移行は上の制限つき）。
 - `?avg=0`: 08-4 と同じ lerp（`?smooth=0.5`。前回の観測から 2 秒超・30cm 超はスナップ、ただし連射中はスナップしない）。比較用。
+  08-4 と同じ挙動で比べるための対照なので、連射中の 1 フレーム 5mm・0.3° の制限は掛けない（レビューで指摘があったが、比較を崩さないため不採用）。
 - 使った閾値は開始時に `event=filter-config` でログに出る（実機ログを見て調整する前提）。
 
 ## 試す
@@ -59,12 +66,12 @@ npm run dev -- --host 0.0.0.0
 | 行 | 意味 |
 | --- | --- |
 | `!! FALLBACK: …` | OpenCV.js が読めず js-aruco2 で動いている。**比較が無効**なので記録しない |
-| `xr=<status> <reason> <秒>s limited=<回数>/<直近の長さ>s age=<ms> relock=<ready\|required> (last invalidate: …) p=…` | 8th Wall の生の trackingStatus と trackingReason、今の状態が続いている秒数、NORMAL → それ以外になった回数と直近の長さ、姿勢の鮮度。`badK` は intrinsics が不正、`nopose` は姿勢がまだ無い（invalidate 直後）。`p=` は投影行列の `[0,5,8,9]` と `sq=`（08-10 と同じ） |
+| `xr=<status> <reason> <秒>s limited=<回数>/<直近の長さ>s age=<ms> rot=<deg/s> xrJit=<mm> relock=<ready\|required> (last invalidate: …) p=…` | 8th Wall の生の trackingStatus と trackingReason、今の状態が続いている秒数、NORMAL → それ以外になった回数と直近の長さ、姿勢の鮮度（main スレッドが止まっていた時間も含む素の値）、カメラの角速度、**xrJit=**（角速度 30°/s 未満の間の、カメラ位置の 1 秒移動平均からの 3D の RMS = 8th Wall 自体のぶれ。各軸 σ のぶれなら約 1.7σ。歩いている間は移動平均からの遅れも入るので、止まっているときに読む）。`badK` は intrinsics が不正、`nopose` は姿勢がまだ無い（invalidate 直後）、`camera=failed / exception` はカメラの状態（trackingStatus とは別。LIMITED の集計に入れない）。`p=` は投影行列の `[0,5,8,9]` と `sq=`（08-10 と同じ） |
 | `jump=<回数>(afterLimited <回数>) max=<m>/<deg> last=…` | 8th Wall の姿勢の飛び（連続する 2 回の有効な姿勢の差が 0.2m 以上か 15° 以上）。afterLimited は LIMITED → NORMAL の復帰から 1 秒以内。**8th Wall が LIMITED を越えて原点を保つか**を見る一番の値 |
 | `inv=orientation:… projection:… visibility:… bfcache:… cameraFailed:…` | invalidate（コートを隠して再ロック）の原因別の回数。開始時の投影設定は数えない |
 | `det=<opencv\|aruco2\|loading> <試行>/<何か検出>/<採用> in <秒>s reject=… cv=<ms>` | 直近 5 秒の検出の試行・何かしらマーカーが見つかったフレーム・姿勢を採用した回数、直近の棄却理由（no layout / no solution / rejected / inconsistent / error）、検出時間 |
 | `fps=` | 描画ループの間隔の EMA |
-| `avg=<avg\|direct\|lerp> n=<窓の件数> spread=<mm>/<deg> res=<mm>/<deg> reseed= out= ign= direct= anchor=(x,y,z)` | 窓平均の状態。spread は窓の観測の推定からの RMS（= 観測のぶれ）、res は直近の観測の（入れる前の）目標からの残差、reseed は作り直し、out は外れ値として捨てた数、ign は短い LIMITED で使わなかった数、direct は直接モードに入った回数。`catching-up` は連射中の制限で表示が目標へ寄せている最中。anchor はコートのワールド位置 |
+| `avg=<avg\|direct\|lerp> n=<窓の件数> spread=<mm>/<deg> res=<mm>/<deg> reseed=N(rej M) out= held= ign= direct= reacq=<mm>/<deg>(gap <秒>s) anchor=(x,y,z)` | 窓平均の状態。spread は窓の観測の推定からの RMS（= 観測のぶれ）、res は直近の観測の（入れる前の）目標からの残差、reseed は作り直し（rej は候補がまとまらず見送った回数）、out は外れ値として捨てた数、held は窓が 3 件未満の間に目標から離れていて入れなかった数、ign は短い LIMITED・速い首振りで使わなかった数、direct は直接モードに入った回数、reacq は直近の再取得での保持していた目標との差と空白の長さ。`catching-up` は連射中の制限で表示が目標へ寄せている最中。anchor はコートのワールド位置 |
 | `cam=… \| video=WxH track="…" settings=WxH@fps` | 映像の実寸とトラックの label・`getSettings()` |
 | `marker=…` | 08-4 と同じ OpenCV アンカーの情報。**`Δ=` は「前回の生の観測との差」**（08-4 では表示コートとの差だったが、08-11 では OpenCV アンカーが rawAnchor に毎回の観測をそのまま写すため）。表示コートとの差は `avg=` の `res=` |
 | `self=` | 送っている自分の位置（field 座標系）。08-10 と違い LIMITED 中も更新される |
@@ -77,7 +84,7 @@ dev サーバーのリポジトリの `logs/client.log` に、タグ `8thwall-bo
 - `[08-11] event=…` の行（種類ごとに 1 秒あたり 5 件まで。間引いた数は `dropped=`）:
   `filter-config`（開始時の閾値）、`opencv`（読み込み結果・フォールバック）、`camera`（映像の実寸・トラックの設定。開始時と変化時）、`intrinsics`（投影行列の変化）、
   `limited-start` / `limited-end`（理由・続いた時間）、`jump`（大きさ・status/reason・afterLimited）、`invalidate`（原因）、`relock` / `relock-required`、
-  `reseed`（そのときの残差）、`direct-enter` / `window-restart`、`layout`（追加マーカーの配置の変化）、`xr-exception`
+  `reacquire`（空白の長さ `gapMs`・保持していた目標との差 `residual`・角速度）、`reseed`（そのときの残差・角速度）、`direct-enter` / `window-restart`、`layout`（追加マーカーの配置の変化）、`xr-exception`
 
 ```sh
 grep 8thwall-board-phone logs/client.log | grep "event=" | tail -50      # イベントだけ
@@ -88,7 +95,10 @@ grep 8thwall-board-phone logs/client.log | grep " state:" | tail -20      # 1 �
 
 1. **止まって 10 秒見たときのコートの変動**: マーカーの正面 1〜1.5m で静止し、HUD の `avg=` の `spread=` と `anchor=` / `self=` の変化を 10 秒見る（またはログの `state:` の行の `anchor=` を並べる）。
    目安: `anchor=` の変化が 1cm 以下。**同じ場所・同じ条件で `?avg=0` と見比べる**（`?avg=0` が数 cm、`?avg=1` が 1cm 以下なら窓平均が効いている）。
-2. **2m 歩いて戻ったときのずれ**: マーカーから目を離して 2m 歩き、戻ってマーカーを見た瞬間に、実物のマーカーと描いた枠の重なりを見る。目安: 5cm 以下。ずれていればログの `jump` と `reseed` の残差を見る。
+   - **`?avg=1` の方が揺れて見える場合は `xrJit=` が大きいはず**。それは 8th Wall 自体の姿勢のぶれで、コートをワールドに固定する窓平均では消せない（`?avg=0` は観測ごとにコートをカメラへ寄せ直すので、8th Wall のぶれが一部打ち消されて見える。PC のモックで 8th Wall 側だけに σ=1cm のノイズを入れると、self= の RMS は avg=1 の方が大きかった）。
+   - 実機では検出が 2〜5Hz になり得る（HUD の `det=` の採用数 ÷ 5 秒）。`avg=` の `n=` が 10 件に満たなければ `?avgWindowMs=5000` などに伸ばす。
+2. **2m 歩いて戻ったときのずれ**: マーカーから目を離して（3 秒以上）2m 歩き、戻ってマーカーを見る。ログの `event=reacquire gapMs=… residual=…mm/…deg` の residual が「8th Wall が歩いている間にどれだけずれたか」の実測値（HUD の `reacq=` にも出る）。
+   目安: 5cm 以下。実物のマーカーと描いた枠の重なりも目で見る。residual が大きいのに `jump` が出ていなければ徐々にずれている（ドリフト）、`jump` が出ていれば段差。その後の `reseed` で窓が新しい位置へ移る。
 3. **LIMITED の回数・長さ・復帰時の飛び**: ログの `limited-start` / `limited-end`（`durationMs=`）と `jump ... afterLimited=1` を数える。afterLimited の飛びが多い・大きいなら、8th Wall は LIMITED を越えて原点を保っていない。
 4. **LIMITED 中と復帰後の着弾のずれ**: LIMITED 中（HUD の `xr=LIMITED`）に壁の決まった点を狙って撃ち、NORMAL に戻ってからの着弾と比べる。
 5. **2 台の相対位置**: 2 台で同じ room に入り、相手の頭のアバターが実物の頭に重なるかを見る（08-10 と同じ）。
@@ -101,7 +111,9 @@ grep 8thwall-board-phone logs/client.log | grep " state:" | tail -20      # 1 �
 - **LIMITED 中は位置が信用できず、コートが滑りうる**: LIMITED 中も 8th Wall の姿勢でコートを出し続ける（ユーザーの方針）。1 秒以上続いてマーカーが見えていれば直接モードで観測へ寄せるが、見えていなければ LIMITED 中の 8th Wall の姿勢のまま。
 - **8th Wall が LIMITED を越えて原点を保つかは未検証**: 保たないなら復帰後に `jump`（afterLimited）と `reseed` が出て、窓の作り直しでコートが移る。ログで確かめる。
 - **重さ**: OpenCV.js（WASM、約 11MB）と 8th Wall の SLAM を同時に回す。`?markerIntervalMs=`（既定 100ms）で検出の間隔を広げられる。
-- `onException`（8th Wall の例外）では invalidate しない（原点が変わったとは限らない）。主表示にエラーを出し、次の reality が届けば消える。
+- `onException`（8th Wall の例外）では invalidate しない（原点が変わったとは限らない）。主表示にエラーを出し、3 秒以上たってから reality が届けば消える。
+- invalidate（向き変更など）の直後は、古い原点で計算済みの reality が届く可能性がある（推測）ので、2 フレームかつ 150ms の reality を姿勢に使わない。そのぶん再ロックが 150ms ほど遅れる。
+- 姿勢の鮮度（`age=`）は素の値。08-10 の「main スレッドが止まっていた時間は数えない」補正は、鮮度切れで invalidate しない 08-11 では不要で、止まった直後に古い姿勢で `tracking:true` を送ってしまうので外した。
 - 窓平均の既定値（3 秒・40 件・10cm / 5°・連射中 5mm / 0.3°）は PC の合成データで決めた値。実機ログの `spread=` `res=` `reseed` を見て調整する。
 
 ## PC での確認
