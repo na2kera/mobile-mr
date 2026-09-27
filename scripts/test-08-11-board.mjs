@@ -10,15 +10,22 @@
 //      (f) 回転: ヨー ±2° の一様ノイズで変動（RMS）が 0.5° 以下。半球が反転した四元数（-q）が混ざっても結果が同じで壊れない
 //      (g) 連射中（canSnap=false）は表示が 1 フレームあたり最大 5mm・0.3° しか動かない（作り直し・直接モードでも）。初回は制限なし
 //      (h) lerp モードは 08-4 と同じ（初回スナップ・0.5 の lerp・0.3m 超はスナップ・連射中はスナップしない）
+//      (i) 窓が 1〜2 件のときの外れ値（0.5m・30°）で目標が動かない（レビュー R1）
+//      (j) 観測が途切れた後の再取得（reacquire）で目標が 1 件の観測に置き換わらず、差が lastReacquire に残る（R1・R2）
+//      (k) σ=5cm・10Hz・120 秒のノイズで作り直しが起きない。0.3m の段差では従来どおり 5 件前後で作り直す（R5）
+//      (l) ±1cm のノイズの中の 3〜4cm の外れ値が窓の平均に入らない（R6）
+//      (m) 頭を速く回している間の観測（fastMotion）は窓に入れない（R7）
 //   2. xr-source.ts のコピー（08-10 の scripts/test-08-10-xr.mjs を元に、XR8 の pipeline callback 境界をモック）:
 //      LIMITED で invalidate しない・有効なら姿勢を更新 / 無効なら保持・生の trackingReason が残る・LIMITED の回数と長さ・
 //      姿勢の飛び（LIMITED 復帰直後を区別）・向き変更 / 投影更新 / failed で invalidate（原因別の回数）・invalidate 後は次の有効な reality まで
-//      pose が null（追補 A1）・onException は invalidate せず lastError・不正 intrinsics は姿勢を捨てない・repeatFrame・先行読み込み・タイムアウト
+//      pose が null（追補 A1）・invalidate の後は reality を 2 フレームかつ 150ms 捨てる（R3）・開始時の投影設定が姿勢の採用の後に
+//      ずれ込んだら invalidate（R8）・onException は invalidate せず lastError（3 秒は残す）・カメラの状態は status と別（R9）・
+//      不正 intrinsics は姿勢を捨てない・repeatFrame・先行読み込み・タイムアウト
 // テストフレームワークは使わない（他の test-*.mjs と同じ方針）。乱数は種を固定する
 import assert from "node:assert/strict";
 import { createServer } from "vite";
 import * as THREE from "three";
-import { createAnchorFilter, distV3, quatAngleDeg } from "../demos/08-11-splatoon-8thwall-board/anchor-filter.ts";
+import { MIN_WINDOW, createAnchorFilter, distV3, quatAngleDeg } from "../demos/08-11-splatoon-8thwall-board/anchor-filter.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -93,7 +100,8 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   console.log(`  avg : ${fmt(avg)}（窓 n=${avg[0].stats.n}）`);
   console.log(`  lerp: ${fmt(lerp)}`);
   check("(a) avg: ±1cm のノイズで窓が埋まった後の表示の変動（RMS）が全種で 3mm 以下", avg.every((r) => r.rms <= 0.003), `最悪 ${mm(Math.max(...avg.map((r) => r.rms)))}`);
-  check("(a) avg: 1 回の観測で表示が動く量が全種で 1mm 以下（ちょこちょこ動かない）", avg.every((r) => r.maxStep <= 0.001), `最悪 ${mm(Math.max(...avg.map((r) => r.maxStep)))}`);
+  // 窓の端の観測が外れ値の閾値（2cm）の際で出入りすると 1mm 強動くことがある（R6 で閾値を 3σ に直した結果）
+  check("(a) avg: 1 回の観測で表示が動く量が全種で 2mm 以下（ちょこちょこ動かない。lerp は 1 回で 1cm 前後）", avg.every((r) => r.maxStep <= 0.002), `最悪 ${mm(Math.max(...avg.map((r) => r.maxStep)))}`);
   check("(a) 対照の lerp（?avg=0）: 真値からの最大のずれが 10mm 以上（種の中央値）", medianOf(lerp.map((r) => r.maxDev)) >= 0.01, mm(medianOf(lerp.map((r) => r.maxDev))));
   check("(a) avg の RMS は lerp の 1/2.5 未満（全種）", avg.every((r, i) => r.rms * 2.5 < lerp[i].rms), `avg ${mm(medianOf(avg.map((r) => r.rms)))} vs lerp ${mm(medianOf(lerp.map((r) => r.rms)))}`);
 }
@@ -181,8 +189,14 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   f.add(obsAt(t, far, TRUE_Q, false, 1300), true);
   t += 100;
   check("(d) 直接モード中は観測ごとに生の観測へ寄る", distV3(f.target.pos, far) < d1 * 0.51, mm(distV3(f.target.pos, far)));
+  const targetDirect = f.target;
   const evNormal = f.add(obsAt(t, far), true);
-  check("(d) NORMAL に戻ると新しい窓（init・n=1・mode=avg）", evNormal === "init" && f.stats.n === 1 && f.stats.mode === "avg" && distV3(f.target.pos, far) < 1e-12, `${evNormal} n=${f.stats.n}`);
+  t += 100;
+  check("(d) NORMAL に戻ると新しい窓（reacquire・after=direct・n=1・mode=avg）、目標は 3 件そろうまで直接モードの値のまま", evNormal === "reacquire" && f.lastReacquire?.reason === "direct" && f.stats.n === 1 && f.stats.mode === "avg" && distV3(f.target.pos, targetDirect.pos) < 1e-12, `${evNormal} n=${f.stats.n}`);
+  f.add(obsAt(t, far), true);
+  t += 100;
+  f.add(obsAt(t, far), true);
+  check("(d) 新しい窓が 3 件そろうと目標は窓の平均", f.stats.n === 3 && distV3(f.target.pos, far) < 1e-12, `n=${f.stats.n}`);
 }
 
 // ---- (e) reset / clearWindow ----
@@ -193,7 +207,7 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   f.clearWindow();
   check("(e) clearWindow(): 窓は空・目標と表示は残る", f.stats.n === 0 && f.target !== null && f.display !== null);
   const ev = f.add(obsAt(2100, TRUE_POS), true);
-  check("(e) clearWindow() の後の観測で新しい窓（init）", ev === "init" && f.stats.n === 1, ev);
+  check("(e) clearWindow() の後の観測で新しい窓（reacquire・after=cleared）", ev === "reacquire" && f.lastReacquire?.reason === "cleared" && f.stats.n === 1, ev);
   f.reset();
   check("(e) reset(): 目標・表示が消え、step() も null", f.target === null && f.display === null && f.step(true) === null && f.stats.n === 0);
   const ev2 = f.add(obsAt(2200, TRUE_POS), false);
@@ -287,6 +301,106 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   check("(h) lerp: 表示は step の制限を受けない（add で決まる）", f.stats.mode === "lerp");
 }
 
+// ---- (i) 窓が 1〜2 件のときの外れ値（R1） ----
+{
+  for (const [label, bad] of [
+    ["位置 0.5m", (t) => obsAt(t, [TRUE_POS[0] + 0.5, TRUE_POS[1], TRUE_POS[2]])],
+    ["回転 30°", (t) => obsAt(t, TRUE_POS, qTimes(TRUE_Q, yawQuat(30)))],
+  ]) {
+    for (const goodBefore of [1, 2]) {
+      const f = createAnchorFilter();
+      let t = 0;
+      for (let k = 0; k < goodBefore; k++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+      const before = f.target;
+      const ev = f.add(bad(t), true);
+      const after = f.step(true);
+      check(`(i) 正しい観測 ${goodBefore} 件（窓 < ${MIN_WINDOW}）の次に外れ値（${label}）が来ても目標が動かない・窓に入れない`, distV3(before.pos, after.pos) < 1e-9 && quatAngleDeg(before.quat, after.quat) < 1e-3 && f.stats.n === goodBefore && f.stats.heldOut === 1, `${ev} n=${f.stats.n} ${mm(distV3(before.pos, after.pos))} ${quatAngleDeg(before.quat, after.quat).toFixed(3)}°`);
+    }
+  }
+  // 初回（目標なし）は 1 件目で目標を作る（再ロックを遅らせない）
+  const g = createAnchorFilter();
+  const ev = g.add(obsAt(0, TRUE_POS), false);
+  check("(i) 目標が無いときは 1 件目で目標を作り、表示も出る（init）", ev === "init" && distV3(g.step(false).pos, TRUE_POS) < 1e-12);
+}
+
+// ---- (j) 空白の後の再取得（R1・R2） ----
+{
+  const r = rng(21);
+  const f = createAnchorFilter();
+  let t = 0;
+  for (; t < 3000; t += 100) f.add(obsAt(t, TRUE_POS.map((v) => v + (r() * 2 - 1) * 0.005)), true);
+  f.step(true);
+  const held = f.target;
+  // 4 秒見なかった後、5cm ずれた観測が 1 件
+  t += 4000;
+  const shifted = [TRUE_POS[0] + 0.05, TRUE_POS[1], TRUE_POS[2]];
+  const ev = f.add(obsAt(t, shifted), true);
+  const rq = f.lastReacquire;
+  check("(j) 3 秒超の空白の後の最初の観測は reacquire・目標は 1 件の観測に置き換わらない（保持）", ev === "reacquire" && distV3(f.target.pos, held.pos) < 1e-12 && f.stats.n === 1, `${ev} n=${f.stats.n}`);
+  check("(j) lastReacquire に空白の長さと、保持していた目標との差（約 50mm）が残る", rq && rq.reason === "gap" && rq.gapMs >= 4000 && Math.abs(rq.residualMm - 50) < 6, JSON.stringify(rq));
+  // 空白の後の 1 件目が外れ値（0.5m）でも目標は動かない
+  const g = createAnchorFilter();
+  for (t = 0; t < 3000; t += 100) g.add(obsAt(t, TRUE_POS), true);
+  t += 4000;
+  g.add(obsAt(t, [TRUE_POS[0] + 0.5, TRUE_POS[1], TRUE_POS[2]]), true);
+  check("(j) 空白の後の 1 件目が 0.5m の外れ値でも目標は動かず、窓に入れない", distV3(g.target.pos, TRUE_POS) < 1e-12 && g.stats.n === 0 && g.stats.heldOut === 1, `n=${g.stats.n}`);
+  // その後に正しい観測が 3 件来れば新しい窓から目標を作る（5cm ずれた位置に移る）
+  for (let k = 1; k <= 3; k++) f.add(obsAt(t + k * 100, shifted), true);
+  check("(j) 空白の後に 3 件そろうと新しい窓の平均へ移る", f.stats.n === 4 && distV3(f.target.pos, shifted) < 1e-9, `n=${f.stats.n} ${f.target.pos.map((v) => v.toFixed(3))}`);
+}
+
+// ---- (k) 大きなノイズで作り直しが誤って起きない（R5） ----
+{
+  let totalReseeds = 0;
+  let worstDev = 0;
+  let rejected = 0;
+  for (const seed of [31, 32, 33]) {
+    const r = rng(seed);
+    const gauss = () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
+    const f = createAnchorFilter();
+    for (let i = 0; i < 1200; i++) {
+      f.add(obsAt(i * 100, TRUE_POS.map((v) => v + 0.05 * gauss())), true);
+      if (i > 50) worstDev = Math.max(worstDev, distV3(f.target.pos, TRUE_POS));
+    }
+    totalReseeds += f.stats.reseeds;
+    rejected += f.stats.reseedRejected;
+  }
+  check("(k) σ=5cm・10Hz・120 秒（種 3 通り）で作り直しが起きない", totalReseeds === 0, `reseeds=${totalReseeds} 候補がまとまらず見送った=${rejected} 目標の真値からの最大のずれ ${mm(worstDev)}`);
+  // 0.3m の段差（±1cm）は 5 件前後で作り直す
+  const r = rng(34);
+  const f = createAnchorFilter();
+  let t = 0;
+  for (; t < 3000; t += 100) f.add(obsAt(t, TRUE_POS.map((v) => v + (r() * 2 - 1) * 0.01)), true);
+  const shifted = [TRUE_POS[0] + 0.3, TRUE_POS[1], TRUE_POS[2]];
+  let at = -1;
+  for (let k = 1; k <= 10 && at < 0; k++, t += 100) if (f.add(obsAt(t, shifted.map((v) => v + (r() * 2 - 1) * 0.01)), true) === "reseed") at = k;
+  check("(k) 0.3m の段差（±1cm のノイズ）は 5 件目で作り直す", at === 5, `at=${at}`);
+}
+
+// ---- (l) 3〜4cm の外れ値（R6） ----
+{
+  for (const off of [0.03, 0.04]) {
+    const r = rng(41);
+    const f = createAnchorFilter();
+    let t = 0;
+    for (; t < 3000; t += 100) f.add(obsAt(t, TRUE_POS.map((v) => v + (r() * 2 - 1) * 0.01)), true);
+    const before = f.target;
+    const out0 = f.stats.outliers;
+    f.add(obsAt(t, [TRUE_POS[0] + off, TRUE_POS[1], TRUE_POS[2]]), true);
+    check(`(l) ±1cm のノイズの中の ${off * 100}cm の外れ値は窓の平均に入らない（外れ値として数え、目標は 0.1mm 未満しか動かない）`, f.stats.outliers === out0 + 1 && distV3(before.pos, f.target.pos) < 0.0001, `outliers ${out0} → ${f.stats.outliers} moved=${mm(distV3(before.pos, f.target.pos))}`);
+  }
+}
+
+// ---- (m) 頭を速く回している間の観測（R7） ----
+{
+  const f = createAnchorFilter();
+  let t = 0;
+  for (; t < 1000; t += 100) f.add(obsAt(t, TRUE_POS), true);
+  const n0 = f.stats.n;
+  const ev = f.add({ ...obsAt(t, [TRUE_POS[0] + 0.05, TRUE_POS[1], TRUE_POS[2]]), fastMotion: true }, true);
+  check("(m) fastMotion の観測は窓に入れず ignored に数える", ev === "ignored" && f.stats.n === n0 && f.stats.ignored === 1 && distV3(f.target.pos, TRUE_POS) < 1e-12, `${ev} n=${f.stats.n}`);
+}
+
 // ================= 2. xr-source.ts（08-11 のコピー） =================
 const vite = await createServer({ server: { middlewareMode: true }, logLevel: "silent" });
 const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -298,6 +412,7 @@ try {
     trackingStatus: "NORMAL", trackingReason: "UNSPECIFIED",
   });
   const limited = (x = 0, reason = "EXCESSIVE_MOTION") => ({ ...normal(x), trackingStatus: "LIMITED", trackingReason: reason });
+  const { STALE_FRAMES, STALE_MS, ERROR_SHOW_MS } = await vite.ssrLoadModule("/demos/08-11-splatoon-8thwall-board/xr-source.ts");
   /** 08-10 のテストと同じ XR8 のモック（callback の順序と引数は実機に合わせる） */
   const makeXr = () => {
     const m = {
@@ -422,7 +537,7 @@ try {
     check("xr: intrinsics が戻ると intrinsicsOk=true", source.intrinsicsOk);
   }
 
-  // ---- 向き変更: invalidate（A1: 次の有効な reality まで pose=null） ----
+  // ---- 向き変更: invalidate（A1: 次の有効な reality まで pose=null。R3: 直後の reality は 2 フレームかつ 150ms 捨てる） ----
   {
     const before = source.invalidatedAt;
     const gen = source.generation;
@@ -432,13 +547,27 @@ try {
     x1.nextReality = undefined;
     source.preRender();
     check("xr: invalidate の後、reality が無いフレームでは pose は null のまま（古い原点の姿勢を戻さない）", source.pose === null);
+    const tInv = performance.now();
+    x1.nextReality = limited(9.9);
+    for (let k = 0; k < STALE_FRAMES; k++) source.preRender();
+    check(`xr: invalidate の直後の ${STALE_FRAMES} フレームの reality は（古い原点で計算済みかもしれないので）姿勢に使わない`, source.pose === null && source.status === "LIMITED");
+    for (let k = 0; k < 3; k++) source.preRender();
+    check(`xr: ${STALE_FRAMES} フレームを過ぎても ${STALE_MS}ms 経つまでは姿勢に使わない`, source.pose === null && performance.now() - tInv < STALE_MS, `${(performance.now() - tInv).toFixed(0)}ms`);
+    await new Promise((r) => setTimeout(r, STALE_MS + 10));
     x1.nextReality = limited(0.7);
     source.preRender();
-    check("xr: invalidate の後に届いた有効な reality（LIMITED でも）で pose が戻り、invalidate 前の姿勢（1.1）とは比べない（飛びにしない）", source.pose?.position.x === 0.7 && source.jumps.count === 3, `count=${source.jumps.count}`);
+    check("xr: 2 フレームかつ 150ms を過ぎた有効な reality（LIMITED でも）で pose が戻り、invalidate 前の姿勢（1.1）とは比べない（飛びにしない）", source.pose?.position.x === 0.7 && source.jumps.count === 3, `count=${source.jumps.count}`);
     x1.nextReality = normal(3.0);
     source.preRender();
     check("xr: invalidate の後の姿勢同士（0.7 → 3.0）は飛びとして数える", source.jumps.count === 4, `count=${source.jumps.count}`);
   }
+  /** invalidate の後の捨てる期間を通す */
+  const passStale = async (reality) => {
+    x1.nextReality = reality;
+    for (let k = 0; k < STALE_FRAMES; k++) source.preRender();
+    await new Promise((r) => setTimeout(r, STALE_MS + 10));
+    source.preRender();
+  };
 
   // ---- 映像サイズ変更: 投影の更新で invalidate、同じフレームの reality は捨てる ----
   {
@@ -450,27 +579,33 @@ try {
     source.preRender();
     check("xr: 映像サイズ変更で投影を送り直し、invalidate（projection）・同じフレームの reality は捨てる", x1.projections === projections + 1 && x1.projection.cam.pixelRectWidth === 800 && source.pose === null && source.generation === gen + 1 && source.invalidateCounts.projection === 1 && canvas1.width === 800);
     source.preRender();
-    check("xr: 次のフレームで採用", source.pose?.position.x === 0.8);
+    check("xr: 投影更新の後も次のフレームはまだ捨てる（R3）", source.pose === null);
+    await passStale(normal(0.8));
+    check("xr: 捨てる期間の後に採用", source.pose?.position.x === 0.8);
   }
 
-  // ---- onCameraStatusChange("failed"): invalidate + lastError ----
+  // ---- onCameraStatusChange("failed"): invalidate + lastError（3 秒は残す）。カメラの状態は status と別（R9） ----
   {
     const gen = source.generation;
+    const limitedCount = source.limitedCount;
     x1.bridge.onCameraStatusChange({ status: "failed" });
-    check("xr: カメラ失敗（failed）で invalidate（cameraFailed）・status=failed・lastError（主表示に出す）", source.generation === gen + 1 && source.invalidateCounts.cameraFailed === 1 && source.status === "failed" && /カメラ取得に失敗/.test(source.lastError) && source.pose === null);
-    x1.nextReality = normal(0.5);
-    source.preRender();
-    check("xr: reality が届けば lastError が消え、姿勢が戻る", source.lastError === "" && source.pose?.position.x === 0.5 && source.status === "NORMAL");
+    check("xr: カメラ失敗（failed）で invalidate（cameraFailed）・cameraStatus=failed（status は NORMAL のまま = LIMITED の集計に入れない）・lastError", source.generation === gen + 1 && source.invalidateCounts.cameraFailed === 1 && source.cameraStatus === "failed" && source.status === "NORMAL" && source.limitedCount === limitedCount && /カメラ取得に失敗/.test(source.lastError) && source.pose === null);
+    await passStale(normal(0.5));
+    check("xr: reality が届けば姿勢は戻るが、lastError は 3 秒たつまで残る（主表示が 1 フレームで消えない）", source.pose?.position.x === 0.5 && /カメラ取得に失敗/.test(source.lastError));
   }
 
-  // ---- onException: invalidate しないが lastError ----
+  // ---- onException: invalidate しないが lastError（3 秒は残す） ----
   {
     const gen = source.generation;
+    const limitedCount = source.limitedCount;
     x1.bridge.onException(new Error("テストの例外"));
-    check("xr: onException は invalidate しない（原点が変わったとは限らない）が status=failed・lastError に残し、ログに出す", source.generation === gen && source.status === "failed" && /テストの例外/.test(source.lastError) && source.pose?.position.x === 0.5 && logs.some((l) => /event=xr-exception/.test(l)));
+    check("xr: onException は invalidate しない（原点が変わったとは限らない）が cameraStatus=exception・lastError に残し、ログに出す。status と LIMITED の集計は変えない", source.generation === gen && source.cameraStatus === "exception" && source.status === "NORMAL" && source.limitedCount === limitedCount && /テストの例外/.test(source.lastError) && source.pose?.position.x === 0.5 && logs.some((l) => /event=xr-exception/.test(l)));
     x1.nextReality = normal(0.5);
     source.preRender();
-    check("xr: onException の後も reality が届けば復帰", source.lastError === "" && source.status === "NORMAL");
+    check("xr: onException の直後に reality が届いても lastError は残り、cameraStatus は hasVideo に戻る", /テストの例外/.test(source.lastError) && source.cameraStatus === "hasVideo");
+    await new Promise((r) => setTimeout(r, ERROR_SHOW_MS + 50));
+    source.preRender();
+    check(`xr: ${ERROR_SHOW_MS}ms たった後の reality で lastError が消える`, source.lastError === "");
   }
 
   // ---- main.ts からの invalidate（タブ復帰・bfcache） ----
@@ -480,6 +615,23 @@ try {
   source.postRender();
   source.stop();
   check("xr: stop で XR8.stop", x1.stopped === true && x1.postRenders === 1);
+
+  // ---- R8: 開始時の投影設定が姿勢の採用の後にずれ込んだら invalidate する ----
+  {
+    const x5 = makeXr();
+    x5.video.videoWidth = 0;
+    x5.video.videoHeight = 0;
+    globalThis.window = { XR8: x5.engine };
+    const s5 = await startXrSource({ width: 300, height: 150 }, undefined, { log: () => {} });
+    x5.nextReality = normal(0.3);
+    s5.preRender();
+    const posedBefore = s5.pose?.position.x === 0.3 && x5.projections === 0;
+    x5.video.videoWidth = 640;
+    x5.video.videoHeight = 480;
+    s5.preRender();
+    check("xr: 映像の寸法が遅れて届き、開始時の投影設定が姿勢の採用の後になったら invalidate（projection）として数える（R8）", posedBefore && x5.projections === 1 && s5.invalidateCounts.projection === 1 && s5.pose === null, `projections=${x5.projections} inv=${JSON.stringify(s5.invalidateCounts)}`);
+    s5.stop();
+  }
 
   // ---- 先行読み込み・タイムアウト（08-10 と同じ） ----
   {

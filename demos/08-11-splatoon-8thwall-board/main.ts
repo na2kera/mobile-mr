@@ -132,6 +132,13 @@ const AVG_MAX_N = Math.round(numParam("avgMaxN", 40, { min: 1, max: 1000 }));
 const AVG_RESEED_N = Math.round(numParam("avgReseedN", 5, { min: 1, max: 100 }));
 /** LIMITED がこれ以上続いている間の観測で「直接モード」（生の観測へ lerp）に入る [ms]。これ未満の LIMITED ではコートを動かさない */
 const LIMITED_DIRECT_MS = numParam("limitedDirectMs", 1000, { min: 0, max: 60000 });
+/**
+ * カメラの角速度（8th Wall の姿勢から計算）がこれを超えるフレームの観測は窓に入れない [deg/s]。頭を速く回している間は
+ * 映像とカメラ姿勢の時刻ずれで観測が同じ向きに偏りうる（レビュー R7）
+ */
+const MAX_OBS_DEG_PER_SEC = numParam("maxObsDegPerSec", 90, { min: 1, max: 10000 });
+/** xrJit=（8th Wall 自体のぶれ）を測る条件: 角速度がこれ未満の間の姿勢だけ使う [deg/s] */
+const JIT_MAX_DEG_PER_SEC = 30;
 /** 送る tracking を true にする姿勢の鮮度の上限 [ms]（発射の可否には使わない） */
 const XR_FRESH_MS = 500;
 
@@ -1544,7 +1551,7 @@ function describeXr(now: number): string {
   const x = xrSource;
   if (!x) return "idle";
   const age = x.frameMs === -Infinity ? "-" : `${(now - x.frameMs).toFixed(0)}`;
-  return `${x.status} ${x.trackingReason || "-"} ${((now - x.statusSinceMs) / 1000).toFixed(1)}s limited=${x.limitedCount}/${(x.lastLimitedMs / 1000).toFixed(1)}s age=${age}ms${x.intrinsicsOk ? "" : " badK"}${x.pose ? "" : " nopose"}`;
+  return `${x.status} ${x.trackingReason || "-"} ${((now - x.statusSinceMs) / 1000).toFixed(1)}s limited=${x.limitedCount}/${(x.lastLimitedMs / 1000).toFixed(1)}s age=${age}ms rot=${camDegPerSec.toFixed(0)}deg/s xrJit=${xrJitMm.toFixed(1)}mm${x.intrinsicsOk ? "" : " badK"}${x.pose ? "" : " nopose"}${x.cameraStatus !== "hasVideo" ? ` camera=${x.cameraStatus}` : ""}`;
 }
 function describeJump(): string {
   const j = xrSource?.jumps;
@@ -1559,7 +1566,8 @@ function describeInv(): string {
 /** avg=<mode> n=<窓の件数> spread=<mm>/<deg> res=<直近の観測の残差 mm>/<deg> reseed= out=<外れ値> ign=<短い LIMITED で使わなかった> direct=<直接モードの回数> */
 function describeAvg(): string {
   const st = anchorFilter.stats;
-  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds} out=${st.outliers} ign=${st.ignored} direct=${st.directEntries}${st.catchingUp ? " catching-up" : ""}`;
+  const r = anchorFilter.lastReacquire;
+  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds}(rej ${st.reseedRejected}) out=${st.outliers} held=${st.heldOut} ign=${st.ignored} direct=${st.directEntries} reacq=${r ? `${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg(gap ${(r.gapMs / 1000).toFixed(1)}s)` : "-"}${st.catchingUp ? " catching-up" : ""}`;
 }
 function describeFps(): string {
   return loopIntervalEma > 0 ? `${(1000 / loopIntervalEma).toFixed(0)} (${loopIntervalEma.toFixed(1)}ms)` : "-";
@@ -1754,19 +1762,50 @@ addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") xrSource?.invalidate("visibility", "タブ復帰。マーカーで位置合わせしてください");
 });
 
-/** ループの前回 tick の時刻（main スレッドが止まっていたかの判定用） */
+/** ループの前回 tick の時刻（fps= 用） */
 let lastTickMs = -Infinity;
-/** 前回 tick からこれ以上空いたら、姿勢が古いのは main スレッドが止まっていたせい（映像や SLAM の停止ではない）とみなす */
-const LOOP_STALL_MS = 300;
-/**
- * main スレッドが止まっていた直後の tick の時刻。姿勢の鮮度はここからも数え直す（08-10 と同じ）。
- * 08-11 では鮮度切れで invalidate しない（送る tracking と HUD の age= に使うだけ）
- */
-let loopResumedMs = -Infinity;
 
-/** 姿勢の古さ [ms]。main スレッドが止まっていた時間は数えない */
+/**
+ * 姿勢の古さ [ms]。08-10 は main スレッドが止まっていた時間を数えない補正（loopResumedMs）をしていたが、08-11 は鮮度切れで
+ * invalidate しないので補正は要らず、補正すると止まった直後に古い姿勢で tracking:true を最大 500ms 送れてしまう（レビュー R4）
+ */
 function xrPoseAgeMs(source: XrSource, now: number): number {
-  return now - Math.max(source.frameMs, loopResumedMs);
+  return now - source.frameMs;
+}
+
+// ---- 8th Wall の姿勢の動き（角速度と、止まっている間のぶれ xrJit=）----
+/** 直近の新しい姿勢での角速度 [deg/s] */
+let camDegPerSec = 0;
+/** 角速度が小さい間の、カメラ位置の 1 秒移動平均からの RMS [mm]（8th Wall 自体のぶれ。窓平均では消せない。レビュー R11） */
+let xrJitMm = 0;
+let lastPoseFrameMs = -Infinity;
+let lastPoseGen = -1;
+const lastPoseQuat = new THREE.Quaternion();
+const poseHistory: { t: number; p: [number, number, number] }[] = [];
+const jitSamples: { t: number; sq: number }[] = [];
+function updateXrMotion(now: number) {
+  const x = xrSource;
+  if (!x?.pose || x.frameMs === lastPoseFrameMs) return;
+  const { position: p, rotation: q } = x.pose;
+  const cur = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+  if (lastPoseGen === x.generation && x.frameMs > lastPoseFrameMs) {
+    const dt = (x.frameMs - lastPoseFrameMs) / 1000;
+    camDegPerSec = dt > 0 ? THREE.MathUtils.radToDeg(lastPoseQuat.angleTo(cur)) / dt : 0;
+  } else {
+    camDegPerSec = 0;
+    poseHistory.length = 0;
+  }
+  lastPoseQuat.copy(cur);
+  lastPoseFrameMs = x.frameMs;
+  lastPoseGen = x.generation;
+  while (poseHistory.length > 0 && now - poseHistory[0].t > 1000) poseHistory.shift();
+  if (camDegPerSec < JIT_MAX_DEG_PER_SEC && poseHistory.length >= 5) {
+    const mean = [0, 1, 2].map((k) => poseHistory.reduce((acc, h) => acc + h.p[k], 0) / poseHistory.length);
+    jitSamples.push({ t: now, sq: (p.x - mean[0]) ** 2 + (p.y - mean[1]) ** 2 + (p.z - mean[2]) ** 2 });
+  }
+  poseHistory.push({ t: now, p: [p.x, p.y, p.z] });
+  while (jitSamples.length > 0 && now - jitSamples[0].t > 3000) jitSamples.shift();
+  if (jitSamples.length > 0) xrJitMm = Math.sqrt(jitSamples.reduce((acc, j) => acc + j.sq, 0) / jitSamples.length) * 1000;
 }
 
 /** 送る tracking（と俯瞰画面の peerMarkers）: 再ロック済みで、XR が NORMAL（intrinsics も有効）で、姿勢が新しい（設計の追補 A4）。発射の可否には使わない */
@@ -1774,9 +1813,9 @@ function xrTracking(now: number): boolean {
   return (FAKE_CAM && !FAKE_XR) || Boolean(xrSource?.pose && xrSource.status === "NORMAL" && xrSource.intrinsicsOk && xrPoseAgeMs(xrSource, now) < XR_FRESH_MS);
 }
 
-/** 今の観測を窓に入れてよいか（8th Wall が NORMAL で intrinsics も有効） */
+/** 今の観測を窓に入れてよいか（8th Wall が NORMAL で intrinsics も有効で、例外の直後でない） */
 function xrNormalNow(): boolean {
-  return (FAKE_CAM && !FAKE_XR) || (xrSource?.status === "NORMAL" && xrSource.intrinsicsOk);
+  return (FAKE_CAM && !FAKE_XR) || (xrSource?.status === "NORMAL" && xrSource.intrinsicsOk && xrSource.cameraStatus !== "exception");
 }
 
 /** xrNormalNow() が false になった時刻（true の間は null。ループの先頭で更新する） */
@@ -1815,16 +1854,23 @@ function onObservation(now: number) {
       quat: [rawAnchor.quaternion.x, rawAnchor.quaternion.y, rawAnchor.quaternion.z, rawAnchor.quaternion.w],
       xrNormal: xrNormalNow(),
       limitedMs: xrLimitedMs(now),
+      fastMotion: camDegPerSec > MAX_OBS_DEG_PER_SEC,
     },
     performance.now() - lastShotMs > 300,
   );
   if (event !== "ignored") relockGeneration = xrGeneration();
   const st = anchorFilter.stats;
   if (event === "reseed") {
-    logEvent("reseed", `residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg n=${st.n} count=${st.reseeds} xr=${xrSource?.status ?? "fake"}`);
+    logEvent("reseed", `residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg n=${st.n} count=${st.reseeds} rot=${camDegPerSec.toFixed(0)}deg/s xr=${xrSource?.status ?? "fake"}`);
+  }
+  const r = anchorFilter.lastReacquire;
+  if (r && r.tMs === now) {
+    // 観測が途切れた後の再取得: 保持していた目標と最初の観測の差（歩いて戻ったときのずれの実測。レビュー R2）
+    logEvent("reacquire", `gapMs=${r.gapMs.toFixed(0)} residual=${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg after=${r.reason} rot=${camDegPerSec.toFixed(0)}deg/s ids=${markerAnchor?.usedIds.join("+") || "-"} xr=${xrSource?.status ?? "fake"}`);
   } else if (event === "direct" && st.directEntries !== prevDirect) {
     logEvent("direct-enter", `limitedMs=${xrLimitedMs(now).toFixed(0)} status=${xrSource?.status ?? "-"} reason=${xrSource?.trackingReason || "-"} residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg`);
-  } else if (event === "init" && prevMode === "direct") {
+  }
+  if (prevMode === "direct" && st.mode === "avg") {
     logEvent("window-restart", `from=direct residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg`);
   }
 }
@@ -1859,11 +1905,9 @@ renderer.setAnimationLoop(() => {
     const dt = now - lastTickMs;
     loopIntervalEma = loopIntervalEma ? loopIntervalEma * 0.95 + dt * 0.05 : dt;
   }
-  // MediaPipe 初期化・シェーダコンパイル・GC などで main スレッドが止まっていただけなら SLAM の origin は変わっていない。
-  // 鮮度の数え直しの起点（08-10 と同じ。08-11 では鮮度切れでは invalidate しない）
-  if (now - lastTickMs >= LOOP_STALL_MS) loopResumedMs = now;
   lastTickMs = now;
   xrSource?.preRender();
+  updateXrMotion(now);
   if (xrNormalNow()) notNormalSinceMs = null;
   else if (notNormalSinceMs === null) notNormalSinceMs = now;
   // 原点が変わった（向き変更・投影更新・タブ復帰・カメラ失敗）: 窓と表示を捨ててコートを隠し、マーカーでの再ロックを待つ

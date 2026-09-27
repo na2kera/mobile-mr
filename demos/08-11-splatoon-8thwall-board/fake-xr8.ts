@@ -18,6 +18,11 @@
 //   pauseVideo() / resumeVideo()（video.pause() / play()。停止中は repeatFrame）、holdFrames（次の N 回を repeatFrame にする）、
 //   rotateDevice()（各 module の onDeviceOrientationChange を {orientation: 90, videoWidth, videoHeight} で呼ぶ）
 //   projection（最後の updateCameraProjectionMatrix の引数）、configured、runOptions、preRenders、postRenders、stopped
+//
+// 08-11: 原点のリセットを模す。rotateDevice() と、開始後の 2 回目以降の updateCameraProjectionMatrix（映像サイズ変更・resize）で、
+// 以後の姿勢の world に原点のオフセット（ORIGIN_SHIFT_M の平行移動 + ORIGIN_SHIFT_YAW_DEG のヨー）を足す。ただし直後の
+// STALE_AFTER_RESET フレーム（repeatFrame でないもの）は古い原点の reality を返す（古い原点で計算済みの reality が届く最悪ケース。
+// xr-source.ts がそれを捨てて、再ロックが新しい原点で行われるかを確かめる。レビュー R3）。originResets に回数
 
 type Module = {
   name?: string;
@@ -70,6 +75,10 @@ export type FakeXrState = {
    */
   holdFrames: number;
   orientationChanges: number;
+  /** 原点をずらした回数（rotateDevice と 2 回目以降の投影更新） */
+  originResets: number;
+  /** 古い原点で返した reality の数 */
+  staleRealities: number;
   stopped: boolean;
   /** run() で作った映像 */
   video: HTMLVideoElement | null;
@@ -84,6 +93,11 @@ export type FakeXrState = {
 };
 
 const NEAR = 0.05;
+/** 原点のリセット 1 回ごとに world へ足すオフセット */
+const ORIGIN_SHIFT_M: [number, number, number] = [0.5, 0, -0.3];
+const ORIGIN_SHIFT_YAW_DEG = 30;
+/** リセットの直後に古い原点の reality を返すフレーム数 */
+const STALE_AFTER_RESET = 2;
 const FAR = 100;
 
 function gaussian(): number {
@@ -132,7 +146,19 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
   const [tx, ty, tz] = opts.trans ?? [0.7, -0.3, 1.6];
   const noise = opts.noiseM ?? 0.002;
   // field → 8th Wall world（ヨー回転 + 平行移動。列優先）
-  const fieldToWorld = [Math.cos(yaw), 0, -Math.sin(yaw), 0, 0, 1, 0, 0, Math.sin(yaw), 0, Math.cos(yaw), 0, tx, ty, tz, 1];
+  let fieldToWorld = [Math.cos(yaw), 0, -Math.sin(yaw), 0, 0, 1, 0, 0, Math.sin(yaw), 0, Math.cos(yaw), 0, tx, ty, tz, 1];
+  /** 原点のリセット前の fieldToWorld（直後の STALE_AFTER_RESET フレームだけ使う） */
+  let staleFieldToWorld: number[] | null = null;
+  let staleLeft = 0;
+  let projectionCalls = 0;
+  const shiftYaw = (ORIGIN_SHIFT_YAW_DEG * Math.PI) / 180;
+  const originShift = [Math.cos(shiftYaw), 0, -Math.sin(shiftYaw), 0, 0, 1, 0, 0, Math.sin(shiftYaw), 0, Math.cos(shiftYaw), 0, ...ORIGIN_SHIFT_M, 1];
+  const resetOrigin = () => {
+    staleFieldToWorld = fieldToWorld;
+    staleLeft = STALE_AFTER_RESET;
+    fieldToWorld = mul(originShift, fieldToWorld);
+    state.originResets++;
+  };
   let modules: Module[] = [];
   let video: HTMLVideoElement | null = null;
   let canvas: HTMLCanvasElement | null = null;
@@ -177,6 +203,8 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
     repeatFrames: 0,
     holdFrames: 0,
     orientationChanges: 0,
+    originResets: 0,
+    staleRealities: 0,
     stopped: false,
     video: null,
     setVideoSize(width: number, height: number) {
@@ -200,6 +228,7 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
     rotateDevice() {
       if (!running || !video) return false;
       state.orientationChanges++;
+      resetOrigin();
       call("onDeviceOrientationChange", { orientation: 90, videoWidth: video.videoWidth, videoHeight: video.videoHeight });
       return true;
     },
@@ -222,7 +251,11 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
     XrController: {
       configure(o: Record<string, unknown>) { state.configured = { ...state.configured, ...o }; },
       pipelineModule(): Module { return { name: "reality" }; },
-      updateCameraProjectionMatrix(o: FakeXrState["projection"]) { state.projection = o; },
+      updateCameraProjectionMatrix(o: FakeXrState["projection"]) {
+        state.projection = o;
+        // 開始時の 1 回目は原点の設定そのもの。2 回目以降は実機と同じく原点がリセットされる
+        if (projectionCalls++ > 0) resetOrigin();
+      },
     },
     XrConfig: { device: () => ({ MOBILE: "mobile", ANY: "any" }) },
     addCameraPipelineModules(list: Module[]) { modules = [...modules, ...list]; },
@@ -275,7 +308,13 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
       const camToField = opts.cameraToWorld();
       let reality: object | undefined;
       if (!state.lost && camToField && video.videoWidth && video.videoHeight) {
-        const m = mul(fieldToWorld, camToField);
+        let toWorld = fieldToWorld;
+        if (staleLeft > 0 && staleFieldToWorld) {
+          staleLeft--;
+          state.staleRealities++;
+          toWorld = staleFieldToWorld;
+        }
+        const m = mul(toWorld, camToField);
         reality = {
           position: { x: m[12] + noise * gaussian(), y: m[13] + noise * gaussian(), z: m[14] + noise * gaussian() },
           rotation: quatFromMatrix(m),

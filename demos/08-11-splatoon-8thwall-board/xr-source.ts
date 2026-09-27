@@ -13,7 +13,12 @@
 //     原点が変わった直後に古いカメラ姿勢でマーカーを採用しないように。main.ts はマーカーの update を pose !== null のときだけ呼ぶ）
 //   - 姿勢の飛び（連続する 2 回の有効な姿勢の差が jumpPosM 以上か jumpDeg 以上）を診断として数える（振る舞いは変えない）。
 //     LIMITED → NORMAL の復帰から afterLimitedMs 以内の飛びは afterLimited として別に数える（8th Wall が LIMITED を越えて原点を保つかを実機で測る）
-//   - onException は invalidate しない（原点が変わったとは限らない）が、status = "failed"・lastError に残し、main.ts が画面の主表示に出す
+//   - invalidate の後は、repeatFrame でない onUpdate の reality を STALE_FRAMES（2）フレーム、かつ STALE_MS（150ms）捨ててから pose を戻す
+//     （向き変更などの直後の数フレームは、古い原点で計算済みの reality が届く可能性がある。推測だが安全側に。レビュー R3）
+//   - onException は invalidate しない（原点が変わったとは限らない）。cameraStatus = "exception"・lastError に残し、main.ts が画面の主表示に出す。
+//     lastError は少なくとも ERROR_SHOW_MS（3 秒）は残す（次の reality で 1 フレームで消えないように。レビュー R9）
+//   - カメラの状態（onCameraStatusChange の hasVideo / failed、例外）は cameraStatus に分け、status（trackingStatus）と混ぜない
+//     （LIMITED の回数・長さの集計を汚さない。レビュー R9）
 export type XrPose = {
   position: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number; w: number };
@@ -44,8 +49,10 @@ export type XrSource = {
   readonly video: HTMLVideoElement | null;
   /** 最後の有効な姿勢（LIMITED 中も有効なら更新。invalidate 後は次の有効な reality まで null） */
   readonly pose: XrPose | null;
-  /** 生の trackingStatus（reality が無ければ "NO_REALITY"。起動前は "starting"、カメラ失敗・例外は "failed"） */
+  /** 生の trackingStatus（reality が無ければ "NO_REALITY"。最初の reality の前は "starting"） */
   readonly status: string;
+  /** カメラの状態（onCameraStatusChange の status: requesting / hasStream / hasVideo / failed。例外の後は "exception"） */
+  readonly cameraStatus: string;
   /** 生の trackingReason（毎フレーム。reality が無ければ ""） */
   readonly trackingReason: string;
   /** 直近の invalidate の理由（HUD 用の文） */
@@ -91,6 +98,12 @@ export type XrSourceOptions = {
   /** LIMITED → NORMAL の復帰からこの時間以内の飛びを afterLimited として数える [ms]（既定 1000） */
   afterLimitedMs?: number;
 };
+
+/** invalidate の後に捨てる reality のフレーム数と時間（レビュー R3） */
+export const STALE_FRAMES = 2;
+export const STALE_MS = 150;
+/** 例外・カメラ失敗のエラーを主表示に残す最短の時間 [ms]（レビュー R9） */
+export const ERROR_SHOW_MS = 3000;
 
 /**
  * xr.js（と SLAM chunk）の読み込みを始める。ページ表示時に呼んで開始ボタンまでの待ち時間を減らす。
@@ -147,6 +160,11 @@ export async function startXrSource(
   let trackingReason = "";
   let reason = "";
   let lastError = "";
+  let errorAtMs = -Infinity;
+  let cameraStatus = "starting";
+  /** invalidate の後に捨てる残りのフレーム数と、捨て続ける期限 [ms]（レビュー R3） */
+  let staleFrames = 0;
+  let staleUntilMs = -Infinity;
   let frameMs = -Infinity;
   let invalidatedAt = performance.now();
   /** invalidate() の回数（同じフレーム内で invalidate されたかを時刻の分解能に依らず判定する） */
@@ -177,6 +195,8 @@ export async function startXrSource(
     prevPose = null;
     frameMs = -Infinity;
     reason = why;
+    staleFrames = STALE_FRAMES;
+    staleUntilMs = performance.now() + STALE_MS;
     invalidateCounts[cause]++;
     log(`[08-11] event=invalidate cause=${cause} count=${invalidateCounts[cause]} status=${status} reason="${why}"`);
   };
@@ -219,7 +239,8 @@ export async function startXrSource(
     if (!started) return;
     const size = `${video.videoWidth}x${video.videoHeight}`;
     if (size === projectionSize && !resized) return;
-    const first = projectionSize === "";
+    // 開始時の 1 回目で、まだ姿勢を採用していなければ捨てるものが無い（姿勢の採用の後にずれ込んだ初回は invalidate する。レビュー R8）
+    const first = projectionSize === "" && pose === null;
     projectionSize = size;
     // updateCameraProjectionMatrix は pixelRect と一緒に開始位置（origin/facing）も engine に送り直すので、
     // 以後の姿勢は新しい原点基準になる → マーカーで位置合わせし直す
@@ -247,11 +268,12 @@ export async function startXrSource(
       },
       onCameraStatusChange: ({ status: next, video: attached }: { status: string; video?: HTMLVideoElement }) => {
         if (disposed) return;
-        setStatus(next, "");
+        cameraStatus = next;
         if (next === "hasVideo" && attached && !video) { video = attached; clearTimeout(videoTimer); resolveVideo(attached); }
         if (next === "failed") {
           // カメラが失われた: 以後の姿勢は同じ原点とは限らない（08-10 はここで invalidate していなかった）
           lastError = "8th Wall のカメラ取得に失敗しました";
+          errorAtMs = performance.now();
           invalidate("cameraFailed", lastError);
           clearTimeout(videoTimer);
           rejectVideo(new Error(lastError));
@@ -281,10 +303,16 @@ export async function startXrSource(
           setStatus("NO_REALITY", "");
           return;
         }
-        lastError = "";
+        if (lastError && performance.now() - errorAtMs >= ERROR_SHOW_MS) lastError = "";
+        if (cameraStatus === "exception") cameraStatus = "hasVideo";
         setStatus(String(reality.trackingStatus ?? "UNKNOWN"), String(reality.trackingReason ?? ""));
         intrinsicsOk = validIntrinsics(reality.intrinsics);
         if (intrinsicsOk) intrinsics = Array.from(reality.intrinsics);
+        if (staleFrames > 0 || performance.now() < staleUntilMs) {
+          // invalidate の直後: 古い原点で計算済みかもしれない reality は姿勢に使わない（status と intrinsics は更新する）
+          staleFrames = Math.max(0, staleFrames - 1);
+          return;
+        }
         // LIMITED でも姿勢が有効なら採用する（ユーザーの方針: LIMITED 中もコートを表示し続ける）。無効なら最後の有効な姿勢を保持
         if (!validPose(reality)) return;
         const next: XrPose = {
@@ -314,9 +342,10 @@ export async function startXrSource(
       onException: (error: unknown) => {
         if (disposed) return;
         const msg = error instanceof Error ? error.message : String(error);
-        const first = lastError === "";
+        const first = cameraStatus !== "exception";
         lastError = `8th Wall: ${msg}`;
-        setStatus("failed", "");
+        errorAtMs = performance.now();
+        cameraStatus = "exception";
         if (first) log(`[08-11] event=xr-exception msg="${msg.slice(0, 200)}"`);
         clearTimeout(videoTimer);
         rejectVideo(error instanceof Error ? error : new Error(msg));
@@ -339,7 +368,7 @@ export async function startXrSource(
     get statusSinceMs() { return statusSinceMs; }, get limitedCount() { return limitedCount; },
     get lastLimitedMs() { return lastLimitedMs; }, get limitedSinceMs() { return limitedSinceMs; },
     get jumps() { return jumps; },
-    get lastError() { return lastError; },
+    get lastError() { return lastError; }, get cameraStatus() { return cameraStatus; },
     waitForVideo() { return videoReady; },
     preRender() { if (started && !disposed) xr.runPreRender(Date.now()); },
     postRender() { if (started && !disposed) xr.runPostRender(); },
