@@ -62,6 +62,13 @@ export type OpenCvMarkerAnchor = MarkerAnchor & {
   readonly reprojPx: number;
   /** 直近に solvePnP で使った方法（"ippe+lm" / "iter" / "iter(guess)"） */
   readonly pnpUsed: string;
+  /**
+   * 診断用の読み取り専用カウンタ（08-11 の HUD / 実機ログ用。振る舞いには使わない）。
+   * attempts = 検出を試したフレーム数、detectedFrames = 何かしらマーカーが見つかったフレーム数、accepts = 姿勢を採用した回数、
+   * lastReject = 直近に採用しなかった理由（no layout / no solution / rejected / inconsistent / error）。
+   * js-aruco2 にフォールバックしている間は accepts だけ数える（attempts / detectedFrames は js-aruco2 側からは取れない）
+   */
+  readonly counters: { readonly attempts: number; readonly detectedFrames: number; readonly accepts: number; readonly lastReject: string };
 };
 
 export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenCvMarkerAnchor {
@@ -115,6 +122,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     loadStatus: "",
     reprojPx: 0,
     pnpUsed: "",
+    counters: { attempts: 0, detectedFrames: 0, accepts: 0, lastReject: "" },
     info: "searching",
     lastAcceptedMs: -Infinity,
     detMs: 0,
@@ -129,7 +137,9 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     },
     update(now: number) {
       if (fallback) {
+        const acceptedBefore = fallback.lastAcceptedMs;
         fallback.update(now);
+        if (fallback.lastAcceptedMs !== acceptedBefore) self.counters.accepts++;
         // フォールバック中は js-aruco2 側の値をそのまま見せる
         self.info = fallback.info;
         self.lastAcceptedMs = fallback.lastAcceptedMs;
@@ -150,6 +160,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       if (!vw || !vh) return;
       lastDetVideoTime = video.currentTime;
       lastDetMs = now;
+      self.counters.attempts++;
       // 長辺が detW になるよう縮小（marker-anchor.ts と同じ）
       const scale = Math.min(1, opts.detW / Math.max(vw, vh));
       const w = Math.round(vw * scale);
@@ -171,6 +182,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
         cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
         const detections = detectMarkers(cv, detector, gray);
         self.detMs = performance.now() - t0;
+        if (detections.length > 0) self.counters.detectedFrames++;
         apply(detections, K, Math.max(w, h), now);
         consecutiveErrors = 0;
       } catch (e: unknown) {
@@ -198,6 +210,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     lastGuess = null;
     const msg = (e instanceof Error ? e.message : String(e)).slice(0, 80);
     self.info = `error(${consecutiveErrors}x)=${msg}`;
+    self.counters.lastReject = `error: ${msg}`;
     if (consecutiveErrors === 1 || now - lastRejectLogMs > 2000) {
       console.warn(`[opencv] 検出でエラー（${consecutiveErrors} 回連続）:`, e);
       lastRejectLogMs = now;
@@ -296,6 +309,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       opts.markerSizeM,
     );
     if (!board) {
+      if (detections.length > 0) self.counters.lastReject = `no layout: ${detections.map((d) => `id=${d.id}`).join(",")}`;
       if (detections.length > 0 && now - lastRejectLogMs > 2000) {
         console.log(`[opencv] observed but no layout: ${detections.map((d) => `id=${d.id}`).join(", ")}`);
         lastRejectLogMs = now;
@@ -320,6 +334,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       const { goodSingles, fused } = singlesWith(null);
       spreadM = fused?.spread ?? 0;
       if (!fused) {
+        self.counters.lastReject = "no solution (single)";
         lost(now);
         return;
       }
@@ -338,6 +353,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
       let result = solveBoardPnP(cv!, board, K, opts.pnpMethod, lastGuess);
       if (!result) {
         // 解なし（solvePnP が false・カメラの後ろ）。配置の不整合とは区別してロスト扱い
+        self.counters.lastReject = "no solution";
         lastGuess = null;
         lost(now);
         return;
@@ -392,6 +408,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
     }
     self.everDetected = true;
     self.lastAcceptedMs = now;
+    self.counters.accepts++;
     self.usedIds = usedIds;
     self.spreadM = spreadM;
     self.tiltDeg = tilt;
@@ -400,6 +417,7 @@ export function createOpenCvMarkerAnchor(opts: OpenCvMarkerAnchorOptions): OpenC
   }
 
   function logReject(now: number, text: string) {
+    self.counters.lastReject = text;
     if (now - lastRejectLogMs > 2000) {
       console.log(`[opencv] ${text}`);
       lastRejectLogMs = now;
