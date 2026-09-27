@@ -32,13 +32,10 @@
 //       空白は窓の件数ではなく時間で判定し、遠くて窓に入れなかった観測でも lastObsMs を進める（件数で判定すると、遠い観測のたびに
 //       再取得がやり直されて作り直しの候補が捨てられ、目標が永遠に固着した。再レビュー S1）
 //     - 固着の保険: 窓が 3 件未満の状態が windowMs 続き、直近 windowMs の観測のうち目標から遠い観測が 3 件以上かつ過半数なら、
-//       まとまりの条件なしでその間の観測の平均で作り直す（二峰なら全体の平均 = 中間、そうでなければ頑健な平均。fallbackReseeds。
-//       再レビュー S2・最終レビュー T2 / T4）
-//     - 作り直しの候補が二峰（2 解が交互に出るなど）なら作り直さない（bimodalRejected。二峰の判定は bimodalSplit）。
-//       まとまりの上限は候補の平均のずれに合わせて緩める（位置 max(5cm, ずれ/2)・回転 max(5°, ずれ/2)。T1）
-//     - 窓が二峰なら、片方の群が 6 割以上ならその群、そうでなければ全体の平均（中間）。いったん選んだ群は 3 割を切るまで選び続ける。
-//       二峰でなければ各軸の中央値を基準にした頑健な平均。ただし別解が一時的に増えて中央値の側の推定が目標の周りの推定と食い違ったら、
-//       目標の周り（支持 3 割以上）を採る（別解へ飛び移る・混ざった平均に落ち着くのを防ぐ。再レビュー S5・最終レビュー T3）
+//       まとまりの条件なしでその間の観測を窓にして作り直す（推定は窓の推定と同じ。fallbackReseeds。再レビュー S2・最終レビュー T2 / T4）
+//     - 作り直しの候補が二峰（2 解が交互に出るなど）なら作り直さない（bimodalRejected。二峰の判定は bimodalSplit）
+//     - 窓の推定は状態を持たない（窓の中身だけで決まる）: 各軸の中央値を基準にした頑健な平均。窓が二峰（8 件以上・各群 3 件以上・
+//       位置 0.05m / 回転 5° 以上）なら単純平均（2 解の中間寄り。bimodalWindows）。最終確認 U1
 //     - 持続的なずれで窓を作り直す: 推定から reseedPosM 以上 / reseedDeg 以上離れた観測が連続 reseedN 件、
 //       または連続 reseedMinN 件以上かつ reseedMs 以上続き、**かつ候補どうしがまとまっている**（候補の平均が目標から閾値以上離れ、
 //       候補の平均からのばらつきの RMS が閾値の半分未満。ノイズが大きいだけで作り直して 7〜12cm 飛ぶのを防ぐ。レビュー R5）なら、
@@ -160,6 +157,8 @@ export type AnchorFilterStats = {
   fallbackReseeds: number;
   /** 作り直しの候補が二峰（2 つの群に分かれている）なので見送った回数（再レビュー S5） */
   bimodalRejected: number;
+  /** 窓の推定で、窓が二峰と判定されて単純平均を使った回数（最終確認 U4） */
+  bimodalWindows: number;
   /** 直接モードに入った回数 */
   directEntries: number;
   /** 表示が目標に追いついていない（連射中の制限で寄せている最中） */
@@ -248,18 +247,9 @@ export function slerpQuat(a: readonly number[], b: readonly number[], t: number)
 export const MAD_TO_SIGMA = 1.4826;
 /** 各軸 σ の等方正規分布の 3D 距離（マクスウェル分布）の中央値 ÷ σ。位置の σ は median(3D 距離) / これ */
 export const DIST3_MEDIAN_TO_SIGMA = 1.538;
-/** 同じく下位 3 割の値 ÷ σ（マクスウェル分布の 30 パーセンタイル） */
-export const DIST3_Q30_TO_SIGMA = 1.2;
 
-/** 小さい方から割合 frac の位置の値 */
-function sortedAt(values: readonly number[], frac: number): number {
-  const s = [...values].sort((x, y) => x - y);
-  return s[Math.min(s.length - 1, Math.max(0, Math.floor(frac * (s.length - 1))))];
-}
+type Robust = { pos: Vec3T; quat: QuatT; inlier: boolean[]; spreadMm: number; spreadDeg: number; bimodal: boolean };
 
-type Robust = { pos: Vec3T; quat: QuatT; inlier: boolean[]; spreadMm: number; spreadDeg: number; bimodal: boolean; chosen: PoseT | null };
-
-/** 窓の観測から外れ値を除いた平均（位置・回転のどちらかで外れた観測は両方から除く。追補 A6） */
 /** 観測の平均（位置は算術平均、回転は半球をそろえた正規化平均） */
 function plainMean(obs: readonly { pos: readonly number[]; quat: readonly number[] }[]): { pos: Vec3T; quat: QuatT } {
   const pos: Vec3T = [0, 0, 0];
@@ -268,84 +258,55 @@ function plainMean(obs: readonly { pos: readonly number[]; quat: readonly number
 }
 
 /**
- * 窓の頑健な平均（最終レビュー T3）。
- * - 窓が二峰でなければ: 位置は各軸の中央値、回転は正規化平均を基準に、位置が max(k·σ_pos, minOutlierPosM) を超える、または回転が
- *   max(k·σ_rot, minOutlierDeg) を超える観測を外れ値として除いた平均（位置と回転は同じ観測単位で採否する）。
- *   ただし current（いまの目標）の周りに同じ閾値で 3 割以上の観測があれば、そちらの平均（ヒステリシス）
- * - 窓が二峰なら（2 解が交互に出るなど）: 片方の群が BIMODAL_MAJORITY（6 割）以上ならその群の平均、そうでなければ全体の平均（中間）。
- *   ヒステリシス: 前回その群を選んでいて（prefer = 前回選んだ群の平均。それに近い方の群を「いまの群」とする）、いまの群が 3 割以上なら
- *   選び続ける。割合が 6 割の際で揺れると「群の平均」と「全体の平均」が入れ替わって目標が数 cm 往復した（Fable の sim-mix で 30%@15cm が最悪 63mm）ため
- *   各軸の中央値は二峰の窓で多数派の群へ 1 件ごとに飛び移り、MAD も 0 に潰れて目標が観測ごとに往復した（再レビュー S5）ため。
- *   S5 の修正で基準を常に「いまの目標」にしたところ、中程度の距離の別解が混ざると混ざった平均で安定してしまった（30% が 4cm 先で
- *   最悪 17mm）ので、二峰でないときは中央値の基準に戻した
+ * 窓の推定（状態を持たない。窓の中身だけで決まる。最終確認 U1）。
+ * - 原則: 中央値を基準にした頑健な平均。位置は各軸の中央値、回転は窓の正規化平均を基準に、位置が
+ *   max(k·σ_pos, minOutlierPosM) を超える観測を位置から、回転が max(k·σ_rot, minOutlierDeg) を超える観測を回転から除く
+ *   （σ_pos = median(3D 距離) / 1.538、σ_rot = 1.4826 × median(角度)）。どちらかで閾値の 2 倍を超えた観測は両方から除く
+ * - 例外: 窓が二峰（WINDOW_BIMODAL_*）なら外れ値を除かず窓の単純な平均（2 解の中間寄り）。交互の 2 解では各軸の中央値が群の間を
+ *   1 件ごとに飛び移り、MAD も 0 に潰れて目標が観測ごとに往復した（再レビュー S5）ため。群の選択はしない。
+ * 以前（T3）は群の選択（6 割ルール）と「前回選んだ群・いまの目標の周りを採る」ヒステリシスを持たせていたが、隠れた状態のせいで
+ * 少数件の窓でノイズを二峰と誤判定して推定が入れ替わる・保険の直後に片方の解へ飛ぶ・誤った群に張り付く、が起きたので削った
  */
 export function robustMean(
   win: readonly { pos: readonly number[]; quat: readonly number[] }[],
   o: Pick<AnchorFilterOptions, "outlierK" | "minOutlierPosM" | "minOutlierDeg" | "reseedPosM" | "reseedDeg">,
-  prefer: PoseT | null = null,
-  current: PoseT | null = null,
 ): Robust {
-  const bi = bimodalSplit(win, o.reseedPosM / 2, o.reseedDeg / 2);
-  let src: { pos: readonly number[]; quat: readonly number[] }[];
+  const bi = bimodalSplit(win, WINDOW_BIMODAL_SEP_M_OF(o), WINDOW_BIMODAL_SEP_DEG_OF(o), WINDOW_BIMODAL_MIN_N, WINDOW_BIMODAL_MIN_GROUP) !== null;
   let inlier: boolean[];
-  let chosen: PoseT | null = null;
+  let src: { pos: readonly number[]; quat: readonly number[] }[];
   if (bi) {
-    const ma = plainMean(bi.ga.map((i) => win[i]));
-    const mb = plainMean(bi.gb.map((i) => win[i]));
-    let use: number[] | null = null;
-    if (prefer) {
-      // 前回選んだ群に近い方（1° ≒ 1cm として位置と回転の差を足す）が 3 割以上なら選び続ける
-      const cost = (m: PoseT) => distV3(m.pos, prefer.pos) + quatAngleDeg(m.quat, prefer.quat) * 0.01;
-      const inc = cost(ma) <= cost(mb) ? bi.ga : bi.gb;
-      if (inc.length >= KEEP_SUPPORT * win.length) use = inc;
-    }
-    if (!use) {
-      const big = bi.ga.length >= bi.gb.length ? bi.ga : bi.gb;
-      if (big.length >= BIMODAL_MAJORITY * win.length) use = big;
-    }
-    const set = use ? new Set(use) : null;
-    inlier = win.map((_, i) => (set ? set.has(i) : true));
-    src = win.filter((_, i) => inlier[i]);
-    if (set) chosen = plainMean(src);
+    inlier = win.map(() => true);
+    src = [...win];
   } else {
     const center: readonly number[] = [median(win.map((w) => w.pos[0])), median(win.map((w) => w.pos[1])), median(win.map((w) => w.pos[2]))];
     const d = win.map((w) => distV3(w.pos, center));
     const posLimit = Math.max((o.outlierK * median(d)) / DIST3_MEDIAN_TO_SIGMA, o.minOutlierPosM);
+    // 回転の基準は窓の正規化平均（「近い方の半分」の平均にすると少数件の窓で基準が揺れ、ヨーの 1° 超の変化が 3Hz で 2% に増えた。
+    // 代わりに 3 割の別解が 4° 先にあると基準が引かれて約 1° 偏る。README の既知の制約）
     const base = meanQuat(win.map((w) => w.quat), win[0].quat);
     const a = win.map((w) => quatAngleDeg(w.quat, base));
     const rotLimit = Math.max(o.outlierK * MAD_TO_SIGMA * median(a), o.minOutlierDeg);
-    inlier = win.map((_, i) => d[i] <= posLimit && a[i] <= rotLimit);
-    if (current) {
-      // ヒステリシス: 同じ閾値でいまの目標の周りに 3 割以上の観測があれば、そちらを採る。各軸の中央値は別解が一時的に過半数になると
-      // そちらへ飛び移る（30% が 4cm 先の混ざり方で 1cm 超の変化が 61 回）。閾値は中央値の側のまま（目標の周りで閾値を測り直すと、
-      // 混ざった平均に落ち着いてしまった。最終レビュー T3）
-      // 目標の周りの閾値は、目標からの距離の下位 3 割（= いまの解のノイズの大きさ）から測る。中央値の側の閾値を使うと、別解が一時的に
-      // 半分近くになったとき閾値が 2 つの解を覆うほど広がり、混ざった平均に落ち着いた（30% が 4cm 先で最悪 23mm）
-      const dc = win.map((w) => distV3(w.pos, current.pos));
-      const ac = win.map((w) => quatAngleDeg(w.quat, current.quat));
-      const q = (v: number[]) => sortedAt(v, KEEP_SUPPORT);
-      const curPosLimit = Math.max((o.outlierK * q(dc)) / DIST3_Q30_TO_SIGMA, o.minOutlierPosM);
-      const curRotLimit = Math.max((o.outlierK * q(ac)) / DIST3_Q30_TO_SIGMA, o.minOutlierDeg);
-      const nearCurrent = win.map((_, i) => dc[i] <= curPosLimit && ac[i] <= curRotLimit);
-      // 普段のノイズでは中央値の側（偏りの無い推定）をそのまま使う。中央値の側の平均と目標の周りの平均が閾値の半分以上食い違う（別解へ
-      // 飛び移る・混ざる）ときだけ、目標の周りを採る（目標の周りだけを毎回使うとノイズの裾を切って目標に張り付き、ヨー ±2° の一様ノイズで
-      // 変動が増えた。「中央値の側が目標から離れたか」で見ると、1 件ずつ少しずつ混ざった平均へ歩いていった）
-      const selA = win.filter((_, i) => inlier[i]);
-      const selB = win.filter((_, i) => nearCurrent[i]);
-      if (selA.length > 0 && selB.length >= KEEP_SUPPORT * win.length) {
-        const mA = plainMean(selA);
-        const mB = plainMean(selB);
-        if (distV3(mA.pos, mB.pos) > curPosLimit / 2 || quatAngleDeg(mA.quat, mB.quat) > curRotLimit / 2) inlier = nearCurrent;
-      }
-    }
+    // 位置は位置の外れ値、回転は回転の外れ値で除き、どちらかで大きく外れた（閾値の 2 倍超）観測は両方から除く（追補 A6 の「同じ観測単位で
+    // 採否」を大きな外れ値に限った）。閾値の際の観測まで両方から除くと、奥行のノイズで除かれた観測がヨーの平均からも抜け、少数件の窓
+    // （3Hz で約 9 件）で目標のヨーが 1° 超動く割合が約 2% になった（Fable の最終確認のヨー σ2° の条件）
+    const gross = win.map((_, i) => d[i] > 2 * posLimit || a[i] > 2 * rotLimit);
+    const posIn = win.map((_, i) => d[i] <= posLimit && !gross[i]);
+    const rotIn = win.map((_, i) => a[i] <= rotLimit && !gross[i]);
+    inlier = win.map((_, i) => posIn[i] && rotIn[i]);
     src = win.filter((_, i) => inlier[i]);
-    // 全部が外れ値（2 件で割れた等）なら全件で平均する（推定を失わない）
     if (src.length === 0) src = [...win];
+    const ps = win.filter((_, i) => posIn[i]);
+    const rs = win.filter((_, i) => rotIn[i]);
+    const pos = plainMean(ps.length > 0 ? ps : win).pos;
+    const quat = plainMean(rs.length > 0 ? rs : win).quat;
+    const spreadMm = Math.sqrt(src.reduce((acc, w) => acc + distV3(w.pos, pos) ** 2, 0) / src.length) * 1000;
+    const spreadDeg = Math.sqrt(src.reduce((acc, w) => acc + quatAngleDeg(w.quat, quat) ** 2, 0) / src.length);
+    return { pos, quat, inlier, spreadMm, spreadDeg, bimodal: false };
   }
   const { pos, quat } = plainMean(src);
   const spreadMm = Math.sqrt(src.reduce((s, w) => s + distV3(w.pos, pos) ** 2, 0) / src.length) * 1000;
   const spreadDeg = Math.sqrt(src.reduce((s, w) => s + quatAngleDeg(w.quat, quat) ** 2, 0) / src.length);
-  return { pos, quat, inlier, spreadMm, spreadDeg, bimodal: bi !== null, chosen };
+  return { pos, quat, inlier, spreadMm, spreadDeg, bimodal: bi };
 }
 
 function clonePose(p: { pos: readonly number[]; quat: readonly number[] }): PoseT {
@@ -368,8 +329,14 @@ export function stepToward(from: PoseT, to: PoseT, maxM: number, maxDeg: number)
  * （位置 2cm・回転 1.5° のノイズで 57% 誤判定）、4 倍で誤判定 1〜3%・本物の二峰（8cm・10°）の検出 97〜100%（Fable の検証）。
  * 例: 目標から 11cm と 19cm の観測が交互に出る（鏡像解などの 2 解が入れ替わる）列
  */
-export function bimodalSplit(cand: readonly { pos: readonly number[]; quat: readonly number[] }[], minSepM: number, minSepDeg: number): { ga: number[]; gb: number[] } | null {
-  if (cand.length < 4) return null;
+export function bimodalSplit(
+  cand: readonly { pos: readonly number[]; quat: readonly number[] }[],
+  minSepM: number,
+  minSepDeg: number,
+  minN = 4,
+  minGroup = 2,
+): { ga: number[]; gb: number[] } | null {
+  if (cand.length < minN) return null;
   const split = (dist: (i: number, j: number) => number) => {
     let a = 0;
     let b = 1;
@@ -392,7 +359,7 @@ export function bimodalSplit(cand: readonly { pos: readonly number[]; quat: read
   // 位置
   {
     const g = split((i, j) => distV3(cand[i].pos, cand[j].pos));
-    if (g.ga.length >= 2 && g.gb.length >= 2) {
+    if (g.ga.length >= minGroup && g.gb.length >= minGroup) {
       const mean = (idx: number[]) => [0, 1, 2].map((k) => idx.reduce((acc, i) => acc + cand[i].pos[k], 0) / idx.length);
       const ca = mean(g.ga);
       const cb = mean(g.gb);
@@ -408,7 +375,7 @@ export function bimodalSplit(cand: readonly { pos: readonly number[]; quat: read
   // 回転
   {
     const g = split((i, j) => quatAngleDeg(cand[i].quat, cand[j].quat));
-    if (g.ga.length >= 2 && g.gb.length >= 2) {
+    if (g.ga.length >= minGroup && g.gb.length >= minGroup) {
       const qa = meanQuat(g.ga.map((i) => cand[i].quat), cand[g.ga[0]].quat);
       const qb = meanQuat(g.gb.map((i) => cand[i].quat), cand[g.gb[0]].quat);
       const sep = quatAngleDeg(qa, qb);
@@ -428,10 +395,17 @@ export const BIMODAL_SEP_RATIO = 4;
  * 2 つに割ると離れ ÷ ばらつきが 3.5 前後になり、標本しだいで 4 を超えて二峰と誤判定された。本物の 2 解は群の間が空いている
  */
 export const BIMODAL_GAP_RATIO = 0.25;
-/** 窓が二峰のとき、この割合以上の群があればその群の平均を目標にする（無ければ全体の平均 = 中間。最終レビュー T3） */
-export const BIMODAL_MAJORITY = 0.6;
-/** いったん選んだ群（といまの目標の周り）は、この割合を切るまで選び続ける（ヒステリシス） */
-export const KEEP_SUPPORT = 0.3;
+/**
+ * 窓全体の二峰判定（最終確認 U1）: 件数の少ない窓ではノイズを二峰と誤判定しやすい（n=6・ヨー σ1.5〜3° で 20〜39%）ので、
+ * 窓が 8 件以上・各群 3 件以上・群の中心が位置 0.05m / 回転 5° 以上離れているときだけ二峰とする。
+ * 作り直しの候補（5 件）の二峰判定は従来どおり 4 件以上・各群 2 件以上・0.05m / 2.5°
+ */
+export const WINDOW_BIMODAL_MIN_N = 8;
+export const WINDOW_BIMODAL_MIN_GROUP = 3;
+// 位置は作り直しの候補と同じ 0.05m（reseedPosM / 2）: 0.10m にすると、典型的な 2 解の交互（11cm / 19cm = 8cm 離れ）を二峰と見られず、
+// 中央値が 1 件ごとに群の間を飛び移って目標が 8cm 往復した（S5 の退行）。誤判定が問題になったのはヨー（回転）なので回転は 5° のまま
+const WINDOW_BIMODAL_SEP_M_OF = (o: Pick<AnchorFilterOptions, "reseedPosM">) => o.reseedPosM / 2;
+const WINDOW_BIMODAL_SEP_DEG_OF = (o: Pick<AnchorFilterOptions, "reseedDeg">) => o.reseedDeg;
 
 export function isBimodal(cand: readonly { pos: readonly number[]; quat: readonly number[] }[], minSepM: number, minSepDeg: number): boolean {
   return bimodalSplit(cand, minSepM, minSepDeg) !== null;
@@ -447,8 +421,6 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
    */
   let lowObs: { obs: AnchorObservation; held: boolean }[] = [];
   let lowSinceMs = Number.NaN;
-  /** 窓が二峰のとき前回選んだ群の平均（ヒステリシス。無ければ null） */
-  let bimodalPrefer: PoseT | null = null;
   let win: AnchorObservation[] = [];
   /** 推定から大きく離れた観測の連続（持続的なずれの判定） */
   let farRun: AnchorObservation[] = [];
@@ -470,6 +442,7 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     fast: 0,
     fallbackReseeds: 0,
     bimodalRejected: 0,
+    bimodalWindows: 0,
     directEntries: 0,
     catchingUp: false,
     heldOut: 0,
@@ -582,7 +555,6 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     if (farRun.length > o.reseedN) farRun = farRun.slice(-o.reseedN);
     const runMs = farRun.length > 0 ? farRun[farRun.length - 1].tMs - farRun[0].tMs : 0;
     let reseeded = false;
-    let fallbackTarget = false;
     if (far && (farRun.length >= o.reseedN || (farRun.length >= o.reseedMinN && runMs >= o.reseedMs))) {
       // 候補どうしがまとまっていて（レビュー R5）、二峰でない（再レビュー S5）ときだけ作り直す
       const cand = farRun;
@@ -590,15 +562,10 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
       const cQuat = meanQuat(cand.map((w) => w.quat), cand[0].quat);
       const rmsPos = Math.sqrt(cand.reduce((acc, w) => acc + distV3(w.pos, cPos) ** 2, 0) / cand.length);
       const rmsDeg = Math.sqrt(cand.reduce((acc, w) => acc + quatAngleDeg(w.quat, cQuat) ** 2, 0) / cand.length);
-      const awayM = distV3(cPos, target.pos);
-      const awayDeg = quatAngleDeg(cQuat, target.quat);
-      const away = awayM >= o.reseedPosM || awayDeg >= o.reseedDeg;
-      // まとまりの上限は、候補の平均のずれが大きいほど緩める（位置 max(5cm, ずれの半分)、回転 max(5°, ずれの半分)）。
-      // 固定の 5cm / 2.5° だと、本物の 15cm のずれでも各軸 σ3cm・回転 1.5° のノイズで候補のばらつきが際に来て作り直しが 26 件まで遅れた
-      // （最終レビュー T1）。ノイズだけで作り直さないことは「候補の平均が閾値以上ずれている」（等方的なノイズの平均はほぼ 0）で守る
-      const limPos = Math.max(o.reseedPosM / 2, awayM / 2);
-      const limDeg = Math.max(o.reseedDeg, awayDeg / 2);
-      if (!(away && rmsPos < limPos && rmsDeg < limDeg)) {
+      const away = distV3(cPos, target.pos) >= o.reseedPosM || quatAngleDeg(cQuat, target.quat) >= o.reseedDeg;
+      // まとまりの上限は固定の 0.05m / 2.5°（最終確認 U2）。T1 で「ずれの半分」まで緩めたところ、10・14・18・22・26cm のような
+      // ランプ（RMS 5.7cm）でも作り直してしまった。ノイズが大きいときの追従の遅れは保険（3 秒）に任せる
+      if (!(away && rmsPos < o.reseedPosM / 2 && rmsDeg < o.reseedDeg / 2)) {
         stats.reseedRejected++;
       } else if (isBimodal(cand, o.reseedPosM / 2, o.reseedDeg / 2)) {
         stats.reseedRejected++;
@@ -630,12 +597,9 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
         lowObs = lowObs.filter((l) => obs.tMs - l.obs.tMs <= o.windowMs);
         const held = lowObs.filter((l) => l.held).map((l) => l.obs);
         if (obs.tMs - lowSinceMs >= o.windowMs && held.length >= MIN_WINDOW && held.length * 2 > lowObs.length) {
-          // 推定は遠い観測だけでなく期間中の全部の観測から（遠い観測だけだとノイズの裾に偏る）
-          const all = lowObs.map((l) => l.obs);
-          const bi = isBimodal(all, o.reseedPosM / 2, o.reseedDeg / 2);
-          const est = bi ? plainMean(all) : robustMean(all, o);
-          win = all.slice(-o.maxN);
-          bimodalPrefer = null;
+          // 推定は遠い観測だけでなく期間中の全部の観測から（遠い観測だけだとノイズの裾に偏る）。窓の推定と同じ関数（二峰なら単純平均、
+          // そうでなければ頑健平均）に任せ、状態は残さない（最終確認 U3。保険だけ別の推定にすると、次の観測で窓の推定へ飛んだ）
+          win = lowObs.map((l) => l.obs).slice(-o.maxN);
           lowObs = [];
           lowSinceMs = Number.NaN;
           farRun = [];
@@ -643,9 +607,6 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
           stats.fallbackReseeds++;
           event = "reseed";
           reseeded = true;
-          // 二峰なら窓の頑健な平均も中間になるが、念のため保険の推定をそのまま目標にする
-          target = { pos: est.pos, quat: est.quat };
-          fallbackTarget = true;
         }
       } else {
         lowObs = [];
@@ -655,15 +616,8 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     if (win.length > o.maxN) win = win.slice(win.length - o.maxN);
     stats.n = win.length;
     if (win.length >= MIN_WINDOW) {
-      const r = robustMean(win, o, reseeded ? null : bimodalPrefer, reseeded ? null : target);
-      bimodalPrefer = r.chosen;
-      if (fallbackTarget) {
-        // 保険で作った目標はそのまま（窓の件数・ばらつきだけ更新）
-        stats.spreadMm = r.spreadMm;
-        stats.spreadDeg = r.spreadDeg;
-        lastObsMs = obs.tMs;
-        return event;
-      }
+      const r = robustMean(win, o);
+      if (r.bimodal) stats.bimodalWindows++;
       if (!reseeded && win[win.length - 1] === obs && !r.inlier[win.length - 1]) stats.outliers++;
       target = { pos: r.pos, quat: r.quat };
       stats.spreadMm = r.spreadMm;
@@ -700,7 +654,6 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
 
   function reset() {
     clearWindowState();
-    bimodalPrefer = null;
     pendingReason = null;
     lowObs = [];
     lowSinceMs = Number.NaN;

@@ -1569,7 +1569,7 @@ function describeInv(): string {
 function describeAvg(): string {
   const st = anchorFilter.stats;
   const r = anchorFilter.lastReacquire;
-  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds}(rej ${st.reseedRejected} bi ${st.bimodalRejected} fb ${st.fallbackReseeds}) out=${st.outliers} held=${st.heldOut} ign=${st.ignored} fast=${st.fast} direct=${st.directEntries} reacq=${r ? `${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg(gap ${(r.gapMs / 1000).toFixed(1)}s)` : "-"}${st.catchingUp ? " catching-up" : ""}`;
+  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds}(rej ${st.reseedRejected} bi ${st.bimodalRejected} fb ${st.fallbackReseeds}) biwin=${st.bimodalWindows} out=${st.outliers} held=${st.heldOut} ign=${st.ignored} fast=${st.fast} direct=${st.directEntries} reacq=${r ? `${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg(gap ${(r.gapMs / 1000).toFixed(1)}s)` : "-"}${st.catchingUp ? " catching-up" : ""}`;
 }
 function describeFps(): string {
   return loopIntervalEma > 0 ? `${(1000 / loopIntervalEma).toFixed(0)} (${loopIntervalEma.toFixed(1)}ms)` : "-";

@@ -536,7 +536,8 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
       if (i >= 40) maxStepLate = Math.max(maxStepLate, distV3(prev, f.target.pos));
       prev = f.target.pos;
     }
-    check(`(s) ${pre}: 11cm / 19cm が交互の列は二峰として作り直さず（bimodalRejected）、目標が観測ごとに往復しない（後半 40 件の 1 観測あたりの変化 < 1cm）`, normalReseeds === 0 && f.stats.bimodalRejected > 0 && maxStepLate < 0.01, `二峰で見送り ${f.stats.bimodalRejected} 回 通常の作り直し ${normalReseeds} 保険 ${f.stats.fallbackReseeds} 後半の最大の変化 ${mm(maxStepLate)} 目標 x+${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
+    // 最終確認 U1 以降: 窓が二峰（8 件以上・各群 3 件以上・0.05m）なら単純平均なので、窓がある場合は作り直しの前に窓が中間へ移る（作り直しは起きない）
+    check(`(s) ${pre}: 11cm / 19cm が交互の列は通常の作り直しにならず、目標が観測ごとに往復しない（後半 40 件の 1 観測あたりの変化 < 1cm）・窓は二峰として単純平均（中間）`, normalReseeds === 0 && maxStepLate < 0.01 && f.stats.bimodalWindows > 0 && Math.abs(f.target.pos[0] - TRUE_POS[0] - 0.15) < 0.005, `二峰で見送り ${f.stats.bimodalRejected} 回 二峰の窓 ${f.stats.bimodalWindows} 回 通常の作り直し ${normalReseeds} 保険 ${f.stats.fallbackReseeds} 後半の最大の変化 ${mm(maxStepLate)} 目標 x+${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
   }
 }
 
@@ -550,11 +551,14 @@ function smallRot(g, sd, yawDeg = 0) {
 }
 const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
 
-// ---- (t) 回転ノイズありでの作り直し（最終レビュー T1） ----
+// ---- (t) 回転ノイズありでの追従（最終レビュー T1・最終確認 U2） ----
+// U2 でまとまりの上限を固定の 0.05m / 2.5° に戻したので、ノイズが大きいと作り直しにならないことがある。そのときは窓の更新か保険（3 秒）で
+// 追いつく。判定は「作り直しの件数」ではなく「目標が新しい位置の 3cm 以内に来るまでの件数」（10Hz で 30 件 = 3 秒以内）
 {
   for (const sig of [0.01, 0.02, 0.03]) {
     const at = [];
-    let bi = 0;
+    let reseeds = 0;
+    let fallbacks = 0;
     for (let s = 1; s <= 50; s++) {
       const r = rng(s * 17);
       const g = gaussOf(r);
@@ -564,12 +568,16 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
       t += 5000;
       const T = [TRUE_POS[0] + 0.15, TRUE_POS[1], TRUE_POS[2]];
       let a = -1;
-      for (let i = 1; i <= 60; i++, t += 100) if (f.add(obsAt(t, T.map((v) => v + sig * g()), smallRot(g, 1.5)), true) === "reseed" && a < 0) a = i;
+      for (let i = 1; i <= 60; i++, t += 100) {
+        f.add(obsAt(t, T.map((v) => v + sig * g()), smallRot(g, 1.5)), true);
+        if (a < 0 && distV3(f.target.pos, T) < 0.03) a = i;
+      }
       at.push(a < 0 ? 999 : a);
-      bi += f.stats.bimodalRejected;
+      reseeds += f.stats.reseeds - f.stats.fallbackReseeds;
+      fallbacks += f.stats.fallbackReseeds;
     }
     const srt = sorted(at);
-    check(`(t) 各軸 σ=${sig * 100}cm・回転 1.5° のノイズで空白の後の 15cm ずれ: 作り直しまで中央 ≤ 7 件・最悪 ≤ 15 件（50 本）`, srt[25] <= 7 && srt[49] <= 15, `中央 ${srt[25]} 最悪 ${srt[49]} 二峰で見送り 計 ${bi}`);
+    check(`(t) 各軸 σ=${sig * 100}cm・回転 1.5° のノイズで空白の後の 15cm ずれ: 目標が 3cm 以内に来るまで中央 ≤ 7 件・最悪 ≤ 30 件（3 秒。50 本）`, srt[25] <= 7 && srt[49] <= 30, `中央 ${srt[25]} 最悪 ${srt[49]} 作り直し ${reseeds} 保険 ${fallbacks}`);
   }
 }
 
@@ -582,7 +590,7 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
   t += 5000;
   for (let i = 0; i < 40; i++, t += 100) f.add(obsAt(t, [TRUE_POS[0] + (i % 2 ? 0.19 : 0.11), TRUE_POS[1], TRUE_POS[2]]), true);
   const x = f.target.pos[0] - TRUE_POS[0];
-  check("(u) 空白の後に 11cm / 19cm が交互: 保険は二峰を見て片方の峰に寄せず中間（13〜17cm）へ", f.stats.fallbackReseeds === 1 && x > 0.13 && x < 0.17, `fallback=${f.stats.fallbackReseeds} x=${x.toFixed(3)}`);
+  check("(u) 空白の後に 11cm / 19cm が交互: 保険で作り直し、窓は二峰なので単純平均（中間 13〜17cm）", f.stats.fallbackReseeds === 1 && x > 0.13 && x < 0.17, `fallback=${f.stats.fallbackReseeds} x=${x.toFixed(3)}`);
   // (b) 低頻度（0.4〜0.8Hz）の近い観測だけ: 窓は 3 件にならないが保険は発動しない
   let fb = 0;
   let maxStep = 0;
@@ -606,28 +614,121 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
   check("(u) 低頻度（0.4〜0.8Hz）の近い観測（σ1cm）だけでは 120 秒 × 60 本で保険が一度も発動しない", fb === 0, `fallback=${fb} 目標の 1 観測あたりの最大の変化 ${mm(maxStep)}`);
 }
 
-// ---- (v) 別解が混ざる窓（最終レビュー T3。Fable の sim-mix と同じ作り） ----
+// ---- (v) 窓の推定は状態を持たない（最終確認 U1。T3 の群の選択・ヒステリシスのテストを置き換え） ----
 {
-  for (const [frac, posOff, limitMm, label] of [[0.3, 0.04, 5, "30%@4cm"], [0.3, 0.15, 5, "30%@15cm"]]) {
-    for (const firstWrong of [false, true]) {
-      const errs = [];
-      for (let seed = 1; seed <= 20; seed++) {
-        const r = rng(seed * 101);
-        const g = gaussOf(r);
-        const f = createAnchorFilter();
-        let t = 0;
-        for (let i = 0; i < 300; i++, t += 100) {
-          const wrong = i === 0 ? firstWrong : r() < frac;
-          // Fable の sim-mix と同じ乱数の使い方（別解の回転はずれ 0、正解の回転に 0.2° のノイズ）
-          f.add(obsAt(t, [TRUE_POS[0] + (wrong ? posOff : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()], wrong ? [0, 0, 0, 1] : yawQuat(0.2 * g())), true);
-        }
-        errs.push(distV3(f.target.pos, TRUE_POS));
+  // (v1) ヨー σ2°（奥行 σ2〜3cm・横 σ1cm）、3Hz と 5Hz: 1 観測あたり 1° 超のヨーの変化の割合と最大（Fable の検証で 163733e は 3Hz 1.05%）
+  const yawRun = (hz, depthSig, seed) => {
+    const r = rng(seed);
+    const g = gaussOf(r);
+    const f = createAnchorFilter();
+    let t = 0;
+    let prev = null;
+    let big = 0;
+    let n = 0;
+    let maxDeg = 0;
+    while (t < 120000) {
+      t += (1000 / hz) * (0.8 + 0.4 * r());
+      f.add(obsAt(t, [TRUE_POS[0] + 0.01 * g(), TRUE_POS[1] + 0.01 * g(), TRUE_POS[2] + depthSig * g()], qTimes(TRUE_Q, yawQuat(2 * g()))), true);
+      const q = f.target.quat;
+      if (prev && t > 5000) {
+        const d = quatAngleDeg(prev, q);
+        n++;
+        if (d > 1) big++;
+        maxDeg = Math.max(maxDeg, d);
       }
-      check(`(v) 別解 ${label} が混ざる（1 件目が${firstWrong ? "別解" : "正解"}）: 30 秒後の目標の誤差が最悪 ≤ ${limitMm}mm（種 20 通り）`, Math.max(...errs) <= limitMm / 1000, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+      prev = q;
     }
+    return { big, n, maxDeg, bi: f.stats.bimodalWindows };
+  };
+  for (const [hz, limit] of [[3, 0.015], [5, 0.003]]) {
+    let big = 0;
+    let n = 0;
+    let maxDeg = 0;
+    let bi = 0;
+    for (const depthSig of [0.02, 0.03]) {
+      for (let seed = 1; seed <= 20; seed++) {
+        const o = yawRun(hz, depthSig, seed * 131 + hz);
+        big += o.big;
+        n += o.n;
+        maxDeg = Math.max(maxDeg, o.maxDeg);
+        bi += o.bi;
+      }
+    }
+    check(`(v) ヨー σ2°・奥行 σ2〜3cm・横 σ1cm・${hz}Hz（120 秒 × 40 本）: 1 観測あたり 1° 超のヨーの変化が ${limit * 100}% 以下・最大 2.7° 以下`, big / n <= limit && maxDeg <= 2.7, `1° 超 ${((big / n) * 100).toFixed(2)}%（${big}/${n}）最大 ${maxDeg.toFixed(2)}° 二峰の窓 ${bi} 回`);
   }
-  // 乱数の使い方を変えると、終わり際に別解が窓の 47% になる種があり、そのときは 2 つの解の間へ少し寄る
+  // 単峰のノイズを窓の二峰と誤判定する割合（U1: 8 件以上・各群 3 件以上にした目的。4 件・各群 2 件だと増える）
+  for (const [hz, limit] of [[2, 0.02], [3, 0.035]]) {
+    let bi = 0;
+    let n = 0;
+    for (let seed = 1; seed <= 20; seed++) {
+      const o = yawRun(hz, 0.03, seed * 131 + hz);
+      bi += o.bi;
+      n += o.n;
+    }
+    // 参考: 4 件・各群 2 件で判定すると 2Hz で約 10%、3Hz で約 5%
+    check(`(v) 単峰のノイズ（ヨー σ2°・奥行 σ3cm・${hz}Hz）で窓を二峰と誤判定する割合が ${(limit * 100).toFixed(1)}% 以下`, bi / n <= limit, `${((bi / n) * 100).toFixed(2)}%（${bi}/${n}）`);
+  }
+  // 大きな外れ値は位置と回転の両方から除く（追補 A6 の意図）: 15% の観測が位置 8cm・ヨー 3° ずれても、ヨーは引かれない
   {
+    const r = rng(77);
+    const g = gaussOf(r);
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 300; i++, t += 100) {
+      const bad = i > 0 && r() < 0.08;
+      f.add(obsAt(t, bad ? [TRUE_POS[0] + 0.08, TRUE_POS[1], TRUE_POS[2]] : TRUE_POS.map((v) => v + 0.005 * g()), qTimes(TRUE_Q, yawQuat(bad ? 2.5 : 1 * g()))), true);
+    }
+    const yawBias = quatAngleDeg(f.target.quat, TRUE_Q);
+    // 両方から除かないと約 0.12°
+    check("(v) 位置で大きく外れた観測（8cm。閾値の 2 倍超）は回転からも除く: 8% が 8cm・ヨー 2.5° ずれてもヨーの偏りが 0.08° 以下", yawBias <= 0.08 && distV3(f.target.pos, TRUE_POS) < 0.005, `ヨーの偏り ${yawBias.toFixed(3)}° 位置 ${mm(distV3(f.target.pos, TRUE_POS))}`);
+  }
+  // (v2) Codex 高 1: 空白の後に 11 / 19cm が 6:4 → 保険の後の次の観測で目標が 1cm 超動かない（片方の解へ飛ばない）
+  {
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    t += 5000;
+    let afterFb = null;
+    let nextMove = null;
+    for (let i = 0; i < 60 && nextMove === null; i++, t += 100) {
+      f.add(obsAt(t, [TRUE_POS[0] + [0.11, 0.11, 0.19, 0.11, 0.19][i % 5], TRUE_POS[1], TRUE_POS[2]]), true);
+      if (afterFb) nextMove = distV3(afterFb, f.target.pos);
+      else if (f.stats.fallbackReseeds > 0) afterFb = f.target.pos;
+    }
+    check("(v) 空白の後に 11 / 19cm が 6:4: 保険の後の次の観測で目標が 1cm 超動かない（保険と窓の推定が同じ）", nextMove !== null && nextMove < 0.01, `保険の後 x=${afterFb ? (afterFb[0] - TRUE_POS[0]).toFixed(3) : "-"} 次の観測での変化 ${nextMove === null ? "-" : mm(nextMove)}`);
+  }
+  // (v3) Codex 高 2: 誤解（8cm）が一時 8 割 → 正解 6 割・誤解 4 割が続くと、10 秒以内に目標の誤差が 4cm 以下（張り付かない）
+  {
+    const r = rng(55);
+    const g = gaussOf(r);
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    const wrongAt = (tt) => [TRUE_POS[0] + 0.08 + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()];
+    const rightAt = () => TRUE_POS.map((v) => v + 0.005 * g());
+    for (let i = 0; i < 50; i++, t += 100) f.add(obsAt(t, r() < 0.8 ? wrongAt(t) : rightAt()), true);
+    const errWrong = distV3(f.target.pos, TRUE_POS);
+    let within = -1;
+    for (let i = 0; i < 300; i++, t += 100) {
+      f.add(obsAt(t, r() < 0.4 ? wrongAt(t) : rightAt()), true);
+      if (within < 0 && i >= 0 && distV3(f.target.pos, TRUE_POS) <= 0.04) within = i;
+    }
+    const errEnd = distV3(f.target.pos, TRUE_POS);
+    check("(v) 誤解（8cm）が一時 8 割の後に正解 6 割・誤解 4 割: 10 秒以内に目標の誤差が 4cm 以下、30 秒後も 4cm 以下（張り付かない）", within >= 0 && within <= 100 && errEnd <= 0.04, `誤解 8 割の後 ${mm(errWrong)} → ${within} 件目で 4cm 以下 → 30 秒後 ${mm(errEnd)}`);
+  }
+  // (v4) Codex 高 3: 真値 0 のまま 10・14・18・22・26cm のランプ（RMS 5.7cm）では作り直さない
+  {
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    for (const off of [0.1, 0.14, 0.18, 0.22, 0.26]) {
+      f.add(obsAt(t, [TRUE_POS[0] + off, TRUE_POS[1], TRUE_POS[2]]), true);
+      t += 100;
+    }
+    check("(v) 真値のまま 10・14・18・22・26cm のランプ（まとまらない）では作り直さない", f.stats.reseeds === 0 && distV3(f.target.pos, TRUE_POS) < 0.001, `reseeds=${f.stats.reseeds} 見送り=${f.stats.reseedRejected} 目標のずれ ${mm(distV3(f.target.pos, TRUE_POS))}`);
+  }
+  // (v5) Fable の sim-mix と同じ作り: 別解 30%@4cm（二峰の閾値 5cm 未満 = 頑健平均で除ける）は偏らない
+  for (const firstWrong of [false, true]) {
     const errs = [];
     for (let seed = 1; seed <= 20; seed++) {
       const r = rng(seed * 101);
@@ -635,15 +736,35 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
       const f = createAnchorFilter();
       let t = 0;
       for (let i = 0; i < 300; i++, t += 100) {
-        const wrong = i > 0 && r() < 0.3;
-        f.add(obsAt(t, [TRUE_POS[0] + (wrong ? 0.04 : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()], yawQuat(0.2 * g())), true);
+        const wrong = i === 0 ? firstWrong : r() < 0.3;
+        f.add(obsAt(t, [TRUE_POS[0] + (wrong ? 0.04 : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()], wrong ? [0, 0, 0, 1] : yawQuat(0.2 * g())), true);
       }
       errs.push(distV3(f.target.pos, TRUE_POS));
     }
-    // 別解が窓の半分近くになる瞬間があるので 5mm ではなく 10mm で見る（目標の周りの閾値を中央値の側と同じにすると 2 つの解の間に落ち着いて 20mm を超える）
-    check("(v) 別解 30%@4cm（別の乱数の使い方。終わり際に別解が窓の 47% になる種を含む）: 30 秒後の誤差が最悪 ≤ 10mm", Math.max(...errs) <= 0.01, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+    check(`(v) 別解 30%@4cm が混ざる（1 件目が${firstWrong ? "別解" : "正解"}。sim-mix と同じ作り）: 30 秒後の目標の誤差が最悪 ≤ 5mm`, Math.max(...errs) <= 0.005, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
   }
-  // 45%@6cm: 往復しない（1cm 超の変化の後、1 秒以内に 1cm 超で戻らない）
+  // (v6) 別解 30%@15cm が続く（窓は二峰 → 単純平均）: 偏りは 3 割 × 15cm ≈ 4.5cm 程度で、往復しない（README の「数 cm の偏り」）
+  {
+    let maxStep = 0;
+    const errs = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      const r = rng(seed * 101);
+      const g = gaussOf(r);
+      const f = createAnchorFilter();
+      let t = 0;
+      let prev = null;
+      for (let i = 0; i < 300; i++, t += 100) {
+        const wrong = i > 0 && r() < 0.3;
+        f.add(obsAt(t, [TRUE_POS[0] + (wrong ? 0.15 : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()]), true);
+        if (i >= 100 && prev) maxStep = Math.max(maxStep, distV3(prev, f.target.pos));
+        prev = f.target.pos;
+      }
+      errs.push(distV3(f.target.pos, TRUE_POS));
+    }
+    console.log(`  参考 別解 30%@15cm が持続: 30 秒後の偏り 中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}・後半の 1 観測あたりの最大の変化 ${mm(maxStep)}`);
+    check("(v) 別解 30%@15cm が持続: 偏りは最悪 8cm 以下（単純平均で 3 割 × 15cm 前後。README の既知の制約）", Math.max(...errs) <= 0.08, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+  }
+  // (v7) 45%@6cm: 往復しない（1cm 超の変化の後、1 秒以内に逆向きへ 1cm 超で戻らない）
   let backForth = 0;
   let changes = 0;
   for (let seed = 1; seed <= 20; seed++) {
@@ -662,7 +783,7 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
     changes += big.length;
     for (let k = 1; k < big.length; k++) if (big[k].i - big[k - 1].i <= 10 && Math.sign(big[k].dx) !== Math.sign(big[k - 1].dx)) backForth++;
   }
-  check("(v) 別解 45%@6cm が混ざる: 往復しない（1cm 超の変化の後 1 秒以内に逆向きへ 1cm 超で戻ることが無い。種 20 通り × 20 秒）", backForth === 0, `1cm 超の変化 ${changes} 回（20 本 × 200 観測）・1 秒以内の往復 ${backForth} 回`);
+  check("(v) 別解 45%@6cm が混ざる: 往復しない（1 秒以内の往復 0 回）", backForth === 0, `1cm 超の変化 ${changes} 回（20 本 × 200 観測）・1 秒以内の往復 ${backForth} 回`);
 }
 
 // ---- (w) 保険の観測の数え方（最終レビュー T4・T2） ----
@@ -722,7 +843,7 @@ const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 
     f.add(obsAt(t, [TRUE_POS[0] + ([0.11, 0.11, 0.19, 0.11, 0.19][i % 5]), TRUE_POS[1], TRUE_POS[2]]), true);
     if (f.stats.fallbackReseeds > 0) atFallback = f.target.pos[0] - TRUE_POS[0];
   }
-  check("(w2) 保険の時点の目標は、遠い観測が二峰なら（多数派が 6 割でも）片方の峰（11cm）ではなく全体の平均（約 14.2cm）", atFallback !== null && Math.abs(atFallback - (3 * 0.11 + 2 * 0.19) / 5) < 0.005, `保険の時点の x=${atFallback?.toFixed(4)}`);
+  check("(w2) 保険の時点の目標は、窓（期間中の観測）が二峰なら（多数派が 6 割でも）片方の峰（11cm）ではなく単純平均（約 14.2cm）", atFallback !== null && Math.abs(atFallback - (3 * 0.11 + 2 * 0.19) / 5) < 0.005, `保険の時点の x=${atFallback?.toFixed(4)}`);
 }
 
 // ---- (x) 再取得の理由と直接モードの回数（最終レビュー T5） ----
