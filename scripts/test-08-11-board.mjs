@@ -14,7 +14,14 @@
 //      (j) 観測が途切れた後の再取得（reacquire）で目標が 1 件の観測に置き換わらず、差が lastReacquire に残る（R1・R2）
 //      (k) σ=5cm・10Hz・120 秒のノイズで作り直しが起きない。0.3m の段差では従来どおり 5 件前後で作り直す（R5）
 //      (l) ±1cm のノイズの中の 3〜4cm の外れ値が窓の平均に入らない（R6）
-//      (m) 頭を速く回している間の観測（fastMotion）は窓に入れない（R7）
+//      (m) 頭を速く回している間の観測（fastMotion）は窓に入れず fast= に数える。目標が無ければ直接モードでも再ロックしない（R7・S6）
+//      (n) 空白（5 秒）・clearWindow・直接モードの後に 0.15m / ヨー 8° ずれた観測が続くと、reacquire はちょうど 1 回、5 件前後で作り直して
+//          新しい位置へ移り、lastReacquire は最初の値のまま（再レビュー S1。以前は reacquire が毎回やり直されて永遠に固着した）
+//      (o) ノイズあり（各軸 σ 2cm / 0.15m・3cm / 0.25m・5cm / 0.2m、種 20 通り、空白後 20 秒）で固着 0 件（S1）
+//      (p) 窓が 3 件未満のまま（まとまらない遠い観測だけが）3 秒続いたら、まとまりの条件なしで作り直す（S2）
+//      (q) ?avgMaxN= の下限 3（1 / 2 を渡しても 3 になり目標が更新される。S3）
+//      (r) 角速度（xr-motion.ts）: 世代の最初の姿勢は未測定（null）、2 つ目で測れる、同じ時刻は変えない、世代が変わると未測定に戻る（S4）
+//      (s) 2 解が交互に出る列（目標から 11cm と 19cm）: 二峰として作り直さず、目標が観測ごとに往復しない（1 観測あたり 1cm 未満。S5）
 //   2. xr-source.ts のコピー（08-10 の scripts/test-08-10-xr.mjs を元に、XR8 の pipeline callback 境界をモック）:
 //      LIMITED で invalidate しない・有効なら姿勢を更新 / 無効なら保持・生の trackingReason が残る・LIMITED の回数と長さ・
 //      姿勢の飛び（LIMITED 復帰直後を区別）・向き変更 / 投影更新 / failed で invalidate（原因別の回数）・invalidate 後は次の有効な reality まで
@@ -26,6 +33,7 @@ import assert from "node:assert/strict";
 import { createServer } from "vite";
 import * as THREE from "three";
 import { MIN_WINDOW, createAnchorFilter, distV3, quatAngleDeg } from "../demos/08-11-splatoon-8thwall-board/anchor-filter.ts";
+import { createAngularRateMeter } from "../demos/08-11-splatoon-8thwall-board/xr-motion.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -207,7 +215,7 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   f.clearWindow();
   check("(e) clearWindow(): 窓は空・目標と表示は残る", f.stats.n === 0 && f.target !== null && f.display !== null);
   const ev = f.add(obsAt(2100, TRUE_POS), true);
-  check("(e) clearWindow() の後の観測で新しい窓（reacquire・after=cleared）", ev === "reacquire" && f.lastReacquire?.reason === "cleared" && f.stats.n === 1, ev);
+  check("(e) clearWindow() の後の観測で新しい窓（reacquire・after=layout）", ev === "reacquire" && f.lastReacquire?.reason === "layout" && f.stats.n === 1, ev);
   f.reset();
   check("(e) reset(): 目標・表示が消え、step() も null", f.target === null && f.display === null && f.step(true) === null && f.stats.n === 0);
   const ev2 = f.add(obsAt(2200, TRUE_POS), false);
@@ -398,7 +406,130 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
   for (; t < 1000; t += 100) f.add(obsAt(t, TRUE_POS), true);
   const n0 = f.stats.n;
   const ev = f.add({ ...obsAt(t, [TRUE_POS[0] + 0.05, TRUE_POS[1], TRUE_POS[2]]), fastMotion: true }, true);
-  check("(m) fastMotion の観測は窓に入れず ignored に数える", ev === "ignored" && f.stats.n === n0 && f.stats.ignored === 1 && distV3(f.target.pos, TRUE_POS) < 1e-12, `${ev} n=${f.stats.n}`);
+  check("(m) fastMotion の観測は窓に入れず fast= に数える（ign= とは別）", ev === "fast" && f.stats.n === n0 && f.stats.fast === 1 && f.stats.ignored === 0 && distV3(f.target.pos, TRUE_POS) < 1e-12, `${ev} n=${f.stats.n}`);
+  const g = createAnchorFilter();
+  const e1 = g.add({ ...obsAt(0, TRUE_POS), fastMotion: true }, true);
+  const e2 = g.add({ ...obsAt(100, TRUE_POS, TRUE_Q, false, 2000), fastMotion: true }, true);
+  check("(m) 目標が無いときは fastMotion の観測で再ロックしない（NORMAL でも直接モードでも）", e1 === "fast" && e2 === "fast" && g.target === null && g.step(true) === null, `${e1} ${e2}`);
+  g.add(obsAt(200, TRUE_POS), true);
+  const e3 = g.add({ ...obsAt(300, [TRUE_POS[0] + 0.1, TRUE_POS[1], TRUE_POS[2]], TRUE_Q, false, 2000), fastMotion: true }, true);
+  check("(m) 目標があれば直接モード（LIMITED が 1 秒以上）では fastMotion の観測も使う", e3 === "direct", e3);
+}
+
+// ---- (n) 空白・配置変更・直接モードの後のずれ（再レビュー S1） ----
+{
+  const scenarios = [
+    ["空白 5 秒", (f, t) => t + 5000],
+    ["clearWindow（配置変更）", (f, t) => { f.clearWindow(); return t; }],
+    ["直接モード（LIMITED 1.5 秒）", (f, t) => { for (let k = 0; k < 15; k++, t += 100) f.add(obsAt(t, TRUE_POS, TRUE_Q, false, 1000 + k * 100), true); return t; }],
+  ];
+  const shifts = [
+    ["0.15m", [TRUE_POS[0] + 0.15, TRUE_POS[1], TRUE_POS[2]], TRUE_Q],
+    ["ヨー 8°", TRUE_POS, qTimes(TRUE_Q, yawQuat(8))],
+  ];
+  for (const [sLabel, pre] of scenarios) {
+    for (const [dLabel, pos, quat] of shifts) {
+      const f = createAnchorFilter();
+      let t = 0;
+      for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+      t = pre(f, t);
+      let reacq = 0;
+      let reseedAt = -1;
+      let first = null;
+      for (let i = 1; i <= 60; i++, t += 100) {
+        const ev = f.add(obsAt(t, pos, quat), true);
+        if (ev === "reacquire") reacq++;
+        if (i === 1) first = f.lastReacquire;
+        if (ev === "reseed" && reseedAt < 0) reseedAt = i;
+      }
+      const last = f.lastReacquire;
+      const moved = distV3(f.target.pos, pos) < 0.001 && quatAngleDeg(f.target.quat, quat) < 0.1;
+      check(`(n) ${sLabel}の後に ${dLabel} ずれた観測: reacquire はちょうど 1 回・5 件前後で作り直して新しい姿勢へ移る・lastReacquire は最初の値のまま`, reacq === 1 && reseedAt >= 4 && reseedAt <= 6 && moved && first && JSON.stringify(first) === JSON.stringify(last), `reacquire=${reacq} reseedAt=${reseedAt} moved=${moved} first=${JSON.stringify(first)} last=${JSON.stringify(last)}`);
+    }
+  }
+}
+
+// ---- (o) ノイズありで固着しない（再レビュー S1） ----
+{
+  for (const [sig, off] of [[0.02, 0.15], [0.03, 0.25], [0.05, 0.2]]) {
+    let stuck = 0;
+    const errs = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      const r = rng(1000 + seed);
+      const gauss = () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
+      const f = createAnchorFilter();
+      let t = 0;
+      for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+      t += 5000;
+      const T = [TRUE_POS[0] + off, TRUE_POS[1], TRUE_POS[2]];
+      for (let i = 0; i < 200; i++, t += 100) f.add(obsAt(t, T.map((v) => v + sig * gauss())), true);
+      const e = distV3(f.target.pos, T);
+      errs.push(e);
+      if (e > off / 2) stuck++;
+    }
+    check(`(o) 各軸 σ=${sig * 100}cm・空白の後に ${off * 100}cm ずれた観測を 20 秒: 固着（誤差 > ずれの半分）0 件（種 20 通り）`, stuck === 0, `固着 ${stuck}/20 誤差 中央値 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+  }
+}
+
+// ---- (p) 固着の保険（再レビュー S2） ----
+{
+  // 空白の後、目標から 15cm と 25cm の観測が交互（まとまらない = 作り直しの条件を満たさない）
+  const f = createAnchorFilter();
+  let t = 0;
+  for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  const t0 = t;
+  let at = -1;
+  for (let i = 0; i < 50 && at < 0; i++, t += 100) {
+    const off = i % 2 ? 0.25 : 0.15;
+    if (f.add(obsAt(t, [TRUE_POS[0] + off, TRUE_POS[1], TRUE_POS[2]]), true) === "reseed") at = t - t0;
+  }
+  check("(p) 窓が 3 件未満のまま（まとまらない遠い観測だけ）3 秒続いたら、まとまりの条件なしで作り直す（fallbackReseeds）", at >= 3000 && at <= 3200 && f.stats.fallbackReseeds === 1 && f.target.pos[0] - TRUE_POS[0] > 0.1, `at=${at}ms fallback=${f.stats.fallbackReseeds} target.x-${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
+}
+
+// ---- (q) ?avgMaxN= の下限（再レビュー S3） ----
+{
+  for (const maxN of [1, 2, 3]) {
+    const f = createAnchorFilter({ maxN });
+    let t = 0;
+    for (let i = 0; i < 10; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    const p2 = [TRUE_POS[0] + 0.05, TRUE_POS[1], TRUE_POS[2]];
+    for (let i = 0; i < 10; i++, t += 100) f.add(obsAt(t, p2), true);
+    check(`(q) maxN=${maxN} を渡しても上限は 3 で、目標が新しい位置へ更新される`, f.options.maxN === 3 && f.stats.n === 3 && distV3(f.target.pos, p2) < 0.001, `options.maxN=${f.options.maxN} n=${f.stats.n} ${mm(distV3(f.target.pos, p2))}`);
+  }
+}
+
+// ---- (r) 角速度（xr-motion.ts。再レビュー S4） ----
+{
+  const m = createAngularRateMeter();
+  const v1 = m.update(3, 1000, [0, 0, 0, 1]);
+  const v2 = m.update(3, 1100, yawQuat(10));
+  const v3 = m.update(3, 1100, yawQuat(50));
+  const v4 = m.update(4, 1200, yawQuat(10));
+  const v5 = m.update(4, 1300, yawQuat(10));
+  check("(r) 角速度: 世代の最初の姿勢は未測定（null）・2 つ目で 10°/0.1s = 100°/s・同じ時刻は変えない・世代が変わると未測定・止まっていれば 0", v1 === null && Math.abs(v2 - 100) < 1e-6 && v3 === v2 && v4 === null && m.value === 0 && v5 === 0, JSON.stringify([v1, v2, v3, v4, v5]));
+}
+
+// ---- (s) 2 解が交互に出る列（再レビュー S5） ----
+{
+  for (const pre of ["窓がある", "空白の後"]) {
+    const r = rng(77);
+    const f = createAnchorFilter();
+    let t = 0;
+    for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+    if (pre === "空白の後") t += 5000;
+    let prev = f.target.pos;
+    let maxStepLate = 0;
+    let normalReseeds = 0;
+    for (let i = 0; i < 80; i++, t += 100) {
+      const off = i % 2 ? 0.19 : 0.11;
+      const ev = f.add(obsAt(t, [TRUE_POS[0] + off + (r() * 2 - 1) * 0.003, TRUE_POS[1] + (r() * 2 - 1) * 0.003, TRUE_POS[2]]), true);
+      if (ev === "reseed" && f.stats.fallbackReseeds === 0) normalReseeds++;
+      if (i >= 40) maxStepLate = Math.max(maxStepLate, distV3(prev, f.target.pos));
+      prev = f.target.pos;
+    }
+    check(`(s) ${pre}: 11cm / 19cm が交互の列は二峰として作り直さず（bimodalRejected）、目標が観測ごとに往復しない（後半 40 件の 1 観測あたりの変化 < 1cm）`, normalReseeds === 0 && f.stats.bimodalRejected > 0 && maxStepLate < 0.01, `二峰で見送り ${f.stats.bimodalRejected} 回 通常の作り直し ${normalReseeds} 保険 ${f.stats.fallbackReseeds} 後半の最大の変化 ${mm(maxStepLate)} 目標 x+${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
+  }
 }
 
 // ================= 2. xr-source.ts（08-11 のコピー） =================

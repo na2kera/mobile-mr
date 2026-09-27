@@ -57,6 +57,7 @@ import type { XrSource } from "./xr-source";
 import { installFakeXr8 } from "./fake-xr8";
 import { createAnchorFilter } from "./anchor-filter";
 import type { AnchorFilterEvent } from "./anchor-filter";
+import { createAngularRateMeter } from "./xr-motion";
 
 // 08-11: MR スプラトゥーン（8th Wall SLAM + OpenCV board + 窓平均）。08-10 の丸ごとコピーで、変えたのは「コートの置き方」:
 //   - マーカー推定を 08-4 と同じ OpenCV.js の board + solvePnP（src/shared/marker-anchor-opencv.ts）にした。
@@ -128,7 +129,8 @@ const OPENCV_URL = params.get("opencvUrl") ?? defaultOpenCvUrl(import.meta.env.B
 /** ?avg=0 で 08-4 と同じ lerp（比較用） */
 const AVG = params.get("avg") !== "0";
 const AVG_WINDOW_MS = numParam("avgWindowMs", 3000, { min: 100, max: 60000 });
-const AVG_MAX_N = Math.round(numParam("avgMaxN", 40, { min: 1, max: 1000 }));
+/** 下限 3: 窓が 3 件未満だと目標を更新しないため（?avgMaxN=1 / 2 で目標が固まらないように。再レビュー S3） */
+const AVG_MAX_N = Math.round(numParam("avgMaxN", 40, { min: 3, max: 1000 }));
 const AVG_RESEED_N = Math.round(numParam("avgReseedN", 5, { min: 1, max: 100 }));
 /** LIMITED がこれ以上続いている間の観測で「直接モード」（生の観測へ lerp）に入る [ms]。これ未満の LIMITED ではコートを動かさない */
 const LIMITED_DIRECT_MS = numParam("limitedDirectMs", 1000, { min: 0, max: 60000 });
@@ -1551,7 +1553,7 @@ function describeXr(now: number): string {
   const x = xrSource;
   if (!x) return "idle";
   const age = x.frameMs === -Infinity ? "-" : `${(now - x.frameMs).toFixed(0)}`;
-  return `${x.status} ${x.trackingReason || "-"} ${((now - x.statusSinceMs) / 1000).toFixed(1)}s limited=${x.limitedCount}/${(x.lastLimitedMs / 1000).toFixed(1)}s age=${age}ms rot=${camDegPerSec.toFixed(0)}deg/s xrJit=${xrJitMm.toFixed(1)}mm${x.intrinsicsOk ? "" : " badK"}${x.pose ? "" : " nopose"}${x.cameraStatus !== "hasVideo" ? ` camera=${x.cameraStatus}` : ""}`;
+  return `${x.status} ${x.trackingReason || "-"} ${((now - x.statusSinceMs) / 1000).toFixed(1)}s limited=${x.limitedCount}/${(x.lastLimitedMs / 1000).toFixed(1)}s age=${age}ms rot=${rotText()}deg/s xrJit=${xrJitMm.toFixed(1)}mm${x.intrinsicsOk ? "" : " badK"}${x.pose ? "" : " nopose"}${x.cameraStatus !== "hasVideo" ? ` camera=${x.cameraStatus}` : ""}`;
 }
 function describeJump(): string {
   const j = xrSource?.jumps;
@@ -1567,7 +1569,7 @@ function describeInv(): string {
 function describeAvg(): string {
   const st = anchorFilter.stats;
   const r = anchorFilter.lastReacquire;
-  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds}(rej ${st.reseedRejected}) out=${st.outliers} held=${st.heldOut} ign=${st.ignored} direct=${st.directEntries} reacq=${r ? `${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg(gap ${(r.gapMs / 1000).toFixed(1)}s)` : "-"}${st.catchingUp ? " catching-up" : ""}`;
+  return `${st.mode} n=${st.n} spread=${st.spreadMm.toFixed(1)}mm/${st.spreadDeg.toFixed(2)}deg res=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg reseed=${st.reseeds}(rej ${st.reseedRejected} bi ${st.bimodalRejected} fb ${st.fallbackReseeds}) out=${st.outliers} held=${st.heldOut} ign=${st.ignored} fast=${st.fast} direct=${st.directEntries} reacq=${r ? `${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg(gap ${(r.gapMs / 1000).toFixed(1)}s)` : "-"}${st.catchingUp ? " catching-up" : ""}`;
 }
 function describeFps(): string {
   return loopIntervalEma > 0 ? `${(1000 / loopIntervalEma).toFixed(0)} (${loopIntervalEma.toFixed(1)}ms)` : "-";
@@ -1774,38 +1776,40 @@ function xrPoseAgeMs(source: XrSource, now: number): number {
 }
 
 // ---- 8th Wall の姿勢の動き（角速度と、止まっている間のぶれ xrJit=）----
-/** 直近の新しい姿勢での角速度 [deg/s] */
-let camDegPerSec = 0;
+/** 角速度（xr-motion.ts）。世代の最初の姿勢では未測定（null） */
+const angularRate = createAngularRateMeter();
+/** 直近の角速度 [deg/s]。未測定なら null（その間の観測は速い首振りと同じ扱い。再レビュー S4） */
+let camDegPerSec: number | null = null;
 /** 角速度が小さい間の、カメラ位置の 1 秒移動平均からの RMS [mm]（8th Wall 自体のぶれ。窓平均では消せない。レビュー R11） */
 let xrJitMm = 0;
 let lastPoseFrameMs = -Infinity;
 let lastPoseGen = -1;
-const lastPoseQuat = new THREE.Quaternion();
 const poseHistory: { t: number; p: [number, number, number] }[] = [];
 const jitSamples: { t: number; sq: number }[] = [];
 function updateXrMotion(now: number) {
   const x = xrSource;
-  if (!x?.pose || x.frameMs === lastPoseFrameMs) return;
+  if (!x?.pose || (x.frameMs === lastPoseFrameMs && x.generation === lastPoseGen)) return;
   const { position: p, rotation: q } = x.pose;
-  const cur = new THREE.Quaternion(q.x, q.y, q.z, q.w);
-  if (lastPoseGen === x.generation && x.frameMs > lastPoseFrameMs) {
-    const dt = (x.frameMs - lastPoseFrameMs) / 1000;
-    camDegPerSec = dt > 0 ? THREE.MathUtils.radToDeg(lastPoseQuat.angleTo(cur)) / dt : 0;
-  } else {
-    camDegPerSec = 0;
-    poseHistory.length = 0;
-  }
-  lastPoseQuat.copy(cur);
+  if (x.generation !== lastPoseGen) poseHistory.length = 0;
+  camDegPerSec = angularRate.update(x.generation, x.frameMs, [q.x, q.y, q.z, q.w]);
   lastPoseFrameMs = x.frameMs;
   lastPoseGen = x.generation;
   while (poseHistory.length > 0 && now - poseHistory[0].t > 1000) poseHistory.shift();
-  if (camDegPerSec < JIT_MAX_DEG_PER_SEC && poseHistory.length >= 5) {
+  if (camDegPerSec !== null && camDegPerSec < JIT_MAX_DEG_PER_SEC && poseHistory.length >= 5) {
     const mean = [0, 1, 2].map((k) => poseHistory.reduce((acc, h) => acc + h.p[k], 0) / poseHistory.length);
     jitSamples.push({ t: now, sq: (p.x - mean[0]) ** 2 + (p.y - mean[1]) ** 2 + (p.z - mean[2]) ** 2 });
   }
   poseHistory.push({ t: now, p: [p.x, p.y, p.z] });
   while (jitSamples.length > 0 && now - jitSamples[0].t > 3000) jitSamples.shift();
   if (jitSamples.length > 0) xrJitMm = Math.sqrt(jitSamples.reduce((acc, j) => acc + j.sq, 0) / jitSamples.length) * 1000;
+}
+/** 今の観測を「速い首振り」として使わないか（角速度が上限超え、または XR があって未測定）。XR 無しのフェイクカメラは角速度を測れないので false */
+function fastMotionNow(): boolean {
+  if (FAKE_CAM && !FAKE_XR) return false;
+  return camDegPerSec === null || camDegPerSec > MAX_OBS_DEG_PER_SEC;
+}
+function rotText(): string {
+  return camDegPerSec === null ? "-" : camDegPerSec.toFixed(0);
 }
 
 /** 送る tracking（と俯瞰画面の peerMarkers）: 再ロック済みで、XR が NORMAL（intrinsics も有効）で、姿勢が新しい（設計の追補 A4）。発射の可否には使わない */
@@ -1854,19 +1858,20 @@ function onObservation(now: number) {
       quat: [rawAnchor.quaternion.x, rawAnchor.quaternion.y, rawAnchor.quaternion.z, rawAnchor.quaternion.w],
       xrNormal: xrNormalNow(),
       limitedMs: xrLimitedMs(now),
-      fastMotion: camDegPerSec > MAX_OBS_DEG_PER_SEC,
+      fastMotion: fastMotionNow(),
     },
     performance.now() - lastShotMs > 300,
   );
-  if (event !== "ignored") relockGeneration = xrGeneration();
+  // 使わなかった観測（短い LIMITED・速い首振り / 角速度が未測定）では再ロックしない
+  if (event !== "ignored" && event !== "fast") relockGeneration = xrGeneration();
   const st = anchorFilter.stats;
   if (event === "reseed") {
-    logEvent("reseed", `residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg n=${st.n} count=${st.reseeds} rot=${camDegPerSec.toFixed(0)}deg/s xr=${xrSource?.status ?? "fake"}`);
+    logEvent("reseed", `residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg n=${st.n} count=${st.reseeds} rot=${rotText()}deg/s xr=${xrSource?.status ?? "fake"}`);
   }
   const r = anchorFilter.lastReacquire;
   if (r && r.tMs === now) {
     // 観測が途切れた後の再取得: 保持していた目標と最初の観測の差（歩いて戻ったときのずれの実測。レビュー R2）
-    logEvent("reacquire", `gapMs=${r.gapMs.toFixed(0)} residual=${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg after=${r.reason} rot=${camDegPerSec.toFixed(0)}deg/s ids=${markerAnchor?.usedIds.join("+") || "-"} xr=${xrSource?.status ?? "fake"}`);
+    logEvent("reacquire", `gapMs=${r.gapMs.toFixed(0)} residual=${r.residualMm.toFixed(0)}mm/${r.residualDeg.toFixed(1)}deg after=${r.reason} rot=${rotText()}deg/s ids=${markerAnchor?.usedIds.join("+") || "-"} xr=${xrSource?.status ?? "fake"}`);
   } else if (event === "direct" && st.directEntries !== prevDirect) {
     logEvent("direct-enter", `limitedMs=${xrLimitedMs(now).toFixed(0)} status=${xrSource?.status ?? "-"} reason=${xrSource?.trackingReason || "-"} residual=${st.residualMm.toFixed(0)}mm/${st.residualDeg.toFixed(1)}deg`);
   }

@@ -27,9 +27,14 @@
 //       25cm・15° 動く。レビュー R1）ので、基準は「いまの目標」にして、目標から reseedPosM / reseedDeg 以上離れた観測は窓に入れず
 //       作り直しの候補として数えるだけにする。目標は窓が 3 件そろうまで書き換えない。
 //       目標が無いとき（初回・invalidate 後の再ロック）だけは 1 件目で目標を作る（再ロックを遅らせない）
-//     - 観測が途切れて窓が空になった後（マーカーを windowMs 以上見なかった・配置変更・直接モードの後）の最初の観測は「再取得」
-//       （reacquire）: 目標は保持したまま新しい窓を始め、保持していた目標と最初の観測の差を lastReacquire に残す
-//       （歩いて戻ったときのずれの実測値。レビュー R2）
+//     - 空白の後（前回の観測から windowMs を超えた・配置変更・直接モードの後）の最初の観測は「再取得」（reacquire）: 目標は保持したまま
+//       新しい窓を始め、保持していた目標と最初の観測の差を lastReacquire に残す（歩いて戻ったときのずれの実測値。レビュー R2）。
+//       空白は窓の件数ではなく時間で判定し、遠くて窓に入れなかった観測でも lastObsMs を進める（件数で判定すると、遠い観測のたびに
+//       再取得がやり直されて作り直しの候補が捨てられ、目標が永遠に固着した。再レビュー S1）
+//     - 固着の保険: 窓が 3 件未満のまま（観測が遠い・まとまらない）windowMs 続いたら、まとまりの条件なしでその間の観測の頑健な平均で
+//       作り直す（fallbackReseeds。再レビュー S2）
+//     - 作り直しの候補が二峰（2 解が交互に出るなど）なら作り直さない（bimodalRejected）。窓の平均の外れ値の基準はいまの目標
+//       （各軸の中央値は二峰の窓で多数派へ飛び移り、目標が観測ごとに往復した。再レビュー S5）
 //     - 持続的なずれで窓を作り直す: 推定から reseedPosM 以上 / reseedDeg 以上離れた観測が連続 reseedN 件、
 //       または連続 reseedMinN 件以上かつ reseedMs 以上続き、**かつ候補どうしがまとまっている**（候補の平均が目標から閾値以上離れ、
 //       候補の平均からのばらつきの RMS が閾値の半分未満。ノイズが大きいだけで作り直して 7〜12cm 飛ぶのを防ぐ。レビュー R5）なら、
@@ -122,10 +127,10 @@ export type AnchorFilterMode = "avg" | "direct" | "lerp";
  * add() が何をしたか: init = 新しい窓を始めた（初回・直接モードの後・長い空白の後・clearWindow の後）、reseed = 作り直し、
  * update = 窓に足した、ignored = 短い LIMITED 中なので使わなかった、direct = 直接モードで目標を寄せた、lerp = ?avg=0
  */
-export type AnchorFilterEvent = "init" | "reacquire" | "reseed" | "update" | "ignored" | "direct" | "lerp";
+export type AnchorFilterEvent = "init" | "reacquire" | "reseed" | "update" | "ignored" | "fast" | "direct" | "lerp";
 
 /** 空白の後の再取得（reacquire）の記録: 最初の観測と、保持していた目標との差 */
-export type AnchorReacquire = { tMs: number; gapMs: number; residualMm: number; residualDeg: number; reason: "gap" | "cleared" | "direct" };
+export type AnchorReacquire = { tMs: number; gapMs: number; residualMm: number; residualDeg: number; reason: "gap" | "layout" | "direct" };
 
 export type AnchorFilterStats = {
   mode: AnchorFilterMode;
@@ -145,6 +150,12 @@ export type AnchorFilterStats = {
   outliers: number;
   /** 短い LIMITED 中なので使わなかった観測の数 */
   ignored: number;
+  /** 頭を速く回している（または角速度が未測定の）間なので使わなかった観測の数（fast=。レビュー R7・再レビュー S4 / S6） */
+  fast: number;
+  /** 窓が 3 件未満のまま windowMs 続いたので、まとまりの条件なしで作り直した回数（固着の保険。再レビュー S2） */
+  fallbackReseeds: number;
+  /** 作り直しの候補が二峰（2 つの群に分かれている）なので見送った回数（再レビュー S5） */
+  bimodalRejected: number;
   /** 直接モードに入った回数 */
   directEntries: number;
   /** 表示が目標に追いついていない（連射中の制限で寄せている最中） */
@@ -237,11 +248,16 @@ export const DIST3_MEDIAN_TO_SIGMA = 1.538;
 type Robust = { pos: Vec3T; quat: QuatT; inlier: boolean[]; spreadMm: number; spreadDeg: number };
 
 /** 窓の観測から外れ値を除いた平均（位置・回転のどちらかで外れた観測は両方から除く。追補 A6） */
-export function robustMean(win: readonly { pos: readonly number[]; quat: readonly number[] }[], refQuat: readonly number[] | null, o: Pick<AnchorFilterOptions, "outlierK" | "minOutlierPosM" | "minOutlierDeg">): Robust {
-  const center: Vec3T = [median(win.map((w) => w.pos[0])), median(win.map((w) => w.pos[1])), median(win.map((w) => w.pos[2]))];
+/**
+ * @param ref いまの目標（あれば外れ値の判定の基準にする）。無ければ（初回・作り直し）位置は各軸の中央値、回転は正規化平均を基準にする。
+ *   窓の中が二峰（例: 鏡像解が交互に出る）だと各軸の中央値は多数派の群へ 1 件ごとに飛び移り、MAD も 0 に潰れて、目標が観測ごとに
+ *   群の距離ぶん往復した（再レビュー S5）。いまの目標を基準にすると基準が連続に動くので往復しない
+ */
+export function robustMean(win: readonly { pos: readonly number[]; quat: readonly number[] }[], ref: PoseT | null, o: Pick<AnchorFilterOptions, "outlierK" | "minOutlierPosM" | "minOutlierDeg">): Robust {
+  const center: readonly number[] = ref ? ref.pos : [median(win.map((w) => w.pos[0])), median(win.map((w) => w.pos[1])), median(win.map((w) => w.pos[2]))];
   const d = win.map((w) => distV3(w.pos, center));
   const posLimit = Math.max((o.outlierK * median(d)) / DIST3_MEDIAN_TO_SIGMA, o.minOutlierPosM);
-  const base = meanQuat(win.map((w) => w.quat), refQuat ?? win[0].quat);
+  const base = ref ? normalizeQuat(ref.quat) : meanQuat(win.map((w) => w.quat), win[0].quat);
   const a = win.map((w) => quatAngleDeg(w.quat, base));
   const rotLimit = Math.max(o.outlierK * MAD_TO_SIGMA * median(a), o.minOutlierDeg);
   const inlier = win.map((_, i) => d[i] <= posLimit && a[i] <= rotLimit);
@@ -269,8 +285,65 @@ export function stepToward(from: PoseT, to: PoseT, maxM: number, maxDeg: number)
   return { pos, quat };
 }
 
+/**
+ * 作り直しの候補が二峰か（再レビュー S5）: 2-means で 2 つの群に分け、両方に 2 件以上あり、群の中心が minSepM（位置）/ minSepDeg（回転）
+ * 以上離れ、かつその離れが群の中のばらつき（RMS）の 2 倍を超える（ノイズで偶然分かれただけの 1 つの塊は二峰にしない）なら true。
+ * 例: 目標から 11cm と 19cm の観測が交互に出る（鏡像解などの 2 解が入れ替わる）列
+ */
+export function isBimodal(cand: readonly { pos: readonly number[]; quat: readonly number[] }[], minSepM: number, minSepDeg: number): boolean {
+  if (cand.length < 4) return false;
+  const split = (dist: (i: number, j: number) => number) => {
+    // 最も離れた 2 件を種にして、近い方へ割り当てる（候補は 5 件程度なので 1 回で十分）
+    let a = 0;
+    let b = 1;
+    let best = -1;
+    for (let i = 0; i < cand.length; i++) {
+      for (let j = i + 1; j < cand.length; j++) {
+        const dd = dist(i, j);
+        if (dd > best) {
+          best = dd;
+          a = i;
+          b = j;
+        }
+      }
+    }
+    const ga: number[] = [];
+    const gb: number[] = [];
+    for (let i = 0; i < cand.length; i++) (dist(i, a) <= dist(i, b) ? ga : gb).push(i);
+    return { ga, gb };
+  };
+  // 位置
+  {
+    const { ga, gb } = split((i, j) => distV3(cand[i].pos, cand[j].pos));
+    if (ga.length >= 2 && gb.length >= 2) {
+      const mean = (g: number[]) => [0, 1, 2].map((k) => g.reduce((acc, i) => acc + cand[i].pos[k], 0) / g.length);
+      const ca = mean(ga);
+      const cb = mean(gb);
+      const sep = distV3(ca, cb);
+      const within = Math.sqrt([...ga.map((i) => distV3(cand[i].pos, ca) ** 2), ...gb.map((i) => distV3(cand[i].pos, cb) ** 2)].reduce((x, y) => x + y, 0) / cand.length);
+      if (sep >= minSepM && sep > 2 * within) return true;
+    }
+  }
+  // 回転
+  {
+    const { ga, gb } = split((i, j) => quatAngleDeg(cand[i].quat, cand[j].quat));
+    if (ga.length >= 2 && gb.length >= 2) {
+      const qa = meanQuat(ga.map((i) => cand[i].quat), cand[ga[0]].quat);
+      const qb = meanQuat(gb.map((i) => cand[i].quat), cand[gb[0]].quat);
+      const sep = quatAngleDeg(qa, qb);
+      const within = Math.sqrt([...ga.map((i) => quatAngleDeg(cand[i].quat, qa) ** 2), ...gb.map((i) => quatAngleDeg(cand[i].quat, qb) ** 2)].reduce((x, y) => x + y, 0) / cand.length);
+      if (sep >= minSepDeg && sep > 2 * within) return true;
+    }
+  }
+  return false;
+}
+
 export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): AnchorFilter {
-  const o: AnchorFilterOptions = { ...DEFAULT_ANCHOR_FILTER, ...options };
+  const merged: AnchorFilterOptions = { ...DEFAULT_ANCHOR_FILTER, ...options };
+  // 窓が MIN_WINDOW 件未満だと目標を更新しないので、上限もそれ以上にする（?avgMaxN=1 / 2 で目標が固まらないように。再レビュー S3）
+  const o: AnchorFilterOptions = { ...merged, maxN: Math.max(MIN_WINDOW, Math.round(merged.maxN)) };
+  /** 窓が 3 件未満になってからの観測（目標を持ったまま。固着の保険の判定。再レビュー S2） */
+  let lowObs: AnchorObservation[] = [];
   let win: AnchorObservation[] = [];
   /** 推定から大きく離れた観測の連続（持続的なずれの判定） */
   let farRun: AnchorObservation[] = [];
@@ -289,6 +362,9 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     reseeds: 0,
     outliers: 0,
     ignored: 0,
+    fast: 0,
+    fallbackReseeds: 0,
+    bimodalRejected: 0,
     directEntries: 0,
     catchingUp: false,
     heldOut: 0,
@@ -331,6 +407,11 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     }
     // ---- avg: LIMITED 中の観測 ----
     if (!obs.xrNormal) {
+      if (obs.fastMotion && !target) {
+        // 速い首振り（または角速度が未測定）の観測では再ロックしない。直接モード中で目標があるなら使う（LIMITED 中は観測だけが頼り）
+        stats.fast++;
+        return "fast";
+      }
       if (!direct && (obs.limitedMs ?? 0) < o.limitedDirectMs) {
         // 一瞬の LIMITED では窓もコートも動かさない（追補 A5）
         stats.ignored++;
@@ -351,21 +432,20 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     }
     // ---- avg: NORMAL の観測 ----
     if (obs.fastMotion) {
-      // 頭を速く回している間の観測は使わない（レビュー R7）
-      stats.ignored++;
-      return "ignored";
+      // 頭を速く回している間（と角速度が未測定の間）の観測は窓にも再ロックにも使わない（レビュー R7・再レビュー S4）
+      stats.fast++;
+      return "fast";
     }
     stats.mode = "avg";
     residualOf(obs, target);
     // 古い観測を落とす（時間）
     win = win.filter((w) => obs.tMs - w.tMs <= o.windowMs);
-    if (win.length === 0 && pendingReason === null && target) pendingReason = direct ? "direct" : "gap";
-    let event: AnchorFilterEvent = "update";
     if (!target) {
       // 目標が無い（初回・invalidate 後の再ロック）: 1 件目で目標を作る
       direct = false;
       win = [obs];
       farRun = [];
+      lowObs = [];
       pendingReason = null;
       target = clonePose(obs);
       stats.n = 1;
@@ -374,13 +454,18 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
       lastObsMs = obs.tMs;
       return "init";
     }
+    // 空白の判定は窓の件数ではなく時間で行う。窓の件数で判定すると、再取得の観測が遠くて窓に入らない（heldOut）たびに
+    // 次の観測がまた「再取得」になって作り直しの候補が毎回捨てられ、目標が永遠に固着した（再レビュー S1）
+    if (pendingReason === null && (direct || obs.tMs - lastObsMs > o.windowMs)) pendingReason = direct ? "direct" : "gap";
+    let event: AnchorFilterEvent = "update";
     if (pendingReason !== null) {
-      // 空白の後の再取得: 目標は保持したまま新しい窓を始める。保持していた目標との差を記録する
+      // 空白の後の再取得（空白 1 回につき最初の 1 回だけ記録）: 目標は保持したまま新しい窓を始める
       lastReacquire = { tMs: obs.tMs, gapMs: obs.tMs - lastObsMs, residualMm: stats.residualMm, residualDeg: stats.residualDeg, reason: pendingReason };
       pendingReason = null;
       direct = false;
       win = [];
       farRun = [];
+      lowObs = [];
       event = "reacquire";
     }
     const far = distV3(obs.pos, target.pos) >= o.reseedPosM || quatAngleDeg(obs.quat, target.quat) >= o.reseedDeg;
@@ -390,21 +475,25 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
     const runMs = farRun.length > 0 ? farRun[farRun.length - 1].tMs - farRun[0].tMs : 0;
     let reseeded = false;
     if (far && (farRun.length >= o.reseedN || (farRun.length >= o.reseedMinN && runMs >= o.reseedMs))) {
-      // 候補どうしがまとまっているときだけ作り直す（レビュー R5）
+      // 候補どうしがまとまっていて（レビュー R5）、二峰でない（再レビュー S5）ときだけ作り直す
       const cand = farRun;
       const cPos: Vec3T = [0, 1, 2].map((k) => cand.reduce((acc, w) => acc + w.pos[k], 0) / cand.length) as Vec3T;
       const cQuat = meanQuat(cand.map((w) => w.quat), cand[0].quat);
       const rmsPos = Math.sqrt(cand.reduce((acc, w) => acc + distV3(w.pos, cPos) ** 2, 0) / cand.length);
       const rmsDeg = Math.sqrt(cand.reduce((acc, w) => acc + quatAngleDeg(w.quat, cQuat) ** 2, 0) / cand.length);
       const away = distV3(cPos, target.pos) >= o.reseedPosM || quatAngleDeg(cQuat, target.quat) >= o.reseedDeg;
-      if (away && rmsPos < o.reseedPosM / 2 && rmsDeg < o.reseedDeg / 2) {
+      if (!(away && rmsPos < o.reseedPosM / 2 && rmsDeg < o.reseedDeg / 2)) {
+        stats.reseedRejected++;
+      } else if (isBimodal(cand, o.reseedPosM / 2, o.reseedDeg / 2)) {
+        stats.reseedRejected++;
+        stats.bimodalRejected++;
+      } else {
         win = [...cand];
         farRun = [];
+        lowObs = [];
         stats.reseeds++;
         event = "reseed";
         reseeded = true;
-      } else {
-        stats.reseedRejected++;
       }
     }
     if (!reseeded) {
@@ -414,17 +503,34 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
       } else {
         win.push(obs);
       }
+      if (win.length < MIN_WINDOW) {
+        // 固着の保険（再レビュー S2）: 窓が 3 件未満のまま（観測が遠くて入らない・まとまらない）windowMs 続いたら、
+        // まとまりの条件なしでその間の観測の頑健な平均で作り直す
+        lowObs.push(obs);
+        if (lowObs.length >= MIN_WINDOW && obs.tMs - lowObs[0].tMs >= o.windowMs) {
+          win = lowObs.slice(-o.maxN);
+          lowObs = [];
+          farRun = [];
+          stats.reseeds++;
+          stats.fallbackReseeds++;
+          event = "reseed";
+          reseeded = true;
+        }
+      } else {
+        lowObs = [];
+      }
     }
     if (win.length > o.maxN) win = win.slice(win.length - o.maxN);
     stats.n = win.length;
     if (win.length >= MIN_WINDOW) {
-      const r = robustMean(win, event === "reseed" ? null : target.quat, o);
-      if (event !== "reseed" && win[win.length - 1] === obs && !r.inlier[win.length - 1]) stats.outliers++;
+      const r = robustMean(win, reseeded ? null : target, o);
+      if (!reseeded && win[win.length - 1] === obs && !r.inlier[win.length - 1]) stats.outliers++;
       target = { pos: r.pos, quat: r.quat };
       stats.spreadMm = r.spreadMm;
       stats.spreadDeg = r.spreadDeg;
     }
     // 窓が 3 件未満の間は目標を書き換えない（保持していた目標のまま。レビュー R1）
+    // 遠くて窓に入れなかった観測でも lastObsMs は進める（次の観測を「空白の後」と誤判定しない。再レビュー S1）
     lastObsMs = obs.tMs;
     return event;
   }
@@ -444,7 +550,9 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
 
   function clearWindow() {
     clearWindowState();
-    if (target) pendingReason = "cleared";
+    lowObs = [];
+    // 配置の変更は明示的に 1 回だけ「再取得」の理由を立てる（次の NORMAL の観測で記録）
+    if (target) pendingReason = "layout";
     // 次の NORMAL の観測で新しい窓を始める（目標と表示は残す。表示の移行は step の制限つき）
     direct = false;
   }
@@ -452,6 +560,7 @@ export function createAnchorFilter(options: Partial<AnchorFilterOptions> = {}): 
   function reset() {
     clearWindowState();
     pendingReason = null;
+    lowObs = [];
     target = null;
     display = null;
     direct = false;

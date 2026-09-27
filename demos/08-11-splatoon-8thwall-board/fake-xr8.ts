@@ -22,7 +22,8 @@
 // 08-11: 原点のリセットを模す。rotateDevice() と、開始後の 2 回目以降の updateCameraProjectionMatrix（映像サイズ変更・resize）で、
 // 以後の姿勢の world に原点のオフセット（ORIGIN_SHIFT_M の平行移動 + ORIGIN_SHIFT_YAW_DEG のヨー）を足す。ただし直後の
 // STALE_AFTER_RESET フレーム（repeatFrame でないもの）は古い原点の reality を返す（古い原点で計算済みの reality が届く最悪ケース。
-// xr-source.ts がそれを捨てて、再ロックが新しい原点で行われるかを確かめる。レビュー R3）。originResets に回数
+// xr-source.ts がそれを捨てて、再ロックが新しい原点で行われるかを確かめる。レビュー R3）。originResets に回数。
+// drift(dx, dy, dz) は invalidate を伴わない world のずれ（8th Wall のドリフト・再推定の段差）を足す（再レビュー S1 の確認用）
 
 type Module = {
   name?: string;
@@ -90,6 +91,8 @@ export type FakeXrState = {
   resumeVideo(): Promise<boolean>;
   /** 端末の向きの変更を通知する（onDeviceOrientationChange） */
   rotateDevice(): boolean;
+  /** 以後の姿勢の world を (dx, dy, dz) [m] ずらす。callback も invalidate も起こさない（ドリフトの模擬） */
+  drift(dx: number, dy: number, dz: number): boolean;
 };
 
 const NEAR = 0.05;
@@ -224,6 +227,10 @@ export function installFakeXr8(opts: FakeXrOptions): FakeXrState {
       if (!video) return false;
       await video.play();
       return !video.paused;
+    },
+    drift(dx: number, dy: number, dz: number) {
+      fieldToWorld = mul([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1], fieldToWorld);
+      return true;
     },
     rotateDevice() {
       if (!running || !video) return false;
