@@ -380,6 +380,27 @@ try {
     check("歩いて戻ってマーカーを見ると HUD に reacq=（保持していた目標との差）が出て、差が小さい（< 3cm・空白 > 3 秒）", Boolean(reacq) && Number(reacq[1]) < 30 && Number(reacq[3]) > 3, reacq?.[0] ?? h.avgLine);
   }
 
+  // ---- 2c. 空白の間に 8th Wall の world が 0.2m ずれてから、マーカーに戻る（再レビュー S1。以前は目標が固着した） ----
+  {
+    await pA.eval("window.__fakeMarkers.hidden.add(0); true");
+    await sleep(3500); // 窓（3 秒）が空になるまで見ない
+    const h0 = await readHud(pA);
+    const reseed0 = Number(h0.avgLine.match(/reseed=(\d+)/)?.[1] ?? NaN);
+    await fakeXr(pA, "return x.drift(0.2, 0, 0);");
+    await sleep(300);
+    const hDrift = await readHud(pA);
+    await pA.eval("window.__fakeMarkers.hidden.delete(0); true");
+    const h = await waitHud(pA, (hh) => dist(hh.self, START_POS) < 0.05 && Number(hh.avgLine.match(/reseed=(\d+)/)?.[1] ?? NaN) > reseed0, 8000);
+    await sleep(1500);
+    const h2 = await readHud(pA);
+    const reacq = h2.avgLine.match(/reacq=(\d+)mm/);
+    const reseed2 = Number(h2.avgLine.match(/reseed=(\d+)/)?.[1] ?? NaN);
+    console.log(`ドリフト 0.2m の後: 見えない間 self=${JSON.stringify(hDrift.self)} → マーカーに戻って ${h2.avgLine} self=${JSON.stringify(h2.self)}`);
+    check("空白の間に 8th Wall の world が 0.2m ずれても、マーカーに戻ると reacquire（差 約 200mm）の後に作り直して self= が原点正面（±5cm）に戻る（固着しない）", dist(hDrift.self, START_POS) > 0.15 && Boolean(reacq) && Math.abs(Number(reacq[1]) - 200) < 30 && reseed2 === reseed0 + 1 && dist(h.self, START_POS) < 0.05 && dist(h2.self, START_POS) < 0.05, `見えない間 ${JSON.stringify(hDrift.self)} / ${reacq?.[0]} reseed ${reseed0} → ${reseed2} / 戻った後 ${JSON.stringify(h2.self)}`);
+    check("HUD の avg= に fast=（速い首振り・角速度未測定で使わなかった観測）が ign= と別に出る（S6）", /\bfast=\d+/.test(h2.avgLine) && /\bign=\d+/.test(h2.avgLine), h2.avgLine);
+    await sleep(1000);
+  }
+
   // ---- 3. LIMITED: コートを出し続け、発射も止めない ----
   {
     // 3a. 1 秒未満の LIMITED: 窓を捨てない（ign= が増え、direct= は増えない）
