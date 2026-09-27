@@ -228,6 +228,10 @@ export default defineConfig({
         "demo-08-10-splatoon-8thwall": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/index.html", import.meta.url)),
         "demo-08-10-splatoon-8thwall-overview": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/overview.html", import.meta.url)),
         "demo-08-10-splatoon-8thwall-markers": fileURLToPath(new URL("./demos/08-10-splatoon-8thwall/markers.html", import.meta.url)),
+        // 08-11: 8th Wall SLAM + OpenCV board + 窓平均（止まっている間のぶれを抑える）
+        "demo-08-11-splatoon-8thwall-board": fileURLToPath(new URL("./demos/08-11-splatoon-8thwall-board/index.html", import.meta.url)),
+        "demo-08-11-splatoon-8thwall-board-overview": fileURLToPath(new URL("./demos/08-11-splatoon-8thwall-board/overview.html", import.meta.url)),
+        "demo-08-11-splatoon-8thwall-board-markers": fileURLToPath(new URL("./demos/08-11-splatoon-8thwall-board/markers.html", import.meta.url)),
       },
     },
   },
