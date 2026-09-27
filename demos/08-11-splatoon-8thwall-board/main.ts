@@ -57,7 +57,7 @@ import type { XrSource } from "./xr-source";
 import { installFakeXr8 } from "./fake-xr8";
 import { createAnchorFilter } from "./anchor-filter";
 import type { AnchorFilterEvent } from "./anchor-filter";
-import { createAngularRateMeter } from "./xr-motion";
+import { createAngularRateMeter, isFastMotion } from "./xr-motion";
 
 // 08-11: MR スプラトゥーン（8th Wall SLAM + OpenCV board + 窓平均）。08-10 の丸ごとコピーで、変えたのは「コートの置き方」:
 //   - マーカー推定を 08-4 と同じ OpenCV.js の board + solvePnP（src/shared/marker-anchor-opencv.ts）にした。
@@ -1805,8 +1805,7 @@ function updateXrMotion(now: number) {
 }
 /** 今の観測を「速い首振り」として使わないか（角速度が上限超え、または XR があって未測定）。XR 無しのフェイクカメラは角速度を測れないので false */
 function fastMotionNow(): boolean {
-  if (FAKE_CAM && !FAKE_XR) return false;
-  return camDegPerSec === null || camDegPerSec > MAX_OBS_DEG_PER_SEC;
+  return isFastMotion(camDegPerSec, MAX_OBS_DEG_PER_SEC, !(FAKE_CAM && !FAKE_XR));
 }
 function rotText(): string {
   return camDegPerSec === null ? "-" : camDegPerSec.toFixed(0);

@@ -22,6 +22,14 @@
 //      (q) ?avgMaxN= の下限 3（1 / 2 を渡しても 3 になり目標が更新される。S3）
 //      (r) 角速度（xr-motion.ts）: 世代の最初の姿勢は未測定（null）、2 つ目で測れる、同じ時刻は変えない、世代が変わると未測定に戻る（S4）
 //      (s) 2 解が交互に出る列（目標から 11cm と 19cm）: 二峰として作り直さず、目標が観測ごとに往復しない（1 観測あたり 1cm 未満。S5）
+//      (t) 回転ノイズあり（位置 1〜3cm・回転 1.5°）で空白の後の 15cm ずれ: 作り直しまで中央 ≤ 7 件・最悪 ≤ 15 件（最終レビュー T1）
+//      (u) 保険は遠い観測が 3 件以上かつ過半数のときだけ（低頻度の近い観測だけでは発動しない）。遠い観測が二峰なら中間へ（T2）
+//      (v) 別解が混ざる窓: 30%@4cm で最悪 ≤ 5mm、45%@6cm で往復しない（T3）
+//      (w) 保険の観測は時間（windowMs）で間引く（2.9 秒おきの遠い観測では発動しない。T4）
+//      (x) 配置変更の直後の長い LIMITED で再取得の理由が layout のまま・直接モード中の clearWindow で directEntries を二重に数えない（T5）
+//      (y) 通常の使い方（σ1〜3cm・0.4〜10Hz・見る / 見ないの繰り返し・たまに LIMITED、180 秒 × 20 本）で保険は σ≤2cm で 0 回、
+//          σ3cm で発動したときは必ず目標の誤差が減る（T6）
+//      (z) isFastMotion（main.ts の配線）: XR 無しは false、未測定（null）は true、上限超えは true（T6）
 //   2. xr-source.ts のコピー（08-10 の scripts/test-08-10-xr.mjs を元に、XR8 の pipeline callback 境界をモック）:
 //      LIMITED で invalidate しない・有効なら姿勢を更新 / 無効なら保持・生の trackingReason が残る・LIMITED の回数と長さ・
 //      姿勢の飛び（LIMITED 復帰直後を区別）・向き変更 / 投影更新 / failed で invalidate（原因別の回数）・invalidate 後は次の有効な reality まで
@@ -33,7 +41,7 @@ import assert from "node:assert/strict";
 import { createServer } from "vite";
 import * as THREE from "three";
 import { MIN_WINDOW, createAnchorFilter, distV3, quatAngleDeg } from "../demos/08-11-splatoon-8thwall-board/anchor-filter.ts";
-import { createAngularRateMeter } from "../demos/08-11-splatoon-8thwall-board/xr-motion.ts";
+import { createAngularRateMeter, isFastMotion } from "../demos/08-11-splatoon-8thwall-board/xr-motion.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -531,6 +539,263 @@ function runStatic(mode, seed, { posNoise = 0.01, yawNoiseDeg = 0, hz = 10, flip
     check(`(s) ${pre}: 11cm / 19cm が交互の列は二峰として作り直さず（bimodalRejected）、目標が観測ごとに往復しない（後半 40 件の 1 観測あたりの変化 < 1cm）`, normalReseeds === 0 && f.stats.bimodalRejected > 0 && maxStepLate < 0.01, `二峰で見送り ${f.stats.bimodalRejected} 回 通常の作り直し ${normalReseeds} 保険 ${f.stats.fallbackReseeds} 後半の最大の変化 ${mm(maxStepLate)} 目標 x+${(f.target.pos[0] - TRUE_POS[0]).toFixed(3)}`);
   }
 }
+
+// 小さな乱数の回転（各軸 sd [deg] の正規分布。yawDeg を足す）
+function smallRot(g, sd, yawDeg = 0) {
+  const x = (g() * sd * Math.PI) / 360;
+  const y = ((g() * sd + yawDeg) * Math.PI) / 360;
+  const z = (g() * sd * Math.PI) / 360;
+  const w = Math.sqrt(Math.max(0, 1 - x * x - y * y - z * z));
+  return [x, y, z, w];
+}
+const gaussOf = (r) => () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
+
+// ---- (t) 回転ノイズありでの作り直し（最終レビュー T1） ----
+{
+  for (const sig of [0.01, 0.02, 0.03]) {
+    const at = [];
+    let bi = 0;
+    for (let s = 1; s <= 50; s++) {
+      const r = rng(s * 17);
+      const g = gaussOf(r);
+      const f = createAnchorFilter();
+      let t = 0;
+      for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS, [0, 0, 0, 1]), true);
+      t += 5000;
+      const T = [TRUE_POS[0] + 0.15, TRUE_POS[1], TRUE_POS[2]];
+      let a = -1;
+      for (let i = 1; i <= 60; i++, t += 100) if (f.add(obsAt(t, T.map((v) => v + sig * g()), smallRot(g, 1.5)), true) === "reseed" && a < 0) a = i;
+      at.push(a < 0 ? 999 : a);
+      bi += f.stats.bimodalRejected;
+    }
+    const srt = sorted(at);
+    check(`(t) 各軸 σ=${sig * 100}cm・回転 1.5° のノイズで空白の後の 15cm ずれ: 作り直しまで中央 ≤ 7 件・最悪 ≤ 15 件（50 本）`, srt[25] <= 7 && srt[49] <= 15, `中央 ${srt[25]} 最悪 ${srt[49]} 二峰で見送り 計 ${bi}`);
+  }
+}
+
+// ---- (u) 保険の条件（最終レビュー T2） ----
+{
+  // (a) 空白の後に 11cm / 19cm が交互（二峰）→ 保険は片方の峰ではなく中間（約 15cm）へ
+  const f = createAnchorFilter();
+  let t = 0;
+  for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  for (let i = 0; i < 40; i++, t += 100) f.add(obsAt(t, [TRUE_POS[0] + (i % 2 ? 0.19 : 0.11), TRUE_POS[1], TRUE_POS[2]]), true);
+  const x = f.target.pos[0] - TRUE_POS[0];
+  check("(u) 空白の後に 11cm / 19cm が交互: 保険は二峰を見て片方の峰に寄せず中間（13〜17cm）へ", f.stats.fallbackReseeds === 1 && x > 0.13 && x < 0.17, `fallback=${f.stats.fallbackReseeds} x=${x.toFixed(3)}`);
+  // (b) 低頻度（0.4〜0.8Hz）の近い観測だけ: 窓は 3 件にならないが保険は発動しない
+  let fb = 0;
+  let maxStep = 0;
+  for (const hz of [0.4, 0.6, 0.8]) {
+    for (let s = 1; s <= 20; s++) {
+      const r = rng(s * 31 + Math.round(hz * 10));
+      const g = gaussOf(r);
+      const h = createAnchorFilter();
+      let tt = 0;
+      for (let i = 0; i < 20; i++, tt += 100) h.add(obsAt(tt, TRUE_POS), true);
+      let prev = h.target.pos;
+      while (tt < 120000) {
+        tt += (1000 / hz) * (0.8 + 0.4 * r());
+        h.add(obsAt(tt, TRUE_POS.map((v) => v + 0.01 * g())), true);
+        maxStep = Math.max(maxStep, distV3(prev, h.target.pos));
+        prev = h.target.pos;
+      }
+      fb += h.stats.fallbackReseeds;
+    }
+  }
+  check("(u) 低頻度（0.4〜0.8Hz）の近い観測（σ1cm）だけでは 120 秒 × 60 本で保険が一度も発動しない", fb === 0, `fallback=${fb} 目標の 1 観測あたりの最大の変化 ${mm(maxStep)}`);
+}
+
+// ---- (v) 別解が混ざる窓（最終レビュー T3。Fable の sim-mix と同じ作り） ----
+{
+  for (const [frac, posOff, limitMm, label] of [[0.3, 0.04, 5, "30%@4cm"], [0.3, 0.15, 5, "30%@15cm"]]) {
+    for (const firstWrong of [false, true]) {
+      const errs = [];
+      for (let seed = 1; seed <= 20; seed++) {
+        const r = rng(seed * 101);
+        const g = gaussOf(r);
+        const f = createAnchorFilter();
+        let t = 0;
+        for (let i = 0; i < 300; i++, t += 100) {
+          const wrong = i === 0 ? firstWrong : r() < frac;
+          // Fable の sim-mix と同じ乱数の使い方（別解の回転はずれ 0、正解の回転に 0.2° のノイズ）
+          f.add(obsAt(t, [TRUE_POS[0] + (wrong ? posOff : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()], wrong ? [0, 0, 0, 1] : yawQuat(0.2 * g())), true);
+        }
+        errs.push(distV3(f.target.pos, TRUE_POS));
+      }
+      check(`(v) 別解 ${label} が混ざる（1 件目が${firstWrong ? "別解" : "正解"}）: 30 秒後の目標の誤差が最悪 ≤ ${limitMm}mm（種 20 通り）`, Math.max(...errs) <= limitMm / 1000, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+    }
+  }
+  // 乱数の使い方を変えると、終わり際に別解が窓の 47% になる種があり、そのときは 2 つの解の間へ少し寄る
+  {
+    const errs = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      const r = rng(seed * 101);
+      const g = gaussOf(r);
+      const f = createAnchorFilter();
+      let t = 0;
+      for (let i = 0; i < 300; i++, t += 100) {
+        const wrong = i > 0 && r() < 0.3;
+        f.add(obsAt(t, [TRUE_POS[0] + (wrong ? 0.04 : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()], yawQuat(0.2 * g())), true);
+      }
+      errs.push(distV3(f.target.pos, TRUE_POS));
+    }
+    // 別解が窓の半分近くになる瞬間があるので 5mm ではなく 10mm で見る（目標の周りの閾値を中央値の側と同じにすると 2 つの解の間に落ち着いて 20mm を超える）
+    check("(v) 別解 30%@4cm（別の乱数の使い方。終わり際に別解が窓の 47% になる種を含む）: 30 秒後の誤差が最悪 ≤ 10mm", Math.max(...errs) <= 0.01, `中央 ${mm(medianOf(errs))} 最悪 ${mm(Math.max(...errs))}`);
+  }
+  // 45%@6cm: 往復しない（1cm 超の変化の後、1 秒以内に 1cm 超で戻らない）
+  let backForth = 0;
+  let changes = 0;
+  for (let seed = 1; seed <= 20; seed++) {
+    const r = rng(seed * 101);
+    const g = gaussOf(r);
+    const f = createAnchorFilter();
+    let t = 0;
+    let prev = null;
+    const big = [];
+    for (let i = 0; i < 300; i++, t += 100) {
+      const w = i > 0 && r() < 0.45;
+      f.add(obsAt(t, [TRUE_POS[0] + (w ? 0.06 : 0) + 0.005 * g(), TRUE_POS[1] + 0.005 * g(), TRUE_POS[2] + 0.005 * g()]), true);
+      if (i >= 100 && prev && distV3(prev, f.target.pos) > 0.01) big.push({ i, dx: f.target.pos[0] - prev[0] });
+      prev = f.target.pos;
+    }
+    changes += big.length;
+    for (let k = 1; k < big.length; k++) if (big[k].i - big[k - 1].i <= 10 && Math.sign(big[k].dx) !== Math.sign(big[k - 1].dx)) backForth++;
+  }
+  check("(v) 別解 45%@6cm が混ざる: 往復しない（1cm 超の変化の後 1 秒以内に逆向きへ 1cm 超で戻ることが無い。種 20 通り × 20 秒）", backForth === 0, `1cm 超の変化 ${changes} 回（20 本 × 200 観測）・1 秒以内の往復 ${backForth} 回`);
+}
+
+// ---- (w) 保険の観測の数え方（最終レビュー T4・T2） ----
+{
+  // 目標の反対側に 15cm ずつ（まとまらない = 通常の作り直しにならない）遠い観測が 2.9 秒おき: windowMs より前は数えないので発動しない
+  const opp = (i) => [TRUE_POS[0] + (i % 2 ? 0.15 : -0.15), TRUE_POS[1], TRUE_POS[2]];
+  const f = createAnchorFilter();
+  let t = 0;
+  for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  for (let i = 0; i < 10; i++, t += 2900) f.add(obsAt(t, opp(i)), true);
+  check("(w) 2.9 秒おきの遠い観測（まとまらない）では、windowMs より前の観測を数えないので保険が発動しない", f.stats.fallbackReseeds === 0 && f.stats.reseeds === 0, `fallback=${f.stats.fallbackReseeds} reseeds=${f.stats.reseeds}`);
+  // 3 秒は「窓が 3 件未満になった時」から数える: 空白の後に遠い観測（まとまらない）が 1 秒 → 空白 → 再取得の後に同じ遠い観測が続いても、
+  // 保険は 2 回目の再取得から 3 秒たつまで発動しない（前の 3 件未満の状態の開始時刻を引きずらない）
+  const g = createAnchorFilter();
+  t = 0;
+  for (let i = 0; i < 30; i++, t += 100) g.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  for (let i = 0; i < 10; i++, t += 100) g.add(obsAt(t, opp(i)), true);
+  t += 5000;
+  const t2 = t;
+  let at = -1;
+  for (let i = 0; i < 40 && at < 0; i++, t += 100) {
+    g.add(obsAt(t, opp(i)), true);
+    if (g.stats.fallbackReseeds > 0) at = t - t2;
+  }
+  check("(w) 保険の 3 秒は、いまの 3 件未満の状態が始まった時（再取得）から数える（前の状態の開始時刻を引きずらない）", at >= 3000, `2 回目の再取得から ${at}ms で発動`);
+  // 窓が 3 件に戻ったら数え直す: 空白の後に遠い 2 件 → 近い 3 件（窓が 3 件）→ 10Hz で近い観測 → 観測の間隔が 1.2 秒に落ちて遠い観測だけ
+  const h = createAnchorFilter();
+  t = 0;
+  for (let i = 0; i < 30; i++, t += 100) h.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  h.add(obsAt(t, opp(0)), true);
+  t += 100;
+  h.add(obsAt(t, opp(1)), true);
+  t += 100;
+  for (let i = 0; i < 10; i++, t += 100) h.add(obsAt(t, TRUE_POS), true);
+  let lowStart = -1;
+  let fbAt = -1;
+  for (let i = 0; i < 12 && fbAt < 0; i++, t += 1200) {
+    h.add(obsAt(t, opp(i)), true);
+    if (lowStart < 0 && h.stats.n < MIN_WINDOW) lowStart = t;
+    if (h.stats.fallbackReseeds > 0) fbAt = t;
+  }
+  check("(w) 窓が 3 件に戻ったら保険の数え方をやり直す（3 件未満の状態が 3 秒続くまで発動しない）", lowStart >= 0 && (fbAt < 0 || fbAt - lowStart >= 3000), `3 件未満になった ${lowStart}ms・保険 ${fbAt}ms（差 ${fbAt < 0 ? "-" : fbAt - lowStart}ms）`);
+}
+
+// ---- (w2) 保険の推定: 遠い観測が二峰なら多数派でも全体の平均（最終レビュー T2） ----
+{
+  const f = createAnchorFilter();
+  let t = 0;
+  for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+  t += 5000;
+  let atFallback = null;
+  for (let i = 0; i < 45 && !atFallback; i++, t += 100) {
+    // 11, 11, 19, 11, 19 の繰り返し（多数派の群がちょうど 6 割。連続 5 件にいつも 19cm が 2 件あるので通常の作り直しは二峰で見送られる）
+    f.add(obsAt(t, [TRUE_POS[0] + ([0.11, 0.11, 0.19, 0.11, 0.19][i % 5]), TRUE_POS[1], TRUE_POS[2]]), true);
+    if (f.stats.fallbackReseeds > 0) atFallback = f.target.pos[0] - TRUE_POS[0];
+  }
+  check("(w2) 保険の時点の目標は、遠い観測が二峰なら（多数派が 6 割でも）片方の峰（11cm）ではなく全体の平均（約 14.2cm）", atFallback !== null && Math.abs(atFallback - (3 * 0.11 + 2 * 0.19) / 5) < 0.005, `保険の時点の x=${atFallback?.toFixed(4)}`);
+}
+
+// ---- (x) 再取得の理由と直接モードの回数（最終レビュー T5） ----
+{
+  const f = createAnchorFilter();
+  let t = 0;
+  for (let i = 0; i < 30; i++, t += 100) f.add(obsAt(t, TRUE_POS), true);
+  f.clearWindow();
+  for (let k = 0; k < 15; k++, t += 100) f.add(obsAt(t, TRUE_POS, TRUE_Q, false, 1000 + k * 100), true);
+  f.add(obsAt(t, TRUE_POS), true);
+  check("(x) 配置変更の直後に長い LIMITED（直接モード）が来ても、再取得の理由は最初の layout のまま", f.lastReacquire?.reason === "layout", JSON.stringify(f.lastReacquire));
+  const g = createAnchorFilter();
+  t = 0;
+  for (let i = 0; i < 30; i++, t += 100) g.add(obsAt(t, TRUE_POS), true);
+  for (let k = 0; k < 5; k++, t += 100) g.add(obsAt(t, TRUE_POS, TRUE_Q, false, 1200 + k * 100), true);
+  g.clearWindow();
+  for (let k = 0; k < 5; k++, t += 100) g.add(obsAt(t, TRUE_POS, TRUE_Q, false, 1700 + k * 100), true);
+  g.add(obsAt(t, TRUE_POS), true);
+  check("(x) 直接モード中に clearWindow しても directEntries を二重に数えない（1 回）・再取得の理由は direct", g.stats.directEntries === 1 && g.lastReacquire?.reason === "direct", `directEntries=${g.stats.directEntries} ${JSON.stringify(g.lastReacquire)}`);
+}
+
+// ---- (y) 通常の使い方で保険が発動しない（最終レビュー T6） ----
+{
+  const run = (sig, hz, seed) => {
+    const r = rng(seed);
+    const g = gaussOf(r);
+    const f = createAnchorFilter();
+    let t = 0;
+    let lookingUntil = 0;
+    let looking = true;
+    let limitedUntil = -1;
+    let limitedStart = 0;
+    let justified = 0;
+    let unjustified = 0;
+    while (t < 180000) {
+      t += (-Math.log(r() || 1e-9) * 1000) / hz;
+      if (t > lookingUntil) {
+        looking = !looking;
+        lookingUntil = t + (looking ? 300 + r() * 4700 : 200 + r() * 5800);
+      }
+      if (!looking) continue;
+      if (t > limitedUntil && r() < 0.03) {
+        limitedStart = t;
+        limitedUntil = t + 200 + r() * 2300;
+      }
+      const lim = t < limitedUntil;
+      const before = f.target;
+      const fb0 = f.stats.fallbackReseeds;
+      f.add({ tMs: t, pos: TRUE_POS.map((v) => v + sig * g()), quat: yawQuat(0.3 * g()), xrNormal: !lim, limitedMs: lim ? t - limitedStart : 0 }, true);
+      if (f.stats.fallbackReseeds > fb0) {
+        if (before && distV3(f.target.pos, TRUE_POS) < distV3(before.pos, TRUE_POS)) justified++;
+        else unjustified++;
+      }
+    }
+    return { justified, unjustified };
+  };
+  for (const sig of [0.01, 0.02, 0.03]) {
+    let j = 0;
+    let u = 0;
+    for (const hz of [0.4, 2, 5, 10]) {
+      for (let s = 1; s <= 20; s++) {
+        const o = run(sig, hz, s * 977 + hz * 10);
+        j += o.justified;
+        u += o.unjustified;
+      }
+    }
+    const ok = sig <= 0.02 ? j + u === 0 : u === 0;
+    check(`(y) 通常の使い方（σ=${sig * 100}cm・0.4〜10Hz・見る / 見ない・たまに LIMITED、180 秒 × 80 本）: 保険は ${sig <= 0.02 ? "一度も発動しない" : "発動したら必ず目標の誤差が減る"}`, ok, `発動 ${j + u} 回（誤差が減った ${j}・減らなかった ${u}）`);
+  }
+}
+
+// ---- (z) isFastMotion（最終レビュー T6） ----
+check("(z) isFastMotion: XR 無しは false・未測定（null）は true・上限超えは true・上限以下は false", isFastMotion(null, 90, false) === false && isFastMotion(500, 90, false) === false && isFastMotion(null, 90, true) === true && isFastMotion(91, 90, true) === true && isFastMotion(90, 90, true) === false && isFastMotion(0, 90, true) === false);
 
 // ================= 2. xr-source.ts（08-11 のコピー） =================
 const vite = await createServer({ server: { middlewareMode: true }, logLevel: "silent" });

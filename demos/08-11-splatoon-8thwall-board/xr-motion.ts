@@ -43,3 +43,14 @@ export function createAngularRateMeter(): AngularRateMeter {
     },
   };
 }
+
+/**
+ * 観測を「速い首振り」として窓にも再ロックにも使わないか（main.ts の配線を純粋な関数にしたもの。最終レビュー T6）。
+ * - XR 無し（?fakecam=1 だけ）は角速度を測れないので false
+ * - 角速度が未測定（null。invalidate 後の最初の姿勢）なら true（再レビュー S4）
+ * - 角速度が上限を超えたら true（レビュー R7）
+ */
+export function isFastMotion(degPerSec: number | null, maxDegPerSec: number, hasXr: boolean): boolean {
+  if (!hasXr) return false;
+  return degPerSec === null || degPerSec > maxDegPerSec;
+}
