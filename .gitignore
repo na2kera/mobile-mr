@@ -33,3 +33,6 @@ public/vendor/opencv/
 
 # AlvaAR（npm run fetch:alva で取得。WASM 同梱の 4MB 超・GPLv3 なので管理しない。08-7 でだけ使う）
 public/vendor/alva/
+
+# ex9-1-keshin の化身モデル（npm run fetch:keshin で手元の Blender 作業フォルダからコピー。公開リポジトリに入れない）
+local-assets/

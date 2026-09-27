@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>ex9-1. 化身 — Mobile MR</title>
+    <style>
+      /* 見た目は 04〜09 と同じ（デモごとに index.html を持つ規約のため重複している） */
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        /* 全画面化できない環境（iOS 17.2 未満等）向けフォールバック: 100dvh で全画面風にする */
+        height: 100dvh;
+        background: #000;
+        color: #e8eaed;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #app,
+      #app canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* 開始オーバーレイ（センサー許可・全画面化はユーザージェスチャー起点が必須） */
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 10;
+        overflow-y: auto;
+      }
+      #start-overlay h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #start-overlay p {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #name-form {
+        display: grid;
+        gap: 8px;
+        width: min(100%, 20rem);
+        text-align: left;
+      }
+      #name-form label {
+        color: #e8eaed;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      #player-name {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 16px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      #player-name:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.2);
+      }
+      #player-name[aria-invalid="true"] {
+        border-color: #f28b82;
+      }
+      #name-hint {
+        color: #9aa0a6;
+        font-size: 0.75rem;
+      }
+      #name-error {
+        color: #f28b82;
+      }
+      #name-error[hidden] {
+        display: none;
+      }
+      #start-button {
+        width: 100%;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #start-overlay a {
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      /* 不正な room 名を知らせるエラー表示（04 と同じ） */
+      #room-error {
+        color: #f28b82;
+      }
+      #room-error[hidden] {
+        display: none;
+      }
+      /* 開始後、縦向きのときだけ表示する案内 */
+      #rotate-hint {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        background: rgba(0, 0, 0, 0.85);
+        color: #e8eaed;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        text-align: center;
+        padding: 24px;
+      }
+      body.started #start-overlay {
+        display: none;
+      }
+      @media (orientation: portrait) and (pointer: coarse) {
+        body.started #rotate-hint {
+          display: flex;
+        }
+      }
+      /* 全画面への（再）入場ボタン（02〜08 と同じ役割） */
+      #fs-button {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        z-index: 7;
+        font-size: 0.9rem;
+        font-weight: 600;
+        padding: 10px 24px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
+      #fs-button[hidden] {
+        display: none;
+      }
+      /* デバッグ用 HUD（マーカー・化身・処理の重さ・通信の状態。実機では console が見えないため） */
+      #hud {
+        position: fixed;
+        left: calc(8px + env(safe-area-inset-left));
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 6;
+        font-size: 10px;
+        color: rgba(232, 234, 237, 0.5);
+        pointer-events: none;
+        white-space: pre;
+      }
+      /* 化身ボタン（ex9-1）: 画面の下中央に大きめに。StereoEffect 中も出す（ゴーグルに入れたまま押す想定はしない。一度外して押す）。
+         全画面ボタン（#fs-button）が出ているときに重ならないよう、その上に置く */
+      #keshin-button {
+        display: none;
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(72px + env(safe-area-inset-bottom));
+        z-index: 7;
+        min-width: 11rem;
+        padding: 12px 28px;
+        border-radius: 999px;
+        border: 2px solid #8ab4f8;
+        background: rgba(20, 22, 26, 0.72);
+        color: #e8eaed;
+        font: inherit;
+        text-align: center;
+        line-height: 1.25;
+        -webkit-tap-highlight-color: transparent;
+      }
+      body.started #keshin-button {
+        display: block;
+      }
+      #keshin-button .k-title {
+        display: block;
+        font-size: 1.15rem;
+        font-weight: 700;
+      }
+      #keshin-button .k-state {
+        display: block;
+        font-size: 0.8rem;
+        color: #9aa0a6;
+      }
+      #keshin-button.on {
+        border-color: #fdd663;
+        background: rgba(120, 90, 10, 0.55);
+      }
+      #keshin-button.on .k-state {
+        color: #fdd663;
+      }
+      #keshin-button.pending {
+        border-style: dashed;
+        opacity: 0.8;
+      }
+      #keshin-button:disabled {
+        border-color: #5f6368;
+        color: #9aa0a6;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="start-overlay">
+      <h1>ex9-1. 化身</h1>
+      <p>
+        番外編: 画面下の<strong>「化身」ボタン</strong>で、自分の背後に化身（魔神 ザ・ハンド / 魔神ペガサスアーク / 剣聖ランスロット。
+        参加順に割り当て）を出します。足元から腰の高さへオーラが吹き上がり、上半身がオーラの渦からせり上がって決めポーズを取ります。
+        正面を見ている間は視界の周りにオーラだけが揺らめき、<strong>上を見上げる（40° 以上）と前に傾いた自分の化身</strong>が見えます。
+      </p>
+      <p>
+        <a href="../08-splatoon/markers.html">マーカーを印刷</a>して壁に貼り、まずマーカーを見ます（位置を共有するため。化身は見なくても出せます）。
+        PC の<a href="./overview.html">俯瞰画面</a>を同じ room で開くと、全員の頭と、その背後の化身が見えます
+        （既定 room: demo。分けたいときは ?room=名前）。ボタンはゴーグルから一度外して押します（PC では K キーでも可）。
+      </p>
+      <p id="room-error" hidden></p>
+      <form id="name-form">
+        <label for="player-name">表示名</label>
+        <input
+          id="player-name"
+          name="player-name"
+          type="text"
+          autocomplete="nickname"
+          enterkeyhint="go"
+          placeholder="例：Alice"
+          aria-describedby="name-hint name-error"
+        />
+        <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
+        <p id="name-error" role="alert" hidden></p>
+        <button id="start-button" type="submit">名前を決めて開始</button>
+      </form>
+      <p>
+        調整: 大きさ ?keshinH=3、頭から床まで ?eyeH=1.5、背中からの距離 ?keshinBack=（既定は自動）、
+        主観の前傾 ?selfLean=35・前後 ?selfBack=（既定は自動）・見上げ角 ?lookUpDeg=40・不透明度 ?selfOpacity=0.55、
+        粒子数 ?auraN=400、体の向きの平滑化 ?yawSmoothSec=0.25。
+        マーカーは ?markerId=0&amp;markerMm=150&amp;trackOkMs=500。表示は 06〜09 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC で確認できます（マウスで見回す）
+      </p>
+      <p>モデルは dev サーバーでだけ読み込めます（npm run fetch:keshin）。無いときは代わりの人型で演出を確認できます。</p>
+      <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="rotate-hint">スマホを横向きにしてください</div>
+    <button id="keshin-button" type="button" disabled>
+      <span class="k-title">化身</span>
+      <span class="k-state">接続中…</span>
+    </button>
+    <button id="fs-button" type="button" hidden>タップで全画面表示</button>
+    <div id="hud"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
