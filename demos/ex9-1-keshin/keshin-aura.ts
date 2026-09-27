@@ -5,6 +5,8 @@
 //     （画面空間のポストエフェクトは StereoEffect と相性が悪いので使わない）。視線から 25° 以内は空け、外側ほど濃く、
 //     小さな火の粉が下から上へ立ち上って消える。外周には大きく柔らかい低アルファのもやを少し置く
 import * as THREE from "three";
+import { MASK_HEAD_GLSL } from "./keshin-occlusion";
+import type { MaskBinding } from "./keshin-occlusion";
 
 /** 共通の GLSL: ハッシュと滑らかなノイズ（1 次元） */
 const NOISE_GLSL = /* glsl */ `
@@ -40,10 +42,13 @@ function seededGeometry(n: number, kinds: (i: number) => number): THREE.BufferGe
   return g;
 }
 
-const SPRITE_FRAGMENT = /* glsl */ `
+/** 粒のフラグメント。mask を渡すと、カメラに写った人の画素では描かない（相手の化身の足元・腰のオーラ。段階 2） */
+const spriteFragment = (mask: boolean) => /* glsl */ `
 varying float vAlpha;
 varying vec3 vColor;
+${mask ? `varying vec3 vMaskWorld;\n${MASK_HEAD_GLSL}` : ""}
 void main() {
+  ${mask ? "if (keshinMasked(vMaskWorld)) discard;" : ""}
   vec2 c = gl_PointCoord - 0.5;
   float d = length(c) * 2.0;
   if (d > 1.0) discard;
@@ -82,7 +87,7 @@ export type WorldAuraUniforms = {
 export class WorldAura {
   readonly points: THREE.Points;
   readonly uniforms: WorldAuraUniforms;
-  constructor(n: number, colors: [number, number]) {
+  constructor(n: number, colors: [number, number], mask: MaskBinding | null = null) {
     // 6 割を柱、4 割を渦
     const geometry = seededGeometry(n, (i) => (i % 5 < 3 ? 0 : 1));
     this.uniforms = {
@@ -104,7 +109,7 @@ export class WorldAura {
       uNear: { value: new THREE.Vector2(0, 0) },
     };
     const material = new THREE.ShaderMaterial({
-      uniforms: this.uniforms,
+      uniforms: mask ? { ...this.uniforms, ...mask.shared, ...mask.owner } : this.uniforms,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
@@ -115,6 +120,7 @@ export class WorldAura {
         uniform vec3 uSwirlC, uColA, uColB, uEye;
         uniform vec2 uNear;
         varying float vAlpha;
+        varying vec3 vMaskWorld;
         varying vec3 vColor;
         ${NOISE_GLSL}
         void main() {
@@ -148,6 +154,7 @@ export class WorldAura {
           // ゆっくりした揺らめき（明るさのノイズ）
           float flick = 0.55 + 0.45 * kNoise(uTime * 2.3 + id * 3.1);
           vec4 world = modelMatrix * vec4(p, 1.0);
+          vMaskWorld = world.xyz;
           // 目のすぐ近くの粒は消す（主観で視界を塞がない。他人用は uNear = 0）
           float nearK = uNear.y > 0.0 ? smoothstep(uNear.x, uNear.y, distance(world.xyz, uEye)) : 1.0;
           vAlpha = alpha * flick * uAuraK * (1.0 + 0.8 * uBurstK) * nearK;
@@ -158,7 +165,7 @@ export class WorldAura {
           gl_PointSize = clamp(size * projectionMatrix[1][1] * uViewportH * 0.5 / max(0.05, -mv.z), 0.0, 48.0);
         }
       `,
-      fragmentShader: SPRITE_FRAGMENT,
+      fragmentShader: spriteFragment(mask !== null),
     });
     this.points = new THREE.Points(geometry, material);
     this.points.frustumCulled = false;

@@ -161,6 +161,28 @@ export type Passthrough = {
 };
 
 /**
+ * 背景の VideoTexture の cover 切り抜き（object-fit: cover 相当）と表示倍率（zoom。1 未満で広く）の UV 変換。
+ * 片目のビューポートの位置 p（0..1、左下原点）→ 映像の UV = p × repeat + offset（左下原点。VideoTexture は flipY）。
+ * 背景と同じ変換を他の処理（ex9-1 の人の形のマスク）でも使えるよう純粋関数にした（中身は従来の updateCover と同じ）
+ */
+export function coverUvTransform(
+  videoAspect: number,
+  eyeAspect: number,
+  zoom: number,
+): { repeat: [number, number]; offset: [number, number] } {
+  let rx = 1;
+  let ry = 1;
+  if (videoAspect > eyeAspect) {
+    rx = eyeAspect / videoAspect;
+  } else {
+    ry = videoAspect / eyeAspect;
+  }
+  rx /= zoom;
+  ry /= zoom;
+  return { repeat: [rx, ry], offset: [(1 - rx) / 2, (1 - ry) / 2] };
+}
+
+/**
  * カメラを開き、scene.background に VideoTexture を張る。
  * 開始ボタンのハンドラ内（許可フローの中）から呼ぶこと
  */
@@ -188,19 +210,9 @@ export async function startPassthrough(
 
   const updateCover = () => {
     if (!video.videoWidth || !video.videoHeight) return;
-    const eyeAspect = opts.eyeAspect();
-    const videoAspect = video.videoWidth / video.videoHeight;
-    let rx = 1;
-    let ry = 1;
-    if (videoAspect > eyeAspect) {
-      rx = eyeAspect / videoAspect;
-    } else {
-      ry = videoAspect / eyeAspect;
-    }
-    rx /= opts.zoom;
-    ry /= opts.zoom;
-    texture.repeat.set(rx, ry);
-    texture.offset.set((1 - rx) / 2, (1 - ry) / 2);
+    const c = coverUvTransform(video.videoWidth / video.videoHeight, opts.eyeAspect(), opts.zoom);
+    texture.repeat.set(c.repeat[0], c.repeat[1]);
+    texture.offset.set(c.offset[0], c.offset[1]);
   };
   updateCover();
   // iOS は本体の回転で映像自体が回転し videoWidth/Height が入れ替わる。window の resize より

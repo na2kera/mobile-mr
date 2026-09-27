@@ -12,6 +12,8 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { KeshinIndex } from "../../src/shared/keshin-protocol";
 import { MODEL_HEIGHT_M } from "./keshin-math";
+import { MASK_HEAD_GLSL } from "./keshin-occlusion";
+import type { MaskBinding } from "./keshin-occlusion";
 
 export type KeshinSpec = {
   index: KeshinIndex;
@@ -163,7 +165,12 @@ export type KeshinInstance = {
  * nearFade を渡すと目から near[0] m 以内を消し、near[1] m までをなめらかに戻す（主観用。StereoEffect の左右の目で
  * 同じ結果になるよう、カメラではなく「頭の中心」のワールド位置からの距離で決める）
  */
-export function createKeshinInstance(loaded: LoadedKeshin, nearFade: [number, number] | null, hideFx = false): KeshinInstance {
+export function createKeshinInstance(
+  loaded: LoadedKeshin,
+  nearFade: [number, number] | null,
+  hideFx = false,
+  mask: MaskBinding | null = null,
+): KeshinInstance {
   const root = loaded.fallback ? loaded.template.clone(true) : cloneSkinned(loaded.template);
   const names = nodeNames(root, loaded.spec);
   const lower = root.getObjectByName(names.lower);
@@ -176,7 +183,7 @@ export function createKeshinInstance(loaded: LoadedKeshin, nearFade: [number, nu
   // 深度だけ書く複製のマテリアル（インスタンスで 1 つ。スキン・モーフはオブジェクト側の属性で自動）
   const depthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false });
   depthMaterial.clippingPlanes = [plane];
-  if (nearUniforms) addNearFade(depthMaterial, nearUniforms, "depth");
+  if (nearUniforms || mask) addKeshinShader(depthMaterial, nearUniforms, mask, "depth");
 
   type Mat = THREE.Material & { opacity: number; emissive?: THREE.Color };
   /** own = 発光・演出（体の目標値を掛けず、元の値 × 演出だけ） */
@@ -204,7 +211,7 @@ export function createKeshinInstance(loaded: LoadedKeshin, nearFade: [number, nu
       m.transparent = true;
       m.depthWrite = false;
       m.clippingPlanes = [plane];
-      if (nearUniforms) addNearFade(m, nearUniforms, "color");
+      if (nearUniforms || mask) addKeshinShader(m, nearUniforms, mask, "color");
       materials.push({ m, base, own: fxBlend || emissive });
       return m;
     });
@@ -290,40 +297,49 @@ export function createKeshinInstance(loaded: LoadedKeshin, nearFade: [number, nu
 }
 
 /**
- * 目の近くを消す（onBeforeCompile）。頂点シェーダーでスキン後のワールド位置を渡し、フラグメントで「頭の中心」からの距離 d を見る。
- * 深度の前描画（depth）と色（color）で**同じ条件で画素ごとに捨てる**: k = smoothstep(near.x, near.y, d) を、画素の位置で決まる
- * ノイズ（interleaved gradient noise。同じ画素なら深度と色で同じ値）と比べて k ≤ ノイズなら discard。
- * アルファを落とすと、その帯だけ深度の前描画が無くなって内側の面が透ける（レビューの指摘）ので、残す画素は深度も色も残す。
- * 境目はディザでぼかす。near.y ≤ near.x のときは d < near.x を捨てるだけ（(0, 0) なら何も捨てない）
+ * 化身のマテリアルに差し込むシェーダー（onBeforeCompile）。どちらも深度の前描画（depth）と色（color）で**同じ条件で画素ごとに捨てる**。
+ *   near（自分用）: 目の近くを消す。頂点シェーダーでスキン後のワールド位置を渡し、フラグメントで「頭の中心」からの距離 d を見る。
+ *     k = smoothstep(near.x, near.y, d) を、画素の位置で決まるノイズ（interleaved gradient noise。同じ画素なら深度と色で同じ値）と
+ *     比べて k ≤ ノイズなら discard。アルファを落とすと、その帯だけ深度の前描画が無くなって内側の面が透ける（段階 1 のレビュー）ので、
+ *     残す画素は深度も色も残す。near.y ≤ near.x のときは d < near.x を捨てるだけ（(0, 0) なら何も捨てない）
+ *   mask（他人用・段階 2）: カメラに写った人の形で、持ち主の頭より奥の部分だけ隠す（keshin-occlusion.ts の keshinMasked）
  */
-function addNearFade(
+function addKeshinShader(
   material: THREE.Material,
-  uniforms: { uKeshinEye: { value: THREE.Vector3 }; uKeshinNear: { value: THREE.Vector2 } },
+  near: { uKeshinEye: { value: THREE.Vector3 }; uKeshinNear: { value: THREE.Vector2 } } | null,
+  mask: MaskBinding | null,
   kind: "color" | "depth",
 ) {
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uKeshinEye = uniforms.uKeshinEye;
-    shader.uniforms.uKeshinNear = uniforms.uKeshinNear;
+    const heads: string[] = ["varying vec3 vKeshinWorld;"];
+    const bodies: string[] = [];
+    // スキン後のワールド位置（目の近くの距離・人の形の前後の判定に使う）
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vKeshinWorld;")
       .replace("#include <project_vertex>", "#include <project_vertex>\nvKeshinWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
-    const head = "#include <common>\nuniform vec3 uKeshinEye;\nuniform vec2 uKeshinNear;\nvarying vec3 vKeshinWorld;";
-    shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", head)
-      .replace(
-        "#include <clipping_planes_fragment>",
-        [
-          "#include <clipping_planes_fragment>",
-          "{",
-          "  float kd = distance(vKeshinWorld, uKeshinEye);",
-          "  float kk = uKeshinNear.y > uKeshinNear.x ? smoothstep(uKeshinNear.x, uKeshinNear.y, kd) : step(uKeshinNear.x, kd);",
-          "  float kn = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));",
-          "  if (kk <= kn) discard;",
-          "}",
-        ].join("\n"),
+    if (near) {
+      shader.uniforms.uKeshinEye = near.uKeshinEye;
+      shader.uniforms.uKeshinNear = near.uKeshinNear;
+      heads.push("uniform vec3 uKeshinEye;", "uniform vec2 uKeshinNear;");
+      bodies.push(
+        "{",
+        "  float kd = distance(vKeshinWorld, uKeshinEye);",
+        "  float kk = uKeshinNear.y > uKeshinNear.x ? smoothstep(uKeshinNear.x, uKeshinNear.y, kd) : step(uKeshinNear.x, kd);",
+        "  float kn = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));",
+        "  if (kk <= kn) discard;",
+        "}",
       );
+    }
+    if (mask) {
+      Object.assign(shader.uniforms, mask.shared, mask.owner);
+      heads.push(MASK_HEAD_GLSL);
+      bodies.push("if (keshinMasked(vKeshinWorld)) discard;");
+    }
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", ["#include <common>", ...heads].join("\n"))
+      .replace("#include <clipping_planes_fragment>", ["#include <clipping_planes_fragment>", ...bodies].join("\n"));
   };
-  material.customProgramCacheKey = () => `keshin-near-${kind}`;
+  material.customProgramCacheKey = () => `keshin-${near ? "near" : ""}-${mask ? "mask" : ""}-${kind}`;
   material.needsUpdate = true;
 }
 
@@ -386,7 +402,8 @@ function measure(loaded: LoadedKeshin) {
 // ---- 代わりの人型（モデル未配置・build 版）----
 // モデルと同じ約束（全高 5m・足元が原点・正面 +Z）で、カプセルの半透明の人型を作る。腕だけ決めポーズで上げる
 
-const FALLBACK_CUT_Y = 2.6;
+// 腰の切断面は頭（目）より下にする（本物のモデルと同じく、相手の化身が相手の頭・肩に重なるように。人の形で隠す確認に要る）
+const FALLBACK_CUT_Y = 2.1;
 
 function fallbackTemplate(spec: KeshinSpec): THREE.Object3D {
   const prefix = spec.rootName.replace(/_Root$/, "");

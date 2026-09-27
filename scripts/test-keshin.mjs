@@ -21,7 +21,12 @@ import {
   keshinModelToWorld,
   keshinScale,
   lookUpDeg,
+  markerFwdToWorldYaw,
+  markerToWorld,
+  maskUvFromFragment,
   poseReceivedLocal,
+  remoteDisplay,
+  smoothToward,
   rotateByQuat,
   selfAutoBack,
   selfLookFade,
@@ -36,6 +41,9 @@ import { KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLA
 import { parseClientMessage } from "../server/keshin.ts";
 import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
+import { coverUvTransform } from "../src/shared/passthrough-camera.ts";
+import * as THREE from "three";
+import { PersonMask, createMaskUniforms } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -179,6 +187,122 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("マーカーを正面に見る人の頭は +Z 側（z = 1.2）", near(headInField[2], 1.2) && near(headInField[1], 0));
   const frame = { head: headInField, yaw: yawOfForward(bodyForward([0, 0, 0, 1])), eyeH: 1.5, back: 0.8, cutY: 2.77, scale: 0.6, riseM: 0, leanDeg: 0 };
   check("その人の化身は壁と反対側（z > 頭の z）に立つ", keshinModelToWorld(frame, [0, 0, 0])[2] > headInField[2] + 0.5);
+}
+
+// ================= 2c. 段階 2: 相手の化身の配置・なめらかさ・信用度・人の形のマスク =================
+{
+  // 自分のアンカー: ワールドの (0.4, 1.6, −1.0) にあり、ヨー 30°（重力で水平化済み）
+  const anchorPos = [0.4, 1.6, -1.0];
+  const anchorQuat = qAxis(0, 1, 0, 30);
+  // 相手の申告（マーカー座標系）: 頭 (−0.4, 0.05, 1.3)、体の向き（マーカーの方 = −Z から少し右）
+  const head = [-0.4, 0.05, 1.3];
+  const fwdM = [0.29, -0.957];
+  const hw = markerToWorld(anchorPos, anchorQuat, head);
+  const c = Math.cos(30 * DEG);
+  const sn = Math.sin(30 * DEG);
+  // ヨー 30°: x' = c x + s z、z' = −s x + c z
+  const expectHead = [0.4 + c * head[0] + sn * head[2], 1.6 + head[1], -1.0 - sn * head[0] + c * head[2]];
+  check("相手の頭: マーカー座標系 → 自分のワールド（アンカーの位置 + ヨー回転）", hw.every((v, i) => near(v, expectHead[i], 1e-9)), JSON.stringify(hw));
+  const yaw = markerFwdToWorldYaw(anchorQuat, fwdM);
+  const fwdW = [c * fwdM[0] + sn * fwdM[1], -sn * fwdM[0] + c * fwdM[1]];
+  check("相手の体の向き: マーカー座標系の水平 → 自分のワールドのヨー", near(Math.sin(yaw), fwdW[0] / Math.hypot(...fwdW), 1e-9) && near(Math.cos(yaw), fwdW[1] / Math.hypot(...fwdW), 1e-9));
+  // その頭と向きで置いた化身: 原点は頭の背後（体の向きの逆）、正面 +Z は体の向き
+  const frame = { head: hw, yaw, eyeH: 1.5, back: 1.05, cutY: 1.72, scale: 0.6, riseM: 0, leanDeg: 0 };
+  const o = keshinModelToWorld(frame, [0, 0, 0]);
+  const z1 = keshinModelToWorld(frame, [0, 0, 1]);
+  const f = [Math.sin(yaw), Math.cos(yaw)];
+  const behind = (o[0] - hw[0]) * f[0] + (o[2] - hw[2]) * f[1];
+  const frontDir = [(z1[0] - o[0]) / 0.6, (z1[2] - o[2]) / 0.6];
+  check("相手の化身: 頭の背後 1.05m・同じ向き（自分のワールドで）", near(behind, -1.05, 1e-9) && near(frontDir[0], f[0], 1e-9) && near(frontDir[1], f[1], 1e-9), `behind=${behind.toFixed(3)}`);
+  check("相手の化身: 足元 = 相手の頭 − eyeH", near(o[1], hw[1] - 1.5, 1e-9));
+
+  // なめらかさ（持つ状態は表示中の値だけ）
+  const first = smoothToward(null, [1, 2, 3], 0.016, 0.25, 3);
+  check("smoothToward: 最初は目標へ即座に置く", first.snapped && first.pos.join() === "1,2,3");
+  let shown = [0, 0, 0];
+  let maxStep = 0;
+  for (let i = 0; i < 60; i++) {
+    const r = smoothToward(shown, [1.6, 0, 0], 1 / 60, 0.25, 3);
+    maxStep = Math.max(maxStep, Math.hypot(r.pos[0] - shown[0], r.pos[1] - shown[1], r.pos[2] - shown[2]));
+    shown = r.pos;
+  }
+  check("smoothToward: 1.6m の跳び（マーカーの見直し）は時定数 0.25s で寄る（1s 後に 98%・行き過ぎない）", near(shown[0], 1.6 * (1 - Math.exp(-4)), 1e-9) && shown[0] <= 1.6, shown[0].toFixed(4));
+  check("smoothToward: 1 フレーム（60fps）の動きは跳びの 7% 以下", maxStep <= 1.6 * (1 - Math.exp(-1 / 15)) + 1e-9, maxStep.toFixed(4));
+  const far = smoothToward([0, 0, 0], [3.2, 0, 0], 1 / 60, 0.25, 3);
+  check("smoothToward: snapM（3m）以上離れたら即座に移す・差を返す", far.snapped && far.pos[0] === 3.2 && near(far.gap, 3.2));
+  const g = smoothToward([0, 0, 0], [0, 0.3, 0.4], 1 / 60, 0.25, 3);
+  check("smoothToward: 跳びの大きさ gap = 目標と表示の差", near(g.gap, 0.5) && !g.snapped);
+  check("smoothToward: 時定数 0 なら平滑化なし", smoothToward([0, 0, 0], [1, 0, 0], 0.01, 0, 3).pos[0] === 1);
+
+  // 信用度による表示
+  const o2 = { noPoseMs: 1000, lostMs: 5000, staleMs: 3000 };
+  const mk = { track: "marker", ageMs: 0 };
+  check("表示: 自分のアンカーが無いと描かない", remoteDisplay(false, mk, 100, o2).draw === false && remoteDisplay(false, mk, 100, o2).reason === "self-no-anchor");
+  check("表示: marker は通常（薄さ 1）", (() => { const r = remoteDisplay(true, mk, 100, o2); return r.draw && r.fade === 1 && !r.freeze; })());
+  check("表示: gyro 1.5s は 0.75 の薄さ", near(remoteDisplay(true, { track: "gyro", ageMs: 1400 }, 100, o2).fade, 0.75));
+  check("表示: gyro が staleMs を過ぎたら 0.5 で位置を止める", (() => { const r = remoteDisplay(true, { track: "gyro", ageMs: 3500 }, 100, o2); return r.draw && r.fade === 0.5 && r.freeze; })());
+  check("表示: marker でも 2 秒次が来なければ gyro 扱い（2s → 0.667）", (() => { const r = remoteDisplay(true, mk, 2000, o2); return r.track === "gyro" && near(r.fade, 1 - 0.5 * 2000 / 3000); })());
+  check("表示: none・pose 無しは描かない", remoteDisplay(true, { track: "none", ageMs: null }, 0, o2).reason === "peer-none" && remoteDisplay(true, undefined, 0, o2).reason === "no-pose");
+  check("表示: pose が lostMs（5s）届かない = 通信切れは描かない", (() => { const r = remoteDisplay(true, mk, 5001, o2); return !r.draw && r.reason === "lost"; })());
+
+  // 人の形のマスクの座標: 背景と同じ UV 変換（cover・camZoom）で、眼ごとのビューポートの中の位置から出す
+  const cov = coverUvTransform(16 / 9, 640 / 720, 1);
+  check("cover: 横長の映像を縦長の片目に → 横を切り抜く（repeat.x < 1、縦は 1）", near(cov.repeat[0], (640 / 720) / (16 / 9)) && cov.repeat[1] === 1 && near(cov.offset[0], (1 - cov.repeat[0]) / 2) && cov.offset[1] === 0);
+  const L = [0, 0, 640, 720];
+  const R = [640, 0, 640, 720];
+  const cL = maskUvFromFragment([320, 360], L, cov.repeat, cov.offset);
+  const cR = maskUvFromFragment([960, 360], R, cov.repeat, cov.offset);
+  check("マスクの座標: 左右の眼の中心はどちらも画像の中心（0.5, 0.5）", near(cL[0], 0.5) && near(cL[1], 0.5) && near(cR[0], 0.5) && near(cR[1], 0.5));
+  const edge = maskUvFromFragment([0, 720], L, cov.repeat, cov.offset);
+  check("マスクの座標: 眼の左上の角 = 切り抜いた範囲の左端・画像の上端（マスクは左上原点）", near(edge[0], cov.offset[0]) && near(edge[1], 0), JSON.stringify(edge));
+  const bot = maskUvFromFragment([640 + 639.5, 0.5], R, cov.repeat, cov.offset);
+  check("マスクの座標: 右の眼の右下 = 切り抜いた範囲の右端・画像の下端", near(bot[0], cov.offset[0] + cov.repeat[0] * (639.5 / 640)) && near(bot[1], 1 - 0.5 / 720));
+  const zoom = coverUvTransform(16 / 9, 640 / 720, 0.7);
+  check("camZoom 0.7（広く表示）: 背景の上下の縁は映像の外（縦は切り抜いていないので余白）→ マスクの外（null）", maskUvFromFragment([320, 1], L, zoom.repeat, zoom.offset) === null && maskUvFromFragment([320, 719], L, zoom.repeat, zoom.offset) === null && maskUvFromFragment([320, 360], L, zoom.repeat, zoom.offset) !== null);
+  const zc = maskUvFromFragment([320 + 64, 360 + 72], L, zoom.repeat, zoom.offset);
+  check("camZoom 0.7: 中心からのずれは 1/0.7 倍に広がる", near(zc[0] - 0.5, 0.1 * zoom.repeat[0], 1e-9) && near(0.5 - zc[1], 0.1 * zoom.repeat[1], 1e-9));
+  const tall = coverUvTransform(3 / 4, 640 / 720, 1);
+  check("cover: 縦長の映像（3:4）→ 縦を切り抜く（repeat.y < 1）", tall.repeat[0] === 1 && near(tall.repeat[1], (3 / 4) / (640 / 720)));
+  // シェーダーは uMaskUv に three の texture.matrix（offset / repeat から updateMatrix）を入れる。それが p × repeat + offset と同じこと
+  const tex = new THREE.Texture();
+  tex.repeat.set(zoom.repeat[0], zoom.repeat[1]);
+  tex.offset.set(zoom.offset[0], zoom.offset[1]);
+  tex.updateMatrix();
+  const pv = new THREE.Vector3(0.3, 0.8, 1).applyMatrix3(tex.matrix);
+  const mu = maskUvFromFragment([0.3 * 640, 0.8 * 720], L, zoom.repeat, zoom.offset);
+  check("three の texture.matrix（背景と同じ変換）でも同じ座標になる（上下の反転だけ違う）", near(pv.x, mu[0], 1e-9) && near(1 - pv.y, mu[1], 1e-9));
+}
+
+// ================= 2d. 段階 2: 人の形のマスク（MediaPipe の confidence mask → 1 枚の R8）=================
+// MediaPipe の MPMask.getAsFloat32Array は行 0 が画像の上（vision_bundle の MPImage.getAsImageData も同じ readPixels で
+// 上下を反転せずに ImageData にしているので、同じ並び）。ここでは「入力の i 番目 = 出力の i 番目」（並びを変えない）ことを確かめる
+{
+  const u = createMaskUniforms(3, 0.15);
+  const pm = new PersonMask(u, [0.3, 0.7]);
+  const w = 5;
+  const h = 3;
+  // 人 1: 左上の画素だけ 1.0、人 2: 右下 0.9 と中央 0.5。裾 0.2 は切れる
+  const m1 = new Float32Array(w * h);
+  m1[0] = 1.0;
+  m1[7] = 0.2;
+  const m2 = new Float32Array(w * h);
+  m2[w * h - 1] = 0.9;
+  m2[7] = 0.5;
+  pm.setFromFloat([m1, m2], w, h);
+  const px = pm.pixels;
+  check("マスク: 大きさ（幅・高さ）と uniform の 1 画素（1 / 幅, 1 / 高さ）", pm.size[0] === w && pm.size[1] === h && px.length === w * h && near(u.uMaskTexel.value.x, 1 / w) && near(u.uMaskTexel.value.y, 1 / h));
+  check("マスク: 並びは変えない（行 0 = 画像の上。左上は 0 番、右下は最後）", px[0] === 255 && px[w * h - 1] === 255 && px[w - 1] === 0);
+  check("マスク: 裾を切る（確信度 0.2 → 0、0.5 → 中間 128 前後、0.9 → 255）", px[1] === 0 && Math.abs(px[7] - 128) <= 1 && px[w * h - 1] === 255, `mid=${px[7]}`);
+  check("マスク: 複数人は画素ごとの最大（中央は人 1 の 0.2 と人 2 の 0.5 の大きい方）", px[7] > 100);
+  check("マスク: 人が写っているか（127 を超える画素があるか）", pm.hasPerson === true);
+  check("マスク: テクスチャは R8・1 バイト境界（幅が 4 の倍数でなくても行がずれない）", u.uMaskTex.value.format === THREE.RedFormat && u.uMaskTex.value.unpackAlignment === 1 && u.uMaskTex.value.image.width === w);
+  pm.setFromFloat([new Float32Array(w * h).fill(0.25)], w, h);
+  check("マスク: 裾（0.3 未満）だけなら人はいない（点状の穴を作らない）", pm.hasPerson === false && pm.pixels.every((v) => v === 0));
+  pm.edge = [0.1, 0.9];
+  pm.setFromFloat([new Float32Array(w * h).fill(0.5)], w, h);
+  check("マスク: 裾の切り方は変えられる（?maskEdge=。0.1〜0.9 で 0.5 → 128 前後）", Math.abs(pm.pixels[0] - 128) <= 1);
+  pm.setFromFloat([new Float32Array(8 * 2).fill(1)], 8, 2);
+  check("マスク: 大きさが変わったらテクスチャを作り直す", pm.size[0] === 8 && pm.size[1] === 2 && u.uMaskTex.value.image.width === 8);
 }
 
 // ================= 3. フェードと信用度 =================

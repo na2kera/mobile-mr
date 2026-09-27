@@ -19,13 +19,16 @@ import { KESHIN_NAMES, NAME_MAX_LENGTH, REPLACED_REASON } from "../../src/shared
 import type { KeshinIndex, KeshinPlayer, KeshinPose, Track } from "../../src/shared/keshin-protocol";
 import { keshinTimeline } from "../../src/shared/keshin-timeline";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
-import { bodyForward, lookUpDeg, selfLookFade, smoothYaw, stageStartLocal, yawOfForward } from "./keshin-math";
+import { bodyForward, lookUpDeg, poseReceivedLocal, selfLookFade, smoothYaw, stageStartLocal, yawOfForward } from "./keshin-math";
 import type { Quat, V3 } from "./keshin-math";
 import { KESHIN_SPECS, loadKeshinModel } from "./keshin-assets";
 import type { LoadedKeshin } from "./keshin-assets";
 import { KeshinView } from "./keshin-view";
 import { PeripheralAura } from "./keshin-aura";
 import { connectKeshin } from "./keshin-client";
+import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshin-occlusion";
+import type { PersonShape } from "./keshin-occlusion";
+import { RemoteKeshins } from "./remote-keshins";
 import type { KeshinClient } from "./keshin-client";
 
 // ex9-1: 化身（番外編。09-person-id を後で土台にするので 9 番台の ex）。
@@ -86,6 +89,44 @@ const AURA_N = Math.round(numParam("auraN", 400, { min: 0, max: 20000 }));
 /** 体の向きの指数平滑の時定数 [s]（送信側だけ。受信側は受け取った向きをそのまま使う） */
 const YAW_SMOOTH_SEC = numParam("yawSmoothSec", 0.25, { min: 0, max: 5 });
 
+// 段階 2: 相手の化身（スマホにも描く）
+/** 相手の化身の不透明度（体。発光部分は 1 のまま。俯瞰画面と同じ） */
+const OTHER_OPACITY = numParam("otherOpacity", 0.85, { min: 0, max: 1 });
+/** 相手の化身の表示の位置・向きを目標へ寄せる時定数 [s] */
+const REMOTE_SMOOTH_SEC = numParam("remoteSmoothSec", 0.25, { min: 0, max: 5 });
+/** 目標がこれ以上離れたら寄せずに即座に移す [m] */
+const SNAP_M = numParam("snapM", 3, { min: 0.1, max: 100 });
+/** gyro の ageMs がこれで化身が半分の薄さ、以降はその薄さで最後の位置に止める [ms]（俯瞰画面と同じ） */
+const STALE_MS = numParam("staleMs", 3000, { min: 100, max: 60000 });
+/** pose がこれだけ届かなければ marker でも gyro 扱い [ms]（俯瞰画面と同じ） */
+const NO_POSE_MS = numParam("noPoseMs", 1000, { min: 100, max: 60000 });
+/** pose がこれだけ届かなければ通信切れとして相手の化身を描かない [ms] */
+const PEER_LOST_MS = numParam("peerLostMs", 5000, { min: 500, max: 120000 });
+// 人の形で相手の化身を隠す（MediaPipe PoseLandmarker の segmentation mask）
+/** ?occlude=0 で隠す処理を丸ごと止める（Pose も読み込まない） */
+const OCCLUDE = params.get("occlude") !== "0";
+const MASK_HZ = numParam("maskHz", 15, { min: 1, max: 60 });
+const MASK_POSES = Math.round(numParam("maskPoses", 3, { min: 1, max: 4 }));
+/** マスクの縁を膨らませる量 [マスクの px] */
+const MASK_DILATE_PX = numParam("maskDilatePx", 3, { min: 0, max: 30 });
+/** 持ち主（相手）の頭よりこれだけ手前（カメラに近い）までは人の形で隠さない [m] */
+const MASK_DEPTH_MARGIN = numParam("maskDepthMargin", 0.15, { min: -2, max: 5 });
+/** マスクの確信度の裾の切り方（smoothstep の 2 つの端。?maskEdge=0.3,0.7） */
+const MASK_EDGE: [number, number] = (() => {
+  const v = (params.get("maskEdge") ?? "").split(",").map(Number);
+  return v.length === 2 && v.every((x) => Number.isFinite(x) && x >= 0 && x <= 1) && v[0] < v[1] ? [v[0], v[1]] : [0.3, 0.7];
+})();
+/** 人の形の検出に渡す画像の長辺 [px]（マスクの大きさもこれ） */
+const MASK_DET_W = numParam("maskDetW", 320, { min: 64, max: 1280 });
+const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
+const DELEGATE: "GPU" | "CPU" | "auto" = delegateRaw === "gpu" ? "GPU" : delegateRaw === "cpu" ? "CPU" : "auto";
+const POSE_MODEL_URLS = params.get("poseModel")
+  ? [params.get("poseModel")!]
+  : [
+      `${import.meta.env.BASE_URL}models/pose_landmarker_lite.task`,
+      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    ];
+
 // デバッグ（08 と同じフェイクカメラの流儀。ただしマウスで見回すとフェイクの映像も一緒に回る = 見上げるとマーカーが画面外へ出て gyro になる）
 const FAKE_CAM = params.has("fakecam");
 const FAKE_SHIFT = numParam("fakeShift", 0, { min: -200, max: 200 });
@@ -94,6 +135,11 @@ const FAKE_MARKER_PX = numParam("fakeMarkerPx", 80, { min: 30, max: 400 });
 const FAKE_CAM_POS = (params.get("fakeCamPos") ?? "").split(",").map(Number);
 const FAKE_YAW = numParam("fakeYaw", 0, { min: -180, max: 180 });
 const FAKE_PITCH = numParam("fakePitch", 0, { min: -90, max: 90 });
+/**
+ * PC 確認用: 相手の申告位置に合成の体（fake-body.ts）を立たせ、フェイクカメラの映像に描いて、同じ形を人の形のマスクにも使う
+ * （MediaPipe の代わり。マスク → テクスチャ → シェーダーの経路を確かめる）
+ */
+const FAKE_PERSON = FAKE_CAM && params.get("fakeperson") === "1";
 
 /** タッチ端末（実機）か。PC は OrbitControls + キーボード */
 const touch = isTouchDevice();
@@ -222,9 +268,45 @@ function fakeStream(): MediaStream {
       drawCheckerboard(ctx, canvas, frame);
       const camToField = fakeCamToFieldNow();
       if (camToField) drawProjectedMarkers(ctx, projectFakeMarkers(fakeMarkers, camToField, FAKE_FOCAL_PX, canvas.width, canvas.height, MARKER_SIZE_M));
+      // ?fakeperson=1: 相手の申告位置に合成の体を描く（マスクにも同じ形を使う）
+      if (FAKE_PERSON) for (const s of fakePersonShapes()) drawPersonShape(ctx, s, "#5a6b86");
     },
     { width: FAKE_CAM_W, height: FAKE_CAM_H },
   );
+}
+
+/** 相手（pose があるプレイヤー）の合成の体を、いまのフェイクカメラの画像に投影した形（?fakeperson=1） */
+function fakePersonShapes(): PersonShape[] {
+  const camToField = fakeCamToFieldNow();
+  if (!camToField) return [];
+  const out: PersonShape[] = [];
+  for (const [id, p] of players) {
+    if (id === selfId || !p.info.pose?.pos || !p.info.pose.fwd) continue;
+    const s = projectFakePerson({ head: p.info.pose.pos, fwd: p.info.pose.fwd }, camToField, FAKE_FOCAL_PX, FAKE_CAM_W, FAKE_CAM_H);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+/** フェイクの人の形のマスク（MediaPipe の代わり。マスクの大きさは本物と同じく長辺 ?maskDetW=） */
+let fakeMaskCanvas: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
+function fakeMaskImage(): ImageData | null {
+  const scale = Math.min(1, MASK_DET_W / Math.max(FAKE_CAM_W, FAKE_CAM_H));
+  const w = Math.round(FAKE_CAM_W * scale);
+  const h = Math.round(FAKE_CAM_H * scale);
+  if (!fakeMaskCanvas) {
+    const canvas = document.createElement("canvas");
+    fakeMaskCanvas = { canvas, ctx: canvas.getContext("2d", { willReadFrequently: true })! };
+  }
+  const { canvas, ctx } = fakeMaskCanvas;
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+  for (const s of fakePersonShapes()) drawPersonShape(ctx, s, "#fff", scale);
+  return ctx.getImageData(0, 0, w, h);
 }
 
 async function startCameraAndMarker(onProgress: (step: string) => void) {
@@ -258,34 +340,37 @@ async function startCameraAndMarker(onProgress: (step: string) => void) {
   });
 }
 
-// ---- 化身のモデル（自分の 1 体だけ読み込む。無ければ代わりの人型）----
-type ModelState = { status: "idle" | "loading" | "loaded" | "missing"; detail: string; loaded: LoadedKeshin | null };
-const modelState: ModelState = { status: "idle", detail: "", loaded: null };
-let modelIndex: KeshinIndex | null = null;
+// ---- 化身のモデル（自分と相手の番号のぶんだけ読み込む。無ければ代わりの人型）----
+type ModelEntry = { status: "loading" | "loaded" | "missing"; detail: string; loaded: LoadedKeshin | null };
+const models = new Map<KeshinIndex, ModelEntry>();
 
-function loadModelFor(index: KeshinIndex) {
-  if (modelIndex === index) return;
-  modelIndex = index;
+/** その番号のモデルを読み込む（1 回だけ）。読み込めたら自分・相手のビューを差し替える */
+function requestModel(index: KeshinIndex) {
+  if (models.has(index)) return;
   const spec = KESHIN_SPECS[index];
-  modelState.status = "loading";
-  modelState.detail = spec.file;
-  modelState.loaded = null;
+  const entry: ModelEntry = { status: "loading", detail: spec.file, loaded: null };
+  models.set(index, entry);
   const t0 = performance.now();
   loadKeshinModel(spec)
     .then((loaded) => {
-      if (modelIndex !== index) return;
-      modelState.status = "loaded";
-      modelState.loaded = loaded;
-      modelState.detail = `load=${loaded.loadMs.toFixed(0)}ms measure=${(loaded.measureMs ?? 0).toFixed(1)}ms tris=${loaded.triangles} front=${loaded.frontZ.toFixed(2)} head=${loaded.head.y.toFixed(2)}`;
-      selfView?.setModel(loaded);
+      entry.status = "loaded";
+      entry.loaded = loaded;
+      entry.detail = `load=${loaded.loadMs.toFixed(0)}ms measure=${(loaded.measureMs ?? 0).toFixed(1)}ms tris=${loaded.triangles} front=${loaded.frontZ.toFixed(2)} head=${loaded.head.y.toFixed(2)}`;
+      if (selfView?.spec.index === index) selfView.setModel(loaded);
+      remotes.onModelLoaded(index, loaded);
       logEvent("model-loaded", `#${index} ${spec.file} ${(performance.now() - t0).toFixed(0)}ms load=${loaded.loadMs.toFixed(0)}ms measure=${(loaded.measureMs ?? 0).toFixed(1)}ms tris=${loaded.triangles} frontZ=${loaded.frontZ.toFixed(3)} headY=${loaded.head.y.toFixed(3)}`);
     })
     .catch((e: unknown) => {
-      if (modelIndex !== index) return;
-      modelState.status = "missing";
-      modelState.detail = e instanceof Error ? e.message.slice(0, 80) : String(e);
-      logEvent("model-failed", `#${index} ${spec.file} ${(performance.now() - t0).toFixed(0)}ms ${modelState.detail}`);
+      entry.status = "missing";
+      entry.detail = e instanceof Error ? e.message.slice(0, 80) : String(e);
+      logEvent("model-failed", `#${index} ${spec.file} ${(performance.now() - t0).toFixed(0)}ms ${entry.detail}`);
     });
+}
+
+/** 自分の化身のモデルの状態（HUD 用） */
+function selfModel(): { status: string; detail: string } {
+  const me = selfState();
+  return (me && models.get(me.info.keshin)) ?? { status: "idle", detail: "" };
 }
 
 /**
@@ -294,10 +379,12 @@ function loadModelFor(index: KeshinIndex) {
  * 直後の本描画（autoClear）が消すので見えない。かかった時間と、新しくリンクされたプログラムの数を HUD と実機ログに出す
  */
 let warmupInfo = "-";
-function warmUpSelfIfPending() {
-  const view = selfView;
+function warmUpIfPending() {
+  // 相手の化身（段階 2）も同じ方法で。自分の化身と同じフレームに重ならないよう 1 フレーム 1 体
+  const remote = [...remotes.views.values()].find((e) => e.view.warmPending)?.view ?? null;
+  const view = selfView?.warmPending ? selfView : remote;
   if (!view || !view.warmPending) return;
-  const what = view.warmPending;
+  const what = `${view === selfView ? "self" : "remote"}#${view.spec.index} ${view.warmPending}`;
   view.warmPending = null;
   const before = renderer.info.programs?.length ?? 0;
   const wasPeripheral = peripheral?.points.visible ?? false;
@@ -319,6 +406,60 @@ function warmUpSelfIfPending() {
 // ---- 自分の化身（主観）と視界の周りのオーラ ----
 let selfView: KeshinView | null = null;
 let peripheral: PeripheralAura | null = null;
+
+// ---- 段階 2: 相手の化身（remote-keshins.ts）と、人の形で隠す処理（keshin-occlusion.ts）----
+const occlusion = new OcclusionController(
+  {
+    enabled: OCCLUDE,
+    fake: FAKE_PERSON,
+    maskHz: MASK_HZ,
+    maxPoses: MASK_POSES,
+    detW: MASK_DET_W,
+    delegate: DELEGATE,
+    modelUrls: POSE_MODEL_URLS,
+    staleOffMs: 1000,
+    log: logEvent,
+  },
+  MASK_DILATE_PX,
+  MASK_DEPTH_MARGIN,
+  MASK_EDGE,
+);
+const remotes = new RemoteKeshins(
+  scene,
+  {
+    heightM: KESHIN_H,
+    eyeH: EYE_H,
+    backOverride: KESHIN_BACK,
+    opacity: OTHER_OPACITY,
+    auraN: AURA_N,
+    smoothSec: REMOTE_SMOOTH_SEC,
+    snapM: SNAP_M,
+    staleMs: STALE_MS,
+    noPoseMs: NO_POSE_MS,
+    lostMs: PEER_LOST_MS,
+  },
+  OCCLUDE ? occlusion.uniforms : null,
+  (index) => models.get(index as KeshinIndex)?.loaded ?? null,
+  logEvent,
+);
+let lastRemoteMs = performance.now();
+
+/** 相手の化身を更新する（段階 2）。自分のアンカーが無い（track = none）間は描かない */
+function updateRemotes(now: number) {
+  const dt = Math.min(0.5, (now - lastRemoteMs) / 1000);
+  lastRemoteMs = now;
+  camera.getWorldPosition(camWorldPos);
+  renderer.getDrawingBufferSize(drawingSize);
+  remotes.update(now, dt, players, { anchor: markerAnchor?.everDetected ? anchor : null, camWorldPos, viewportH: drawingSize.y });
+}
+
+/** 人の形の検出（相手の化身が視野に入っていそうな間だけ。マーカー検出と同じフレームでは回さない） */
+function updateOcclusion(now: number, markerRan: boolean) {
+  occlusion.syncBackground(passthrough?.texture ?? null);
+  const need = remotes.anyVisibleInView(camera);
+  const others = [...players.keys()].filter((id) => id !== selfId).length;
+  occlusion.update(now, need, passthrough?.video ?? null, markerRan, others, FAKE_PERSON ? fakeMaskImage : null);
+}
 
 function setupSelfKeshin(index: KeshinIndex) {
   if (selfView && selfView.spec.index === index) return;
@@ -345,11 +486,12 @@ function setupSelfKeshin(index: KeshinIndex) {
   }
   peripheral = new PeripheralAura(Math.round(AURA_N * 0.6), spec.auraColors);
   camera.add(peripheral.points);
-  loadModelFor(index);
+  requestModel(index);
 }
 
 // ---- Room の状態（サーバーが確定したもの）----
-type PlayerState = { info: KeshinPlayer; startLocalMs: number };
+/** poseRecvMs = その pose をサーバーが受け取った時刻（ローカル。スナップショットの pose は poseAgeMs だけ過去。poseReceivedLocal） */
+type PlayerState = { info: KeshinPlayer; startLocalMs: number; poseRecvMs: number };
 const players = new Map<string, PlayerState>();
 let selfId = "";
 let netStatus = "idle";
@@ -387,7 +529,9 @@ function connect(name: string) {
         selfId = id;
         netStatus = "open";
         players.clear();
-        for (const p of list) players.set(p.id, { info: p, startLocalMs: stageStartLocal(p.changedAt, now, recv) });
+        for (const p of list) players.set(p.id, { info: p, startLocalMs: stageStartLocal(p.changedAt, now, recv), poseRecvMs: p.pose ? poseReceivedLocal(recv, p.poseAgeMs) : -Infinity });
+        remotes.sync(players, selfId);
+        for (const p of list) if (p.id !== id) requestModel(p.keshin);
         pending = null;
         const me = players.get(id);
         if (me) setupSelfKeshin(me.info.keshin);
@@ -395,16 +539,22 @@ function connect(name: string) {
       },
       onJoin: (p, now) => {
         // 再接続の引き継ぎ（同じ session 鍵）なら on / changedAt を持っている → 演出なしで同じ見え方から
-        players.set(p.id, { info: p, startLocalMs: stageStartLocal(p.changedAt, now, performance.now()) });
+        const recv = performance.now();
+        players.set(p.id, { info: p, startLocalMs: stageStartLocal(p.changedAt, now, recv), poseRecvMs: p.pose ? poseReceivedLocal(recv, p.poseAgeMs) : -Infinity });
+        remotes.sync(players, selfId);
+        requestModel(p.keshin);
         logEvent("join", `${p.id} "${p.name}" keshin=${p.keshin}${p.on ? " on" : ""}`);
       },
       onLeave: (id) => {
         if (players.delete(id)) logEvent("leave", id);
+        remotes.sync(players, selfId);
       },
       onPose: (id, pose) => {
-        // 段階 1 ではスマホに相手の化身は出さない（状態だけ持つ。段階 2 で keshin-view.ts の「他人用」で描く）
+        // 段階 2: 相手の化身の位置と信用度に使う（remote-keshins.ts）
         const p = players.get(id);
-        if (p) p.info.pose = pose;
+        if (!p) return;
+        p.info.pose = pose;
+        p.poseRecvMs = poseReceivedLocal(performance.now(), undefined);
       },
       onKeshin: (id, on, keshin, changedAt, now) => {
         const recv = performance.now();
@@ -414,6 +564,7 @@ function connect(name: string) {
         p.info.keshin = keshin;
         p.info.changedAt = changedAt;
         p.startLocalMs = stageStartLocal(changedAt, now, recv);
+        remotes.sync(players, selfId);
         const shifted = now - changedAt;
         if (id === selfId) {
           if (pending && pending.on === on) pending = null;
@@ -602,12 +753,15 @@ function updateMessage(now: number) {
     text = flash.text;
     color = "#fdd663";
   } else if (track === "none") {
-    // 主観の化身はマーカーが無くても出せる。位置の共有（俯瞰画面）にはマーカーが要る
-    text = "壁のマーカーを見てください\n（位置を共有します）";
+    // 主観の化身はマーカーが無くても出せる。位置の共有（俯瞰画面）と相手の化身の位置にはマーカーが要る
+    const remoteOn = [...players.values()].some((p) => p.info.id !== selfId && p.info.on);
+    text = remoteOn ? "壁のマーカーを見てください\n（相手の化身の位置が分かりません）" : "壁のマーカーを見てください\n（位置を共有します）";
     color = "#fdd663";
   }
   message.set(text, color);
+  lastMessageText = text;
 }
+let lastMessageText = "";
 
 // ---- 頭追従（02〜09 と同じ） ----
 type HeadControls = { update: () => void };
@@ -654,9 +808,10 @@ function describeKeshin(now: number): string {
   return `#${me.info.keshin}${me.info.on ? "on" : "off"} t=${Number.isFinite(t) ? t.toFixed(2) : "inf"} u=${v ? v.u.toFixed(2) : "-"} op=${selfView ? selfView.lastOpacity.toFixed(2) : "-"} drawn=${selfView?.modelVisible ? 1 : 0}${pending ? ` pending=${pending.on ? "on" : "off"}` : ""}`;
 }
 function describeModel(): string {
-  if (modelState.status === "loaded") return `loaded(${modelState.detail})`;
-  if (modelState.status === "missing") return "missing(fallback)";
-  return modelState.status;
+  const m = selfModel();
+  if (m.status === "loaded") return `loaded(${m.detail})`;
+  if (m.status === "missing") return "missing(fallback)";
+  return m.status;
 }
 
 /** 実機ログの snapshot（1 行の診断要約。1 秒ごとに送られ、同じ内容なら送らない） */
@@ -673,8 +828,10 @@ function diagSummary(): string {
     `track=${track}${ageMs !== null ? `/${(ageMs / 1000).toFixed(1)}s` : ""}`,
     `keshin=${describeKeshin(now)}`,
     `look=${lookDeg.toFixed(0)}deg fade=${selfFade.toFixed(2)}`,
-    `model=${modelState.status}`,
+    `model=${selfModel().status}`,
     `ws=${netStatus} me=${selfId || "-"} players=${players.size} sent=${posesSent}`,
+    occlusion.describe(),
+    remotes.diag(),
   ].join(" ");
 }
 
@@ -686,8 +843,8 @@ function renderHud() {
   const now = performance.now();
   const { track, ageMs } = trackOf(now);
   const modelLine =
-    modelState.status === "missing"
-      ? `model=モデル未配置（npm run fetch:keshin）→ 代わりの人型で表示 [${modelState.detail}]`
+    selfModel().status === "missing"
+      ? `model=モデル未配置（npm run fetch:keshin）→ 代わりの人型で表示 [${selfModel().detail}]`
       : `model=${describeModel()}`;
   const text = [
     `${hudState.base} (fov now=${camera.fov.toFixed(1)})`,
@@ -700,6 +857,8 @@ function renderHud() {
     `marker=${markerAnchor?.info ?? "-"} track=${track}${ageMs !== null ? ` age=${(ageMs / 1000).toFixed(1)}s` : ""}`,
     `keshin=${describeKeshin(now)} look=${lookDeg.toFixed(0)}deg fade=${selfFade.toFixed(2)} yaw=${bodyYaw === null ? "-" : THREE.MathUtils.radToDeg(bodyYaw).toFixed(0)}deg back=${selfView ? selfView.back().toFixed(2) : "-"}m lean=${selfView ? selfView.selfTuning().leanDeg : "-"}deg`,
     `${modelLine} warmup=${warmupInfo}`,
+    occlusion.describe(),
+    ...remotes.describe(players),
     `room=${ROOM ?? "(不正)"} me=${selfId || "-"} players=${[...players.values()].map((p) => `${p.info.id}:${p.info.keshin}${p.info.on ? "on" : ""}`).join(",") || "-"} ws=${netStatus} sent=${posesSent}${lastSent ? ` last=${lastSent.track}${lastSent.pos ? `(${lastSent.pos.map((v) => v.toFixed(2)).join(",")})` : ""}` : ""}`,
   ]
     .filter(Boolean)
@@ -742,7 +901,7 @@ nameForm.addEventListener("submit", (event) => {
   const name = readPlayerName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ} mode=${touch ? "gyro" : "orbit"}`;
   logEvent("start", `name=${name} room=${ROOM} ${hudState.base}`);
   connect(name);
   runStartFlow(touch, {
@@ -826,7 +985,7 @@ if (FAKE_CAM) {
         drawn: selfView?.modelVisible ?? false,
         opacity: selfView?.lastOpacity ?? 0,
         u: selfVisual?.u ?? null,
-        model: modelState.status,
+        model: selfModel().status,
         fallback: selfView?.isFallback ?? null,
         back: selfView?.back() ?? null,
         fps,
@@ -843,7 +1002,117 @@ if (FAKE_CAM) {
      * band は各眼の外周 20% の帯（各辺から幅・高さの 20%）の中で変わった画素数。
      * 同じタスクの中で描いて readPixels する（preserveDrawingBuffer なしでも読める）
      */
-    pixelDiff(all = false) {
+    /** リンク済みのシェーダープログラムの名前（確認用。新しく増えたものを特定する） */
+    programNames() {
+      return (renderer.info.programs ?? []).map((p) => `${p.name}|${p.cacheKey.length}|${p.cacheKey.slice(-160)}`);
+    },
+    /** 視界内メッセージの文字（確認用） */
+    messageText() {
+      return lastMessageText;
+    },
+    /** 相手の化身の状態（段階 2） */
+    remoteState() {
+      return [...remotes.views.values()].map((e) => ({
+        id: e.id,
+        keshin: e.view.spec.index,
+        drawn: e.drawn,
+        reason: e.reason,
+        track: e.track,
+        ageMs: e.ageMs,
+        fade: e.fade,
+        dist: e.dist,
+        head: e.shownHead,
+        yaw: e.shownYaw,
+        world: e.drawn ? e.view.debugWorld() : null,
+        gapNow: e.gapNow,
+        snaps: e.snaps,
+        fallback: e.view.isFallback,
+        warmPending: e.view.warmPending,
+      }));
+    },
+    /** 自分のワールドでのアンカー（マーカー座標系 → ワールド）の位置と回転 */
+    anchorWorld() {
+      anchor.updateWorldMatrix(true, false);
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      anchor.matrixWorld.decompose(p, q, new THREE.Vector3());
+      return { pos: [p.x, p.y, p.z], quat: [q.x, q.y, q.z, q.w] };
+    },
+    occlusionState() {
+      return { status: occlusion.status, detail: occlusion.detail, on: occlusion.uniforms.uMaskOn.value, hz: occlusion.hz, poseMs: occlusion.poseMs, ageMs: occlusion.ageMs, person: occlusion.mask.hasPerson, everMasked: occlusion.everMasked, text: occlusion.describe() };
+    },
+    /** 隠す処理を一時的に止める / 戻す（確認用） */
+    setOcclusionDisabled(off: boolean) {
+      occlusion.disabled = off;
+      occlusion.uniforms.uMaskOn.value = off ? 0 : occlusion.uniforms.uMaskOn.value;
+    },
+    /**
+     * 相手の化身を描いたときと描かないときの画素の差を、フェイクの人の中（inside）・外（outside）に分けて数える。
+     * 人の中か外かは、化身を描かないフレームの背景の画素がフェイクの人の色（#5a6b86）かどうかで決める
+     * （シェーダーと同じ式を使わずに、マスクの UV が背景と一致していることも確かめる）。人の縁の近く（±12px）は数えない。
+     * occlude = false なら隠す処理を止めて描いたときの数。part = "model" ならオーラは比べずモデルだけ
+     */
+    pixelDiffRemote(id: string, occlude = true, part: "all" | "model" = "all") {
+      const e = remotes.views.get(id);
+      if (!e || !passthrough) return null;
+      const gl = renderer.getContext();
+      const w = gl.drawingBufferWidth;
+      const h = gl.drawingBufferHeight;
+      const read = () => {
+        const buf = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+        return buf;
+      };
+      const wasOn = occlusion.uniforms.uMaskOn.value;
+      if (!occlude) occlusion.uniforms.uMaskOn.value = 0;
+      effect.render(scene, camera);
+      const a = read();
+      let b: Uint8Array;
+      if (part === "model") {
+        b = e.view.withHidden("model", () => {
+          effect.render(scene, camera);
+          return read();
+        });
+      } else {
+        const was = e.view.group.visible;
+        e.view.group.visible = false;
+        effect.render(scene, camera);
+        b = read();
+        e.view.group.visible = was;
+      }
+      // 背景（この化身を丸ごと描かないフレーム）
+      const wasGroup = e.view.group.visible;
+      e.view.group.visible = false;
+      effect.render(scene, camera);
+      const bg = read();
+      e.view.group.visible = wasGroup;
+      occlusion.uniforms.uMaskOn.value = wasOn;
+      const isPerson = (x: number, y: number) => {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        const i = (y * w + x) * 4;
+        return Math.abs(bg[i] - 0x5a) + Math.abs(bg[i + 1] - 0x6b) + Math.abs(bg[i + 2] - 0x86) <= 30;
+      };
+      const r = 12;
+      let changed = 0;
+      let inside = 0;
+      let outside = 0;
+      let edge = 0;
+      const insideSample: [number, number][] = [];
+      for (let i = 0; i < a.length; i += 4) {
+        if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) <= 24) continue;
+        changed++;
+        const px = (i / 4) % w;
+        const py = Math.floor(i / 4 / w);
+        const samples = [isPerson(px, py), isPerson(px + r, py), isPerson(px - r, py), isPerson(px, py + r), isPerson(px, py - r)];
+        if (samples.every(Boolean)) {
+          inside++;
+          if (inside % 50 === 1 && insideSample.length < 12) insideSample.push([px, h - 1 - py]);
+        } else if (samples.every((x) => !x)) outside++;
+        else edge++;
+      }
+      return { changed, inside, outside, edge, total: w * h, maskOn: occlude ? wasOn : 0, insideSample };
+    },
+    pixelDiff(all = false, hideRemotes = false) {
       if (!selfView) return null;
       const gl = renderer.getContext();
       const w = gl.drawingBufferWidth;
@@ -853,6 +1122,9 @@ if (FAKE_CAM) {
         gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
         return buf;
       };
+      // hideRemotes: 相手の化身を描かずに比べる（相手の化身と重なって自分の化身の見え方が変わるのを除く）
+      const remoteVisible = [...remotes.views.values()].map((e) => [e.view.group, e.view.group.visible] as const);
+      if (hideRemotes) for (const [g] of remoteVisible) g.visible = false;
       effect.render(scene, camera);
       const withKeshin = read();
       const wasVisible = selfView.group.visible;
@@ -863,6 +1135,7 @@ if (FAKE_CAM) {
       const without = read();
       selfView.group.visible = wasVisible;
       if (peripheral) peripheral.points.visible = wasPeripheral;
+      for (const [g, v] of remoteVisible) g.visible = v;
       // 各眼の中の位置を −1..1 に正規化して、中心 50%（幅・高さとも）と外周 20% の帯（各辺から幅・高さの 20%）を数える
       let changed = 0;
       let center = 0;
@@ -897,18 +1170,23 @@ renderer.setAnimationLoop(() => {
     }
   }
   camera.updateMatrixWorld();
+  // マーカー検出をこのフレームで回したか（回すと数 ms かかる。人の形の検出を同じフレームに重ねない）
+  const tMarker = performance.now();
   markerAnchor?.update(now);
+  const markerRan = performance.now() - tMarker > 1;
   if (markerAnchor?.everDetected && !anchor.visible) anchor.visible = true;
   markerFrame.visible = trackOf(now).track === "marker";
   anchor.updateMatrixWorld(true);
   watchTrack(now);
   updateBodyYaw(now);
   updateSelf(now);
+  updateRemotes(now);
+  updateOcclusion(now, markerRan);
   sendPoseIfDue(now);
   updateButton(now);
   updateMessage(now);
   if (document.body.classList.contains("started")) renderHud();
-  warmUpSelfIfPending();
+  warmUpIfPending();
   renderer.info.reset();
   const t0 = performance.now();
   effect.render(scene, camera);

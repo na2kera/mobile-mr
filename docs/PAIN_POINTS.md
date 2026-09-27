@@ -702,3 +702,18 @@
 - **どう対処したか**: タブごとのランダムな session 鍵（`sessionStorage`）を WS の URL に付け、同じ鍵で入ってきたらサーバーが古い接続を `terminate` して化身の番号・on・changedAt・色・直近の pose を引き継ぐ（古い id の leave は全員に配り、古い接続の close では二重に配らない）。きれいに切れた後の再入室も 60 秒以内なら引き継ぐ。満員でも同じ鍵なら入れる。プロトコルを v2 に上げた
 - **SDK ならどう解決するか（案）**: Room サーバーの共通部分（`room-server.ts`）が「接続」と「参加者」を分けて持ち、参加者の id は session 鍵で安定させる（接続が替わっても同じ id）。再接続・置き換え・猶予（TTL）を共通の機能にする
 - **関連**: `server/keshin.ts` の `onJoin` / `onLeave` / `canJoin`、`demos/ex9-1-keshin/keshin-client.ts` の `sessionKey`、`scripts/test-keshin.mjs` の「再接続」
+
+## [2026-09-27] ex9-1 化身（段階 2）: MediaPipe の segmentation mask を three のシェーダーで使うのに、GPU → CPU → GPU の往復と「いまどちらの眼を描いているか」の手作りが要った
+
+- **何が苦しかったか**: 相手の化身を「カメラに写った人の形」で隠すため、PoseLandmarker の segmentation mask を three のマテリアルで読みたい。MediaPipe は自分の WebGL コンテキスト（別 canvas）で推論するので、`MPMask.getAsWebGLTexture()` のテクスチャは three のコンテキストでは使えず、`getAsFloat32Array()` で CPU に読み戻して `DataTexture` に上げ直すしかない（返り値の形の `detectForVideo` はマスクを複製するので `result.close()` も要る）。さらにシェーダーで「画面のこの画素はカメラ画像のどこか」を出すには、背景の cover の変換（`texture.repeat` / `offset`）と「いま描いている眼のビューポート」が要るが、StereoEffect は眼の情報を渡さないので、各メッシュの `onBeforeRender` で `renderer.getCurrentViewport` を uniform に入れる回り道になった。R8 の `DataTexture` は幅が 4 の倍数でないと行がずれる（`unpackAlignment = 1`）
+- **どう対処したか**: 複数人のマスクを CPU で 1 枚の R8 にまとめ（画素ごとの最大）、背景の `texture.matrix` と眼のビューポートを uniform にして、化身の色・深度の前描画・オーラの粒の fragment で同じ判定（ディザで境界をぼかす）を入れた（`keshin-occlusion.ts`）。座標の式は純粋関数（`maskUvFromFragment`、背景の変換は `passthrough-camera.ts` の `coverUvTransform` に切り出し）にして Node でテストし、ヘッドレスでは「画素が人の形の中か外か」を背景の色（フェイクの人の色）で数えて、シェーダーの結果と突き合わせた。
+  前後関係は、最初「本人は必ず手前」として人の形の画素なら全部捨てていたが、相手が向こうを向くと化身は人より手前に来るので間違い（レビュー）。断片のカメラからの距離が持ち主の頭までの距離 − 0.15m より遠いときだけ捨てる形に直した（シェーダーの `cameraPosition` が眼ごとのカメラなので左右で正しい）。PC ではフェイクの人（合成の体を描いて同じ形をマスクに）で確かめ、本物の PoseLandmarker は初期化とマスクの更新まで。**実際の人の輪郭との合い方は実機未確認**
+- **SDK ならどう解決するか（案）**: 「カメラ画像の座標 ↔ 画面の画素（眼ごと）」の変換を SDK の StereoRenderer が uniform ブロックとして全マテリアルに配る（背景の cover・ズーム・眼のビューポート込み）。ML の結果（マスク・深度）は SDK が three と同じコンテキストのテクスチャで受け取れるようにする（MediaPipe に three の GL コンテキストを渡すか、WebGPU で共有）。「人の形で隠す」を標準のオクルージョンの 1 つにする
+- **関連**: `demos/ex9-1-keshin/keshin-occlusion.ts`、`demos/ex9-1-keshin/keshin-math.ts` の `maskUvFromFragment`、`src/shared/passthrough-camera.ts` の `coverUvTransform`、`src/shared/pose-tracker.ts` の `outputSegmentationMasks`
+
+## [2026-09-27] ex9-1 化身（段階 2）: 相手の化身の位置は「相手のアンカーの誤差」と「自分のアンカーの誤差」の両方で跳ぶ
+
+- **何が苦しかったか**: 段階 1 の実機で、マーカーを見直したときに自己位置が最大 1.6m 跳んだ。段階 2 では相手の化身を「相手の申告（相手のマーカー座標系）→ 自分のアンカーで自分のワールド」に置くので、相手の跳びと自分の跳びの両方がそのまま化身の瞬間移動になる。どちらの跳びかは受信側からは区別できない
+- **どう対処したか**: 表示中の位置と向き（自分のワールド）を最新の目標へ時定数 0.25s で寄せる（状態は表示中の値だけ。3m 以上は即座に移す）。跳びの大きさ（目標と表示の差の 1 秒の最大）を HUD とログに出して実機で測る。跳びそのものは減らない（未解決。段階 3 の「見た位置による補正」で相手の位置は直せる見込み）
+- **SDK ならどう解決するか（案）**: 共有座標のアンカーに「世代（見直しで何 m 動いたか）」を持たせ、受信側が自分のアンカーの跳びと相手の申告の跳びを分けて扱えるようにする（自分の跳びは全員の表示を同時に寄せ、相手の跳びは相手の化身だけ寄せる）。08-11 の「座標系の世代」の案と同じ
+- **関連**: `demos/ex9-1-keshin/remote-keshins.ts`、`demos/ex9-1-keshin/keshin-math.ts` の `smoothToward`

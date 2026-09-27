@@ -22,6 +22,11 @@ export type PoseTrackerOptions = {
   inputMaxSideCpu: number;
   canvas?: HTMLCanvasElement;
   modelBuffer?: ArrayBuffer;
+  /**
+   * 人の形のマスク（segmentation mask）も出すか（既定 false。09 は使わない）。ex9-1 の化身を人の形で隠すのに使う。
+   * true にすると結果の segmentationMasks が付き、読み終わったら result.close() で解放する必要がある
+   */
+  outputSegmentationMasks?: boolean;
 };
 
 export type PoseTracker = LandmarkerTracker<PoseLandmarkerResult>;
@@ -48,8 +53,8 @@ export function createPoseTracker(
           minPoseDetectionConfidence: opts.minPoseDetectionConfidence,
           minPosePresenceConfidence: opts.minPosePresenceConfidence,
           minTrackingConfidence: opts.minTrackingConfidence,
-          // セグメンテーションマスクは使わない（毎フレーム GPU → CPU の転送が増える）
-          outputSegmentationMasks: false,
+          // セグメンテーションマスクは既定では使わない（毎フレーム GPU → CPU の転送が増える）
+          outputSegmentationMasks: opts.outputSegmentationMasks ?? false,
         }),
     },
     onProgress,

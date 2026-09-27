@@ -234,3 +234,82 @@ export function effectiveTrack(
   // marker を gyro に移すときも送信元の ageMs（最後にマーカーを見てから送るまで）を足す
   return { track: "gyro", ageMs: (pose.ageMs ?? 0) + since };
 }
+
+// ---- 段階 2: 相手の化身を自分の画面に描く ----
+
+/** マーカー座標系の点 → 自分のワールド（アンカーの位置 + 回転。アンカーは重力で水平化済みなので回転はヨーだけのはず） */
+export function markerToWorld(anchorPos: V3, anchorQuat: Quat, p: V3): V3 {
+  const r = rotateByQuat(anchorQuat, p);
+  return [anchorPos[0] + r[0], anchorPos[1] + r[1], anchorPos[2] + r[2]];
+}
+
+/** 相手の体の向き（マーカー座標系の水平 [x, z]）→ 自分のワールドのヨー（水平面へ射影してから） */
+export function markerFwdToWorldYaw(anchorQuat: Quat, fwd: readonly [number, number]): number {
+  const v = rotateByQuat(anchorQuat, [fwd[0], 0, fwd[1]]);
+  return Math.atan2(v[0], v[2]);
+}
+
+/**
+ * 表示中の値を目標へ寄せる（時定数 tauSec の指数平滑。持つ状態は「表示中の値」1 つだけ）。
+ * 目標が snapM 以上離れていたら寄せずに移す（遠い跳びをゆっくり滑らせると、化身が空中を長く移動して見えるため）。
+ * gap = 寄せる前の目標との差 [m]（跳びの大きさのログ用）
+ */
+export function smoothToward(
+  shown: V3 | null,
+  target: V3,
+  dtSec: number,
+  tauSec: number,
+  snapM: number,
+): { pos: V3; snapped: boolean; gap: number } {
+  if (shown === null) return { pos: [target[0], target[1], target[2]], snapped: true, gap: 0 };
+  const gap = Math.hypot(target[0] - shown[0], target[1] - shown[1], target[2] - shown[2]);
+  if (!(tauSec > 0) || gap >= snapM) return { pos: [target[0], target[1], target[2]], snapped: gap >= snapM, gap };
+  const k = 1 - Math.exp(-Math.max(0, dtSec) / tauSec);
+  return {
+    pos: [shown[0] + (target[0] - shown[0]) * k, shown[1] + (target[1] - shown[1]) * k, shown[2] + (target[2] - shown[2]) * k],
+    snapped: false,
+    gap,
+  };
+}
+
+/**
+ * 相手の化身を描くか・どの薄さで描くか（受信側の見せ方。教訓 2）。
+ *   自分のアンカーが無い → 描かない（相手の位置が自分の世界のどこか分からない）
+ *   pose 無し / none → 描かない、受け取ってから lostMs を超えた（通信切れ）→ 描かない
+ *   marker → 1、gyro → trackFade（staleMs で半分、以降 0.5 で位置を止める）
+ */
+export function remoteDisplay(
+  selfHasAnchor: boolean,
+  pose: { track: "marker" | "gyro" | "none"; ageMs: number | null } | undefined,
+  sinceMs: number,
+  opts: { noPoseMs: number; lostMs: number; staleMs: number },
+): { draw: boolean; fade: number; freeze: boolean; reason: string; track: "marker" | "gyro" | "none" | "nopose"; ageMs: number | null } {
+  const eff = effectiveTrack(pose, sinceMs, opts.noPoseMs);
+  const base = { track: eff.track, ageMs: eff.ageMs };
+  if (!selfHasAnchor) return { ...base, draw: false, fade: 0, freeze: false, reason: "self-no-anchor" };
+  if (eff.track === "nopose") return { ...base, draw: false, fade: 0, freeze: false, reason: "no-pose" };
+  if (eff.track === "none") return { ...base, draw: false, fade: 0, freeze: false, reason: "peer-none" };
+  if (sinceMs > opts.lostMs) return { ...base, draw: false, fade: 0, freeze: false, reason: "lost" };
+  const fade = trackFade(eff.track, eff.ageMs, opts.staleMs) ?? 0;
+  return { ...base, draw: true, fade, freeze: isPositionFrozen(eff.track, eff.ageMs, opts.staleMs), reason: "ok" };
+}
+
+/**
+ * 画面の画素（gl_FragCoord、描画バッファの px・左下原点）→ 人の形のマスクの座標（0..1、**左上原点**）。
+ * 背景の VideoTexture と同じ変換: 眼のビューポート内の位置 p = (frag − vp.xy) / vp.zw → 映像の UV = p × repeat + offset
+ * （passthrough-camera.ts の coverUvTransform。左下原点）→ 上下を反転（マスクの行 0 は画像の上）。
+ * シェーダー（keshin-occlusion.ts の GLSL）と同じ式。範囲外（背景が映像の外 = zoom < 1 の余白）は null
+ */
+export function maskUvFromFragment(
+  frag: readonly [number, number],
+  viewport: readonly [number, number, number, number],
+  repeat: readonly [number, number],
+  offset: readonly [number, number],
+): [number, number] | null {
+  const px = (frag[0] - viewport[0]) / viewport[2];
+  const py = (frag[1] - viewport[1]) / viewport[3];
+  const u = px * repeat[0] + offset[0];
+  const v = py * repeat[1] + offset[1];
+  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+  return [u, 1 - v];
+}

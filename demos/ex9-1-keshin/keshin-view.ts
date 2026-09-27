@@ -10,6 +10,8 @@ import type { KeshinFrameInput, V3 } from "./keshin-math";
 import { createKeshinInstance, fallbackKeshin } from "./keshin-assets";
 import type { KeshinInstance, KeshinSpec, LoadedKeshin } from "./keshin-assets";
 import { WorldAura } from "./keshin-aura";
+import { attachEyeViewport, createOwnerUniforms } from "./keshin-occlusion";
+import type { MaskBinding, MaskUniforms } from "./keshin-occlusion";
 
 export type KeshinViewOptions = {
   mode: "self" | "other";
@@ -31,6 +33,8 @@ export type KeshinViewOptions = {
   auraN: number;
   /** 主観で目から消す距離 [m]（[消える, 見え始める]。他人用は null） */
   nearFade: [number, number] | null;
+  /** カメラに写った人の形で隠す（他人用をスマホに描くとき。段階 2）。null = 隠さない（自分用・俯瞰画面） */
+  mask?: MaskUniforms | null;
 };
 
 export type KeshinUpdate = {
@@ -74,15 +78,20 @@ export class KeshinView {
   /** 直近の発光部分の不透明度 */
   private lastOwn = 0;
 
+  /** 人の形で隠すときの uniform（全員で共有するマスク + この化身の持ち主の頭）。隠さないなら null */
+  private readonly maskBinding: MaskBinding | null;
+
   constructor(spec: KeshinSpec, opts: KeshinViewOptions, loaded: LoadedKeshin | null = null) {
     this.spec = spec;
+    this.maskBinding = opts.mask ? { shared: opts.mask, owner: createOwnerUniforms() } : null;
     // 主観の見え方（前傾・前後）は確認用に後から変えられるよう、自分の写しを持つ
     this.opts = { ...opts };
     this.loaded = loaded ?? fallbackKeshin(spec);
-    this.instance = createKeshinInstance(this.loaded, opts.nearFade, opts.mode === "self" && spec.selfHideFx);
+    this.instance = this.createInstance(this.loaded);
     this.holder.matrixAutoUpdate = false;
     this.holder.add(this.instance.root);
-    this.aura = new WorldAura(opts.auraN, spec.auraColors);
+    this.aura = new WorldAura(opts.auraN, spec.auraColors, this.maskBinding);
+    if (this.maskBinding) attachEyeViewport(this.aura.points, this.maskBinding.shared);
     if (opts.nearFade) {
       // 主観: 目のすぐ近くの粒は消し、渦（自分の頭のまわり）は出さず、柱は肩の高さまで（正面の視界の中心に粒を入れない。
       // 下を見ると体のまわりから立ち上る粒が見える）
@@ -93,6 +102,30 @@ export class KeshinView {
     this.group.add(this.holder, this.aura.points);
     this.holder.visible = false;
     this.aura.points.visible = false;
+  }
+
+  private createInstance(loaded: LoadedKeshin): KeshinInstance {
+    const inst = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx, this.maskBinding);
+    // 人の形で隠すときは、眼ごとのビューポートを描く直前に uniform へ入れる（深度の前描画の複製も含めて）
+    if (this.maskBinding) attachEyeViewport(inst.root, this.maskBinding.shared);
+    return inst;
+  }
+
+  /** 足元・腰のオーラを描いているか（出現の最初と消える終わりはモデルが見えずオーラだけの時間がある） */
+  get auraVisible(): boolean {
+    return this.aura.points.visible;
+  }
+
+  /** 確認用: モデルかオーラだけを一時的に隠す（fn の間だけ） */
+  withHidden<T>(part: "model" | "aura", fn: () => T): T {
+    const o = part === "model" ? this.holder : this.aura.points;
+    const was = o.visible;
+    o.visible = false;
+    try {
+      return fn();
+    } finally {
+      o.visible = was;
+    }
   }
 
   get isFallback(): boolean {
@@ -110,7 +143,7 @@ export class KeshinView {
     this.disposeFallback();
     this.loaded = loaded;
     this.warmPending = "model";
-    this.instance = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx);
+    this.instance = this.createInstance(loaded);
     this.holder.add(this.instance.root);
   }
 
@@ -215,6 +248,11 @@ export class KeshinView {
       leanDeg: this.opts.mode === "self" ? this.opts.leanDeg : 0,
     };
     this.lastFrame = frame;
+    // 人の形の前後の判定に使う持ち主の頭（ワールド。親がシーンでもアンカーでも）
+    if (this.maskBinding) {
+      this.group.updateWorldMatrix(true, false);
+      this.maskBinding.owner.uOwnerHead.value.set(u.head[0], u.head[1], u.head[2]).applyMatrix4(this.group.matrixWorld);
+    }
     // オーラ（柱 + 渦）: 本人の足元・体の向きの枠
     const auraOn = u.aura && !visual.hidden && visual.auraK > 0.001;
     this.aura.points.visible = auraOn;
