@@ -863,7 +863,15 @@ try {
     return { ok: st && st.me, st };
   }, 40000);
   const qId = sQ?.st?.me;
+  // P の化身が付いている人を先に A の位置へ（一度付けた人は画像の上の位置で追いかけるので、人が瞬間移動すると「見失った」扱いで
+  // 保持の後に付け直す）。そこへ B が入り、Q が化身を出す
+  await pM.eval("window.__keshinMirror.setFakePeople([{ head: [-0.7, 0.25, -2.8], yawDeg: 0 }])");
+  await waitUntil(async () => {
+    const e = (await mirrorState())?.entries.find((x) => x.id === pId);
+    return { ok: e && e.drawn && e.head && e.head[0] < -0.5 && e.assign?.reason === "tracked" };
+  }, 5000, 100);
   await pM.eval("window.__keshinMirror.setFakePeople([{ head: [-0.7, 0.25, -2.8], yawDeg: 0 }, { head: [0.7, 0.25, -3.6], yawDeg: 0 }])");
+  await sleep(300);
   await pP2.eval("document.querySelector('#keshin-button').click()");
   const two = await waitUntil(async () => {
     const st = await mirrorState();
@@ -875,7 +883,7 @@ try {
   const twoSt = await mirrorState();
   const aE = twoSt.entries.find((x) => x.id === pId);
   const bE = twoSt.entries.find((x) => x.id === qId);
-  check("鏡: 2 人・化身 2 体（参加順 P → 手前の A、Q → 奥の B）", two?.ok && aE.head[0] < -0.5 && bE.head[0] > 0.5, JSON.stringify({ a: aE?.head, b: bE?.head }));
+  check("鏡: 2 人・化身 2 体（P は付いていた A のまま、後から出した Q は残った B）", two?.ok && aE.head[0] < -0.5 && bE.head[0] > 0.5, JSON.stringify({ a: aE?.head, b: bE?.head }));
   await pM.shot("mirror-4-two.png");
   await pM.eval("window.__keshinMirror.setFakePeople([{ head: [0.7, 0.25, -3.6], yawDeg: 0 }])");
   const samples = [];
