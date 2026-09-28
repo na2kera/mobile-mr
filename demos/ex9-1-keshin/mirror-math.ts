@@ -258,6 +258,19 @@ export function imageDist(a: readonly [number, number], b: readonly [number, num
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
+/**
+ * 前回の人と同じ人とみなす画像の上の距離は、最後に見えてからの時間で広げる: min(matchImg, max(MIRROR_MIN_IMG, MIRROR_IMG_SPEED_PER_S × 経過))。
+ * 続けて見えている（経過 = 結果の間隔）ときは狭く、Pose が 1〜2 回その人を取りこぼしても、隣に並んだ人（3m で肩を並べると画像の上で 0.12〜0.2）へ
+ * 移らない。長く見失うほど広げ、0.3 秒で matchImg（0.15）に届く。状態は増やさない（経過は「最後に見えた時刻」から出す）
+ */
+export const MIRROR_MIN_IMG = 0.05;
+/** 画像の上で人が動ける速さの見込み [正規化 / 秒]（3m で横へ約 2m/s、1.5m で約 1m/s） */
+export const MIRROR_IMG_SPEED_PER_S = 0.5;
+export function mirrorImgGate(matchImg: number, sinceSeenMs: number): number {
+  const t = Number.isFinite(sinceSeenMs) ? Math.max(0, sinceSeenMs) : Infinity;
+  return Math.min(matchImg, Math.max(MIRROR_MIN_IMG, (MIRROR_IMG_SPEED_PER_S * t) / 1000));
+}
+
 /** 3D の距離をコストに足すときの重み（画像の上の距離 [正規化] に対して 1m あたり）。3D は補助（同じくらいの画像の距離のときの決め手）だけ */
 export const MIRROR_DEPTH_COST_PER_M = 0.05;
 
@@ -269,6 +282,8 @@ export type MirrorAssignInfo = {
   dImg: number | null;
   /** 前回の人の画像の位置から、2 番目に近い人（付けた人以外で一番近い人）までの画像の上の距離（しきい値を決める材料） */
   dImg2: number | null;
+  /** この結果で使った画像の上の距離のしきい値（mirrorImgGate。最後に見えてからの時間で広がる） */
+  gate: number | null;
   /** 前回の人の頭から、付けた人の頭までの 3D の距離 [m]（補助） */
   d3: number | null;
 };
@@ -276,11 +291,11 @@ export type MirrorAssignInfo = {
 /**
  * 割り当て（前の結果との対応づけ付き）: 1 人の人には化身を 1 体だけ付ける。一度付けた人は画像の上の頭の位置で追いかけ、見えている間は付け替えない。
  *   1. 前回その化身を付けていた人（last。見失って消えるまでの間だけ持つ）と、今回の人を画像の上の頭の位置で対応づける:
- *      画像の上の距離が matchImg 以内の組の中から、組の数が最大 → コスト（画像の上の距離 + 3D の距離 × MIRROR_DEPTH_COST_PER_M）の合計が最小
+ *      画像の上の距離が mirrorImgGate（最後に見えてからの時間で広がり、最大 matchImg）以内の組の中から、組の数が最大 → コスト（画像の上の距離 + 3D の距離 × MIRROR_DEPTH_COST_PER_M）の合計が最小
  *      （3D の距離は Pose の距離の推定が数十 cm ぶれるので補助だけ。ぶれで対応が外れて近い順に選び直すと、同じくらいの距離の 2 人の間で行き来する）
  *   2. 付かなかった化身のうち、前回の人がいない（初めて）か、見失って holdMs を過ぎたものにだけ、残った人を近い順（深度の小さい順）に参加順で付ける。
  *      前回の人を見失ってまだ holdMs 以内なら付け替えない（hold。その人が戻れば 1 で同じ化身に戻る）
- *   3. 付かなかった化身のうち、前回の人の画像の位置の近く（matchImg 以内）に今回の人がいる（= その人は別の化身に付いた）ものは displaced:
+ *   3. 付かなかった化身のうち、前回の人の画像の位置の近く（mirrorImgGate 以内）に今回の人がいる（= その人は別の化身に付いた）ものは displaced:
  *      保持せずにすぐフェードに入れる（同じ人の所に 2 体重ならないように）
  * 持つ状態は化身ごとの「前回の人の画像の上の位置（と 3D の頭）と、最後に見えた時刻」だけ（教訓 4）。sinceSeenMs = いま − 最後に見えた時刻
  */
@@ -290,14 +305,15 @@ export function assignMirrorTracked(
   opts: { matchImg: number; holdMs: number },
 ): { assign: Map<string, number>; displaced: Set<string>; info: Map<string, MirrorAssignInfo> } {
   const d3 = (a: V3, b: V3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const gateOf = (pl: (typeof players)[number]) => mirrorImgGate(opts.matchImg, pl.sinceSeenMs);
   const tracked = assignMaxMin(
     players.map((p) => p.id),
     persons.length,
     (id, i) => {
-      const last = players.find((p) => p.id === id)!.last;
-      if (!last) return null;
-      const di = imageDist(last.img, persons[i].img);
-      return di <= opts.matchImg ? di + d3(last.head, persons[i].head) * MIRROR_DEPTH_COST_PER_M : null;
+      const pl = players.find((p) => p.id === id)!;
+      if (!pl.last) return null;
+      const di = imageDist(pl.last.img, persons[i].img);
+      return di <= gateOf(pl) ? di + d3(pl.last.head, persons[i].head) * MIRROR_DEPTH_COST_PER_M : null;
     },
   );
   const assign = new Map<string, number>();
@@ -315,7 +331,7 @@ export function assignMirrorTracked(
     .sort((a, b) => a[0] - b[0] || a[1] - b[1])
     .map(([, i]) => i);
   const displaced = new Set<string>();
-  const nearOther = (pl: (typeof players)[number]) => !!pl.last && persons.some((p) => imageDist(pl.last!.img, p.img) <= opts.matchImg);
+  const nearOther = (pl: (typeof players)[number]) => !!pl.last && persons.some((p) => imageDist(pl.last!.img, p.img) <= gateOf(pl));
   const reasonOf = new Map<string, MirrorAssignInfo["reason"]>();
   for (const pl of players) {
     if (assign.has(pl.id)) {
@@ -354,7 +370,7 @@ export function assignMirrorTracked(
       dImg2 = ds.find(([, k]) => !mine || k !== mine[1])?.[0] ?? null;
       dd = mine ? d3(pl.last.head, persons[mine[1]].head) : null;
     }
-    info.set(pl.id, { reason: reasonOf.get(pl.id) ?? "none", dImg, dImg2, d3: dd });
+    info.set(pl.id, { reason: reasonOf.get(pl.id) ?? "none", dImg, dImg2, d3: dd, gate: pl.last ? gateOf(pl) : null });
   }
   return { assign, displaced, info };
 }

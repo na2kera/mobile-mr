@@ -59,7 +59,8 @@ const MIRROR_SNAP_M = numParam("mirrorSnapM", 1.5, { min: 0.1, max: 100 });
 const HOLD_MS = numParam("mirrorHoldMs", 500, { min: 0, max: 60000 });
 const FADE_MS = numParam("mirrorFadeMs", 500, { min: 1, max: 60000 });
 /**
- * 前の結果の人と同じ人とみなす、画像の上の頭の距離（正規化座標。画像の幅・高さを 1 とする）。3D の頭の距離は Pose の距離の推定が
+ * 前の結果の人と同じ人とみなす、画像の上の頭の距離の上限（正規化座標。画像の幅・高さを 1 とする。最後に見えてからの時間で 0.05 から
+ * ここまで広げる = mirror-math.ts の mirrorImgGate）。3D の頭の距離は Pose の距離の推定が
  * 数十 cm ぶれて対応が外れる（実機で 2 人の間を行き来した）ので、画像の上の位置を主にする（3D は同じくらいのときの決め手だけ）
  */
 const MATCH_IMG = numParam("mirrorMatchImg", 0.15, { min: 0.01, max: 1 });
@@ -640,10 +641,10 @@ let renderMsEma = 0;
 function describePersons(): string {
   return persons.map((p, i) => `#${i}:d${p.depth.toFixed(2)}/yaw${THREE.MathUtils.radToDeg(yawOfForward(p.fwd)).toFixed(0)}(${p.fwdSource})/floor${p.floorY === null ? "-" : p.floorY.toFixed(2)}/img${p.img[0].toFixed(2)},${p.img[1].toFixed(2)}`).join(" ") || "-";
 }
-/** 割り当ての判断に使った値: 前回の人から付けた人までの画像の上の距離 dImg・2 番目に近い人までの dImg2・3D の距離 d3（しきい値を決める材料） */
+/** 割り当ての判断に使った値: 前回の人から付けた人までの画像の上の距離 dImg・2 番目に近い人までの dImg2・その結果のしきい値 gate・3D の距離 d3（しきい値を決める材料） */
 function describeAssignValues(i: MirrorAssignInfo | null): string {
   const f = (v: number | null | undefined, d: number) => (v === null || v === undefined ? "-" : v.toFixed(d));
-  return `dImg=${f(i?.dImg, 3)} dImg2=${f(i?.dImg2, 3)} d3=${f(i?.d3, 2)}`;
+  return `dImg=${f(i?.dImg, 3)} dImg2=${f(i?.dImg2, 3)} gate=${f(i?.gate, 3)} d3=${f(i?.d3, 2)}`;
 }
 function describeEntries(): string {
   return (
