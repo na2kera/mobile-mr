@@ -9,9 +9,9 @@
 import * as THREE from "three";
 import type { KeshinPlayer } from "../../src/shared/keshin-protocol";
 import { keshinTimeline } from "../../src/shared/keshin-timeline";
-import { effectiveTrack, markerFwdToWorldYaw, markerToWorld, remoteDisplay, smoothToward, smoothYaw, worldToMarker } from "./keshin-math";
-import { angleFromEyeDeg, correctionAt, hybridHead, matchRemotes, planRemote, pruneCorr } from "./keshin-hybrid";
-import type { CamDetection, CorrSample, MatchReason } from "./keshin-hybrid";
+import { effectiveTrack, forwardOfYaw, markerFwdToWorldYaw, markerToWorld, remoteDisplay, smoothToward, smoothYaw, worldToMarker } from "./keshin-math";
+import { angleFromEyeDeg, correctionAt, hybridHead, matchRemotesDiag, planRemote, pruneCorr } from "./keshin-hybrid";
+import type { CamDetection, CorrSample, MatchInfo, MatchReason } from "./keshin-hybrid";
 import type { Quat, V3 } from "./keshin-math";
 import { KESHIN_SPECS } from "./keshin-assets";
 import type { LoadedKeshin } from "./keshin-assets";
@@ -49,6 +49,10 @@ export type RemoteOptions = {
   cameraFadeMs: number;
   /** 前の結果の人と位置で結ぶしきい値 [m]（?matchM=） */
   matchM: number;
+  /** 申告の体の向きとこれを超えて違う人には新しく結ばない [deg]（?facingMaxDeg=） */
+  facingMaxDeg: number;
+  /** 補正を学べている相手は、申告 + 補正からこれより離れた人に新しく結ばない [m]（?corrGateM=） */
+  corrGateM: number;
   /** 距離の混ぜ方: 申告までの距離の重み（?distW=。申告寄り） */
   distW: number;
   /** 補正を平均する窓 [s]（?corrWindowSec=）と、見えなくなってから 0 へ弱める時間 [s]（?corrDecaySec=） */
@@ -101,6 +105,8 @@ type RemoteEntry = {
   declDist: number | null;
   camDist: number | null;
   dirDeg: number | null;
+  /** 直近の Pose の結果での判断に使った値（結ばなかった理由・検出ごとの体の向きの差・申告 + 補正からの距離）。HUD とログ用 */
+  matchInfo: MatchInfo | null;
 };
 
 const tmpQuat = new THREE.Quaternion();
@@ -196,6 +202,7 @@ export class RemoteKeshins {
         declDist: null,
         camDist: null,
         dirDeg: null,
+        matchInfo: null,
       });
     }
   }
@@ -231,22 +238,43 @@ export class RemoteKeshins {
     players: ReadonlyMap<string, RemotePlayerInput>,
     ctx: { anchor: THREE.Object3D | null; eye: V3; selfAnchorFresh: boolean },
   ) {
+    const prevResultMs = this.lastResultMs;
     this.lastResultMs = now;
     const a = this.anchorOf(ctx.anchor);
     const remotes = [...this.views.values()].map((e) => {
       const p = players.get(e.id);
       const pose = p?.info.pose;
       const decl = a && pose?.pos ? markerToWorld(a.pos, a.quat, [pose.pos[0], pose.pos[1], pose.pos[2]]) : null;
+      // 申告の体の向き（位置が古くても向きは相手のジャイロで正しい）を自分のワールドへ
+      const declFwd = a && pose?.fwd ? forwardOfYaw(markerFwdToWorldYaw(a.quat, pose.fwd)) : null;
+      // 補正を学べている（最後に見えてから corrDecaySec 以内）なら、最新の申告位置 + 学んだ補正（弱める前）を予測位置にする
+      let corrPred: V3 | null = null;
+      if (a && pose?.pos) {
+        const c = correctionAt(e.corr, now, this.opts.corrWindowSec, this.opts.corrDecaySec, this.opts.corrRecentSec, e.lastCamSeenMs);
+        if (c.n > 0 && c.k > 0) corrPred = markerToWorld(a.pos, a.quat, [pose.pos[0] + c.raw[0], pose.pos[1] + c.raw[1], pose.pos[2] + c.raw[2]]);
+      }
       return {
         id: e.id,
         declared: decl,
         fresh: !!decl && ctx.selfAnchorFresh && this.declaredFresh(p, now),
         last: e.lastCamHead && now - e.lastCamSeenMs <= 3000 ? e.lastCamHead : null,
+        // 前回の結果でも結んでいた（続けて追いかけている）
+        continuing: Number.isFinite(prevResultMs) && e.lastCamSeenMs === prevResultMs,
+        declFwd,
+        corrPred,
       };
     });
-    const m = matchRemotes(detections, remotes, ctx.eye, { matchDeg: this.opts.matchDeg, matchM: this.opts.matchM, onlyOneMaxDeg: this.opts.onlyOneMaxDeg });
+    const res = matchRemotesDiag(detections, remotes, ctx.eye, {
+      matchDeg: this.opts.matchDeg,
+      matchM: this.opts.matchM,
+      onlyOneMaxDeg: this.opts.onlyOneMaxDeg,
+      facingMaxDeg: this.opts.facingMaxDeg,
+      corrGateM: this.opts.corrGateM,
+    });
+    const m = res.matches;
     for (const r of remotes) {
       const e = this.views.get(r.id)!;
+      e.matchInfo = res.info.get(r.id) ?? null;
       const hit = m.get(r.id);
       if (!hit) {
         e.cam = null;
@@ -271,10 +299,17 @@ export class RemoteKeshins {
         e.corr = pruneCorr(e.corr, this.opts.corrWindowSec);
       }
     }
-    const key = remotes.map((r) => `${r.id}:${m.get(r.id)?.reason ?? "-"}`).join(",");
+    // 結ばなかった相手は理由も（-(facing) / -(corr-gate) / -(no-facing) / -(dir) / -(no-candidate)）
+    const key = remotes
+      .map((r) => {
+        const why = res.info.get(r.id)?.reject;
+        return `${r.id}:${m.get(r.id)?.reason ?? `-${why ? `(${why})` : ""}`}`;
+      })
+      .join(",");
     if (key !== this.lastMatchKey) {
       this.lastMatchKey = key;
-      this.log("remote-match", `${key} persons=${detections.length}`);
+      const vals = remotes.map((r) => `${r.id}[${this.describeMatchValues(res.info.get(r.id) ?? null)}]`).join(" ");
+      this.log("remote-match", `${key} persons=${detections.length} ${vals}`);
     }
   }
 
@@ -455,11 +490,17 @@ export class RemoteKeshins {
     });
   }
 
-  /** 段階 3 の B の診断: 出どころ・カメラの推定距離・申告距離・補正の大きさと窓の件数・方向のずれ・結び方 */
+  /** 段階 3 の B の診断: 出どころ・カメラの推定距離・申告距離・補正の大きさと窓の件数・方向のずれ・結び方・結ばなかった理由と判断に使った値 */
   private describeHybrid(e: RemoteEntry): string {
     const c = correctionAt(e.corr, performance.now(), this.opts.corrWindowSec, this.opts.corrDecaySec, this.opts.corrRecentSec, e.lastCamSeenMs);
     const f = (v: number | null, d = 2) => (v === null ? "-" : v.toFixed(d));
-    return `src=${e.source} camD=${f(e.camDist)} decD=${f(e.declDist)} corr=${Math.hypot(...c.raw).toFixed(2)}m×${c.k.toFixed(2)} n=${c.n} dAng=${f(e.dirDeg, 0)}deg match=${e.matchReason}`;
+    return `src=${e.source} camD=${f(e.camDist)} decD=${f(e.declDist)} corr=${Math.hypot(...c.raw).toFixed(2)}m×${c.k.toFixed(2)} n=${c.n} dAng=${f(e.dirDeg, 0)}deg match=${e.matchReason} why=${e.matchInfo?.reject ?? "-"} ${this.describeMatchValues(e.matchInfo)}`;
+  }
+
+  /** 検出ごとの体の向きの差 fDeg=[..] と申告 + 補正からの距離 corrM=[..]（次の実機テストでしきい値を決める材料） */
+  private describeMatchValues(info: MatchInfo | null): string {
+    const list = (xs: (number | null)[] | undefined, d: number) => (xs && xs.length ? xs.map((v) => (v === null ? "-" : v.toFixed(d))).join(",") : "-");
+    return `fDeg=${list(info?.facingDeg, 0)} corrM=${list(info?.corrM, 2)}`;
   }
 
   /** 実機ログの snapshot 用（1 行に収める） */
