@@ -20,7 +20,7 @@ import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshi
 import type { BodyLandmarkLike, PersonShape } from "./keshin-occlusion";
 import { describeLook, lookFromParams } from "./keshin-look";
 import { probeDissolve, probeStream } from "./keshin-probe";
-import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility } from "./mirror-math";
+import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility, withNearImg } from "./mirror-math";
 import type { FakeMirrorPerson, MirrorAssignInfo, MirrorPerson } from "./mirror-math";
 
 // ex9-1 鏡モード（mirror.html）: iPad を前面カメラで自分を映す鏡にして、化身を確かめる。
@@ -29,7 +29,7 @@ import type { FakeMirrorPerson, MirrorAssignInfo, MirrorPerson } from "./mirror-
 //   - three のカメラは原点に固定（iPad はスタンドに固定。ジャイロなし）。カメラ座標系 = ワールド。描画の FOV は背景に合わせる（backgroundFovDeg）
 //   - 鏡: canvas を CSS の scaleX(-1) で背景と 3D をまとめて反転する（HUD・文字は反転しない）
 //   - 誰の化身か: 最初は見えている人を近い順に、化身を出しているプレイヤーの参加順に割り当てる。一度付けた人は画像の上の頭の位置で追いかけ、
-//     見えている間は付け替えない（見失って保持の時間が過ぎてから、残った人へ）。mirror-math.ts の assignMirrorTracked
+//     見えている間は付け替えない（見失って保持の時間が過ぎてから、残った人へ。保持の間は隣の人に届かない範囲でだけ捕まえ直す）。mirror-math.ts の assignMirrorTracked
 //   - 見失ったら ?mirrorHoldMs=500 だけ最後の位置で保持してから ?mirrorFadeMs=500 で消す。見つけ直したらすぐ出す
 //   - 人の形で隠す処理（持ち主の頭より奥だけ）はスマホの段階 2 と同じ（keshin-occlusion.ts。持ち主の頭は Pose で出した頭）
 
@@ -290,7 +290,8 @@ function onPoses(landmarks: BodyLandmarkLike[][], world: BodyLandmarkLike[][], n
     const p = mirrorPersonFromPose(landmarks[i], world[i] ?? [], m, { bodyScale: BODY_SCALE, minVisibility: MIN_VIS, maxDepthM: MAX_DEPTH_M });
     if (p) found.push(p);
   }
-  persons = found;
+  // 人ごとに、同じ結果の隣の人までの画像の上の距離を付ける（付けた人の値は「前回の人」として残り、見失った間の付け替えを防ぐ）
+  persons = withNearImg(found);
   personsAtMs = now;
   if (found.length !== lastPersonCount) {
     logEvent(found.length > lastPersonCount ? "person-found" : "person-lost", `persons ${lastPersonCount}→${found.length}${found.length ? ` depth=${found.map((p) => p.depth.toFixed(2)).join(",")}` : ""}`);
@@ -417,7 +418,8 @@ let lastAssignKey = "";
 /**
  * Pose の結果が届くたびに、見えている人を化身の出ているプレイヤーへ割り当てる（mirror-math.ts の assignMirrorTracked）。
  * 1 人の人には化身を 1 体だけ。前の結果で付けていた人（画像の上の頭が ?mirrorMatchImg= 以内）には同じ化身を付け続け、
- * その人を見失っても ?mirrorHoldMs= の間はほかの人へ付け替えない。持つ状態は化身ごとの「前回の人（target）と最後に見えた時刻」だけ
+ * その人を見失っても ?mirrorHoldMs= の間はほかの人へ付け替えない（その間に同じ人とみなす範囲は、前回の位置から隣の人までの距離 × 0.5 以下）。
+ * 持つ状態は化身ごとの「前回の人（target。そのときの隣の人までの距離 nearImg を含む）と最後に見えた時刻」だけ
  */
 function assignNow(now: number) {
   const act = activePlayers(now);
@@ -427,7 +429,7 @@ function assignNow(now: number) {
       const e = entries.get(p.info.id);
       // 前回の人の位置は、見失って消えるまでの間だけ使う
       const alive = e && e.target && now - e.lastSeenMs <= HOLD_MS + FADE_MS;
-      return { id: p.info.id, last: alive ? { img: e.target!.img, head: e.target!.head } : null, sinceSeenMs: e ? now - e.lastSeenMs : Infinity };
+      return { id: p.info.id, last: alive ? { img: e.target!.img, head: e.target!.head, nearImg: e.target!.nearImg ?? null } : null, sinceSeenMs: e ? now - e.lastSeenMs : Infinity };
     }),
     { matchImg: MATCH_IMG, holdMs: HOLD_MS },
   );

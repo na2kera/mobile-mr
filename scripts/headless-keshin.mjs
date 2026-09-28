@@ -1169,6 +1169,33 @@ try {
   // 結ばなかったときの理由は上の「体の向きが 90° 違う人」の確認で見ている（最初の pose が届く前の no-facing は届く順番次第なので確かめない）
   const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:(only-one|declared-dir|tracked) `).test(l)) ?? "";
   check("段階 3: 結び方と判断に使った値（fDeg / corrM）がログに出る（event=remote-match）", /persons=\d+ \S+\[fDeg=\S+ corrM=\S+\]/.test(matchLog), matchLog);
+  // 自分のアンカーが無いうち（マーカーを見ていない）: 化身を出している相手（V3）1 人・検出 1 人なら、向きを確かめずに結ぶ（only-one-unchecked）。
+  // V4 は抜ける（化身を出している相手を 1 人に）。A3 は化身を出していない相手として残る。合成の人は V3 の申告の向きと関係なく横を向かせる
+  clearInterval(v4.timer);
+  v4.ws.close();
+  await sleep(800);
+  const pN3 = await newWindow("A3-noanchor", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&markerMm=600&room=${ROOM3}&remoteLog=0&fakeperson=1&fakeCamPos=0.3,0,3.6&fakeYaw=180&name=N3`);
+  await waitUntil(async () => {
+    const st = await phoneState(pN3);
+    return { ok: st && st.me && st.track === "none" };
+  }, 40000);
+  await pN3.eval("window.__keshin.setFakeBodies([{ head: [0.3, 0, 6.2], fwd: [1, 0] }])");
+  const un = await waitUntil(async () => {
+    const st = await phoneState(pN3);
+    const r = (await pN3.eval("window.__keshin.remoteState()")).find((x) => x.id === v3Id);
+    // 最初の結果で only-one-unchecked、以後は続けて追いかける tracked（only-one と同じ）
+    return { ok: st?.track === "none" && r && (r.matchReason === "only-one-unchecked" || r.matchReason === "tracked") && r.drawn && r.source === "camera", r, st };
+  }, 15000);
+  const hudN3 = await pN3.eval("document.querySelector('#hud')?.textContent ?? ''");
+  const hudV3 = (hudN3.match(new RegExp(`\\(${v3Id}\\) #\\d+on[^]*?match=\\S+ why=\\S+`)) ?? [""])[0];
+  const logN3 = pN3.logs.find((l) => /event=remote-match/.test(l) && l.includes(`${v3Id}:only-one-unchecked`)) ?? "";
+  check(
+    "段階 3・自分のアンカーが無いうち: 化身を出している相手 1 人・検出 1 人なら向きを確かめずに結び（最初は only-one-unchecked、以後は tracked）、化身を出す（HUD とログに結び方）",
+    un?.ok && /match=(only-one-unchecked|tracked) why=-$/.test(hudV3) && logN3 !== "",
+    JSON.stringify({ r: un?.r && { match: un.r.matchReason, drawn: un.r.drawn, src: un.r.source, why: un.r.matchInfo?.reject }, track: un?.st?.track, hud: hudV3.slice(-40), log: logN3.slice(0, 160) }),
+  );
+  await browser.send("Target.closeTarget", { targetId: pN3.targetId });
+  pages.splice(pages.indexOf(pN3), 1);
   await ov3.eval("window.__keshinOverview.setView([3.6, 2.6, 5.4], [0.2, -0.3, 1.8])");
   await sleep(400);
   await ov3.shot("stage3-overview.png");

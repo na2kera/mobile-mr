@@ -262,6 +262,7 @@ export class RemoteKeshins {
         continuing: Number.isFinite(prevResultMs) && e.lastCamSeenMs === prevResultMs,
         declFwd,
         corrPred,
+        on: !!p?.info.on,
       };
     });
     const res = matchRemotesDiag(detections, remotes, ctx.eye, {
@@ -270,6 +271,8 @@ export class RemoteKeshins {
       onlyOneMaxDeg: this.opts.onlyOneMaxDeg,
       facingMaxDeg: this.opts.facingMaxDeg,
       corrGateM: this.opts.corrGateM,
+      // 自分のアンカーが無い間は、化身を出している相手 1 人・検出 1 人を向きを確かめずに結ぶ（only-one-unchecked）
+      selfAnchor: a !== null,
     });
     const m = res.matches;
     for (const r of remotes) {
@@ -311,6 +314,19 @@ export class RemoteKeshins {
       const vals = remotes.map((r) => `${r.id}[${this.describeMatchValues(res.info.get(r.id) ?? null)}]`).join(" ");
       this.log("remote-match", `${key} persons=${detections.length} ${vals}`);
     }
+  }
+
+  /**
+   * 自分のアンカーが大きく変わった（マーカーを見直した補正量 Δ が ?corrResetM= を超えた）ときに呼ぶ。補正はマーカー座標系で持っているので、
+   * 古いアンカーで学んだ補正は新しいアンカーでは別の所を指す（補正の関門が本人を断る）。全員の補正の窓を捨てる（見えている相手はすぐ学び直す）
+   */
+  resetCorrections(detail: string) {
+    let n = 0;
+    for (const e of this.views.values()) {
+      if (e.corr.length > 0) n++;
+      e.corr = [];
+    }
+    this.log("corr-reset", `${detail} remotes=${n}`);
   }
 
   private anchorOf(anchor: THREE.Object3D | null): { pos: V3; quat: Quat } | null {

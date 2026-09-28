@@ -43,6 +43,11 @@ export type MirrorPerson = {
    * （深度の推定は体の大きさの仮定で数十 cm ぶれるが、画像の上の位置はほとんどぶれない）
    */
   img: [number, number];
+  /**
+   * 同じ結果の中で、ほかの人までの画像の上の一番近い距離（隣の人。いなければ null）。withNearImg で付ける。
+   * 付けた人のこの値は「前回の人」の一部として残り、見失った間に隣の人へ付け替えない範囲に使う（assignMirrorTracked）
+   */
+  nearImg?: number | null;
 };
 
 export type MirrorPersonOptions = {
@@ -271,6 +276,24 @@ export function mirrorImgGate(matchImg: number, sinceSeenMs: number): number {
   return Math.min(matchImg, Math.max(MIRROR_MIN_IMG, (MIRROR_IMG_SPEED_PER_S * t) / 1000));
 }
 
+/**
+ * 保持の間（最後に見えてから holdMs 以内）に同じ人とみなす範囲は、広げた範囲（mirrorImgGate）と
+ * 「前回の位置から、ほかの人までの一番近い距離 × MIRROR_HOLD_NEAR_K」の小さい方（隣の人には届かない）。
+ * ほかの人 = 今回の結果のほかの人と、前回見えたときの隣の人（前回の人の nearImg）。元の人が消えて隣の人だけが残っても、保持の間は付け替えない
+ */
+export const MIRROR_HOLD_NEAR_K = 0.5;
+
+/** 各人に、同じ結果のほかの人までの画像の上の一番近い距離（nearImg）を付けた写しを返す */
+export function withNearImg<T extends { img: readonly [number, number] }>(persons: readonly T[]): (T & { nearImg: number | null })[] {
+  return persons.map((p, i) => {
+    let near = Infinity;
+    persons.forEach((q, k) => {
+      if (k !== i) near = Math.min(near, imageDist(p.img, q.img));
+    });
+    return { ...p, nearImg: Number.isFinite(near) ? near : null };
+  });
+}
+
 /** 3D の距離をコストに足すときの重み（画像の上の距離 [正規化] に対して 1m あたり）。3D は補助（同じくらいの画像の距離のときの決め手）だけ */
 export const MIRROR_DEPTH_COST_PER_M = 0.05;
 
@@ -282,7 +305,7 @@ export type MirrorAssignInfo = {
   dImg: number | null;
   /** 前回の人の画像の位置から、2 番目に近い人（付けた人以外で一番近い人）までの画像の上の距離（しきい値を決める材料） */
   dImg2: number | null;
-  /** この結果で使った画像の上の距離のしきい値（mirrorImgGate。最後に見えてからの時間で広がる） */
+  /** この結果で使った画像の上の距離のしきい値（mirrorImgGate。最後に見えてからの時間で広がる。保持の間はほかの人までの距離 × 0.5 以下に狭める） */
   gate: number | null;
   /** 前回の人の頭から、付けた人の頭までの 3D の距離 [m]（補助） */
   d3: number | null;
@@ -291,7 +314,9 @@ export type MirrorAssignInfo = {
 /**
  * 割り当て（前の結果との対応づけ付き）: 1 人の人には化身を 1 体だけ付ける。一度付けた人は画像の上の頭の位置で追いかけ、見えている間は付け替えない。
  *   1. 前回その化身を付けていた人（last。見失って消えるまでの間だけ持つ）と、今回の人を画像の上の頭の位置で対応づける:
- *      画像の上の距離が mirrorImgGate（最後に見えてからの時間で広がり、最大 matchImg）以内の組の中から、組の数が最大 → コスト（画像の上の距離 + 3D の距離 × MIRROR_DEPTH_COST_PER_M）の合計が最小
+ *      画像の上の距離が mirrorImgGate（最後に見えてからの時間で広がり、最大 matchImg）以内の組の中から、組の数が最大 → コスト（画像の上の距離 + 3D の距離 × MIRROR_DEPTH_COST_PER_M）の合計が最小。
+ *      保持の間（sinceSeenMs ≤ holdMs）は、範囲を「前回の位置からほかの人（今回の結果のほかの人・前回見えたときの隣の人 last.nearImg）までの
+ *      一番近い距離 × MIRROR_HOLD_NEAR_K」以下に狭める（元の人が消えて隣の人だけが残っても、保持の間は隣の人を tracked にしない）
  *      （3D の距離は Pose の距離の推定が数十 cm ぶれるので補助だけ。ぶれで対応が外れて近い順に選び直すと、同じくらいの距離の 2 人の間で行き来する）
  *   2. 付かなかった化身のうち、前回の人がいない（初めて）か、見失って holdMs を過ぎたものにだけ、残った人を近い順（深度の小さい順）に参加順で付ける。
  *      前回の人を見失ってまだ holdMs 以内なら付け替えない（hold。その人が戻れば 1 で同じ化身に戻る）
@@ -301,11 +326,21 @@ export type MirrorAssignInfo = {
  */
 export function assignMirrorTracked(
   persons: readonly { head: V3; depth: number; img: readonly [number, number] }[],
-  players: readonly { id: string; last: { img: readonly [number, number]; head: V3 } | null; sinceSeenMs: number }[],
+  players: readonly { id: string; last: { img: readonly [number, number]; head: V3; nearImg?: number | null } | null; sinceSeenMs: number }[],
   opts: { matchImg: number; holdMs: number },
 ): { assign: Map<string, number>; displaced: Set<string>; info: Map<string, MirrorAssignInfo> } {
   const d3 = (a: V3, b: V3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
   const gateOf = (pl: (typeof players)[number]) => mirrorImgGate(opts.matchImg, pl.sinceSeenMs);
+  /** 前回の人と今回の人 i を同じ人とみなす範囲。保持の間は、ほかの人（i 以外の今回の人・前回の隣の人）までの距離 × 0.5 以下に狭める */
+  const gateFor = (pl: (typeof players)[number], i: number): number => {
+    const base = gateOf(pl);
+    if (!pl.last || pl.sinceSeenMs > opts.holdMs) return base;
+    let near = pl.last.nearImg ?? Infinity;
+    persons.forEach((p, k) => {
+      if (k !== i) near = Math.min(near, imageDist(pl.last!.img, p.img));
+    });
+    return Math.min(base, near * MIRROR_HOLD_NEAR_K);
+  };
   const tracked = assignMaxMin(
     players.map((p) => p.id),
     persons.length,
@@ -313,7 +348,7 @@ export function assignMirrorTracked(
       const pl = players.find((p) => p.id === id)!;
       if (!pl.last) return null;
       const di = imageDist(pl.last.img, persons[i].img);
-      return di <= gateOf(pl) ? di + d3(pl.last.head, persons[i].head) * MIRROR_DEPTH_COST_PER_M : null;
+      return di <= gateFor(pl, i) ? di + d3(pl.last.head, persons[i].head) * MIRROR_DEPTH_COST_PER_M : null;
     },
   );
   const assign = new Map<string, number>();
@@ -331,7 +366,8 @@ export function assignMirrorTracked(
     .sort((a, b) => a[0] - b[0] || a[1] - b[1])
     .map(([, i]) => i);
   const displaced = new Set<string>();
-  const nearOther = (pl: (typeof players)[number]) => !!pl.last && persons.some((p) => imageDist(pl.last!.img, p.img) <= gateOf(pl));
+  // 範囲の中の人が付かなかったのは、組の数を最大にするためにその人が別の化身に付いたとき（空いていれば 1 で付いている）
+  const nearOther = (pl: (typeof players)[number]) => !!pl.last && persons.some((p, k) => imageDist(pl.last!.img, p.img) <= gateFor(pl, k));
   const reasonOf = new Map<string, MirrorAssignInfo["reason"]>();
   for (const pl of players) {
     if (assign.has(pl.id)) {
@@ -370,7 +406,13 @@ export function assignMirrorTracked(
       dImg2 = ds.find(([, k]) => !mine || k !== mine[1])?.[0] ?? null;
       dd = mine ? d3(pl.last.head, persons[mine[1]].head) : null;
     }
-    info.set(pl.id, { reason: reasonOf.get(pl.id) ?? "none", dImg, dImg2, d3: dd, gate: pl.last ? gateOf(pl) : null });
+    let gate: number | null = null;
+    if (pl.last) {
+      // 付けた人（付けなければ一番近い人）に使った範囲。人がいなければ広げた範囲
+      const k = i ?? persons.map((p, k) => [imageDist(pl.last!.img, p.img), k] as const).sort((a, b) => a[0] - b[0])[0]?.[1];
+      gate = k !== undefined ? gateFor(pl, k) : gateOf(pl);
+    }
+    info.set(pl.id, { reason: reasonOf.get(pl.id) ?? "none", dImg, dImg2, d3: dd, gate });
   }
   return { assign, displaced, info };
 }

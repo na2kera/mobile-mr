@@ -92,9 +92,12 @@ export type MatchRemote = {
   declFwd?: readonly [number, number] | null;
   /** 補正を学べている相手の予測位置（自分のワールドの「最新の申告位置 + 学んだ補正（弱める前）」）。学べていなければ null */
   corrPred?: V3 | null;
+  /** 化身を出しているか（自分のアンカーが無いときの only-one-unchecked の条件。省略は出している扱い） */
+  on?: boolean;
 };
 
-export type MatchReason = "declared-dir" | "tracked" | "only-one";
+/** only-one-unchecked = 自分のアンカーが無い（申告の向きを直せない）間に、化身を出している相手 1 人・検出 1 人を向きを確かめずに結んだ */
+export type MatchReason = "declared-dir" | "tracked" | "only-one" | "only-one-unchecked";
 
 /** 結ばなかった理由: facing = 体の向きが合わない / corr-gate = 申告 + 補正から離れている / no-facing = 向きを比べられないので only-one で結ばない / dir = only-one で申告の方向が外れている / no-candidate = 候補が無い */
 export type MatchReject = "facing" | "corr-gate" | "no-facing" | "dir" | "no-candidate";
@@ -130,6 +133,8 @@ export type MatchOptions = {
   facingMaxDeg?: number;
   /** 補正を学べている相手は、申告 + 補正からこれより離れた人に新しく結ばない [m]（?corrGateM=） */
   corrGateM?: number;
+  /** 自分のアンカーがあるか（無ければ申告の向きを自分のワールドに直せない。省略は true） */
+  selfAnchor?: boolean;
 };
 
 /** 体の向きの関門の既定 [deg]: 自分のアンカーの向きの誤差（単一マーカーで十数度）+ 肩の線の推定のぶれ + 申告の遅れを見込む */
@@ -144,10 +149,13 @@ export const DEFAULT_CORR_GATE_M = 1.5;
  *   tracked: 前回結んだ人の頭と今の検出の頭が matchM 以内（コスト = 距離 / matchM × matchDeg / 2。見失う直前まで見ていた人を優先）
  * どちらも無ければ、相手 1 人・検出 1 人のときだけ結ぶ（only-one）。ただし体の向きを比べられて facingMaxDeg 以内のときだけ（部屋にいる
  * プレイヤーでない人に付けて、その差を補正として学ばないように）。新しい申告がある相手は、さらに方向の差が onlyOneMaxDeg 以内のときだけ。
- * 古い申告の方向だけでは結ばない（別人に付け得る）。
- * 関門（続けて追いかけている tracked 以外のすべての候補に掛ける）:
- *   facing: 申告の体の向き（declFwd）と検出の体の向きの差が facingMaxDeg を超える人には結ばない（前後が決まらない検出は線の向きだけで比べる）
- *   corr-gate: 補正を学べている相手（corrPred）は、そこから corrGateM を超えて離れた人には結ばない
+ * 自分のアンカーが無い（opts.selfAnchor = false。申告の向きを直せない）間だけは、化身を出している相手が 1 人・検出 1 人なら向きを確かめずに結ぶ
+ * （only-one-unchecked。別の人に付くことがある）。古い申告の方向だけでは結ばない（別人に付け得る）。
+ * 関門:
+ *   facing: 申告の体の向き（declFwd）と検出の体の向きの差が facingMaxDeg を超える人には結ばない（前後が決まらない検出は線の向きだけで比べる）。
+ *     続けて追いかけている tracked 以外のすべての候補に掛ける
+ *   corr-gate: 補正を学べている相手（corrPred）は、そこから corrGateM を超えて離れた人には結ばない。tracked（直近の頭の位置での再捕捉）には掛けない
+ *     （自分や相手のアンカーが跳んで予測位置がずれたあとに見失っても、本人が同じ所に戻れば結ぶ）
  */
 export function matchRemotesDiag(
   detections: readonly { head: V3; fwd?: readonly [number, number]; fwdFrontKnown?: boolean }[],
@@ -165,12 +173,15 @@ export function matchRemotesDiag(
     return facingDiffDeg(r.declFwd, det.fwd, det.fwdFrontKnown !== true);
   };
   const corrOf = (r: MatchRemote, d: number): number | null => (r.corrPred ? norm(sub(detections[d].head, r.corrPred)) : null);
-  /** 新しく結ぶときの関門。通れば null、通らなければ理由 */
+  const facingBad = (r: MatchRemote, d: number): boolean => {
+    const f = facingOf(r, d);
+    return f !== null && f > facingMax;
+  };
+  /** 新しく結ぶときの関門（補正 → 体の向きの順）。通れば null、通らなければ理由 */
   const gate = (r: MatchRemote, d: number): MatchReject | null => {
     const c = corrOf(r, d);
     if (c !== null && c > corrGate) return "corr-gate";
-    const f = facingOf(r, d);
-    if (f !== null && f > facingMax) return "facing";
+    if (facingBad(r, d)) return "facing";
     return null;
   };
   const rejects = new Map<string, Set<MatchReject>>();
@@ -189,15 +200,20 @@ export function matchRemotesDiag(
     }
     // 続けて追いかけている人は関門なしで結ぶ（見えている間は手放さない）
     if (tracked && r.continuing) return tracked;
-    const g = gate(r, d);
+    // 直近の頭の位置での再捕捉（見失っていた人の近く）: 補正の関門は掛けず、体の向きだけ確かめる
+    if (tracked) {
+      if (facingBad(r, d)) {
+        if (record) addReject(id, "facing");
+      } else pick = tracked;
+    }
     if (r.declared && r.fresh) {
       const a = angleFromEyeDeg(eye, r.declared, detections[d].head);
-      if (a <= opts.matchDeg) pick = { c: a, reason: "declared-dir" };
-    }
-    if (tracked && (!pick || tracked.c < pick.c)) pick = tracked;
-    if (pick && g) {
-      if (record) addReject(id, g);
-      return null;
+      if (a <= opts.matchDeg && (!pick || a < pick.c)) {
+        const g = gate(r, d);
+        if (g) {
+          if (record) addReject(id, g);
+        } else pick = { c: a, reason: "declared-dir" };
+      }
     }
     return pick;
   };
@@ -209,7 +225,14 @@ export function matchRemotesDiag(
   for (const [id, d] of m) out.set(id, { index: d, reason: best(id, d)!.reason });
   // 結ばなかった相手の理由（関門で落ちた候補）
   for (const r of remotes) if (!out.has(r.id)) for (let d = 0; d < detections.length; d++) best(r.id, d, true);
-  if (remotes.length === 1 && detections.length === 1 && !out.has(remotes[0].id)) {
+  const onRemotes = remotes.filter((r) => r.on !== false);
+  const detFree = detections.length === 1 && ![...out.values()].some((v) => v.index === 0);
+  if (opts.selfAnchor === false && detFree && onRemotes.length === 1 && !out.has(onRemotes[0].id)) {
+    // 自分のアンカーがまだ無い（申告の向きを自分のワールドに直せない）: 化身を出している相手 1 人・検出 1 人なら向きを確かめずに結ぶ
+    const r = onRemotes[0];
+    out.set(r.id, { index: 0, reason: "only-one-unchecked" });
+    rejects.delete(r.id);
+  } else if (remotes.length === 1 && detections.length === 1 && !out.has(remotes[0].id)) {
     const r = remotes[0];
     const f = facingOf(r, 0);
     const g = gate(r, 0);
