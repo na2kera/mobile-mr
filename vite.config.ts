@@ -15,6 +15,7 @@ import { splatoonPoseCamServer } from "./server/splatoon-pose-cam.ts";
 import { personServer } from "./server/person.ts";
 import { golfServer } from "./server/golf.ts";
 import { battingServer } from "./server/batting.ts";
+import { keshinServer } from "./server/keshin.ts";
 import { clientLogServer } from "./server/client-log.ts";
 
 // js-aruco2（demos/03 で使用）は top-level this へ代入する古い CJS 形式で、
@@ -112,6 +113,38 @@ function eighthWallAssets(): Plugin {
   };
 }
 
+// ex9-1-keshin の化身モデル（GLB）を local-assets/keshin/ から /local-assets/keshin/*.glb で配る。
+// モデルは手元の Blender 作業フォルダのもので公開リポジトリに入れない（npm run fetch:keshin でコピー、.gitignore 済み）ので、
+// dev サーバーだけが配り、build には出さない（eighthWallAssets の dev 側と同じ書き方。generateBundle は持たない）。
+// 置いていなければ 404 になり、ページは代わりの人型に落ちる
+function keshinLocalAssets(): Plugin {
+  const root = fileURLToPath(new URL("./local-assets/keshin/", import.meta.url));
+  const prefix = "/local-assets/keshin/";
+  return {
+    name: "keshin-local-assets",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const rawPath = (req.url ?? "").split("?")[0];
+        if (!rawPath.startsWith(prefix)) return next();
+        const name = rawPath.slice(prefix.length);
+        // ファイル名だけ（ディレクトリをたどらせない）
+        if (!/^[A-Za-z0-9_-]+\.glb$/.test(name)) return next();
+        let body: Buffer;
+        try {
+          body = readFileSync(join(root, name));
+        } catch {
+          res.statusCode = 404;
+          res.end("not found (npm run fetch:keshin)");
+          return;
+        }
+        res.setHeader("Content-Type", "model/gltf-binary");
+        res.setHeader("Cache-Control", "no-cache");
+        res.end(body);
+      });
+    },
+  };
+}
+
 // iOS Safari はセンサー/カメラ API が HTTPS 必須のため、dev サーバーを
 // 自己署名 HTTPS + LAN 公開で立てる（iPhone 側は初回のみ証明書警告を突破する）
 export default defineConfig({
@@ -120,6 +153,7 @@ export default defineConfig({
     basicSsl(),
     jsAruco2Esm(),
     eighthWallAssets(),
+    keshinLocalAssets(),
     sharedRoomServer(),
     volleyballServer(),
     dartsServer(),
@@ -130,6 +164,7 @@ export default defineConfig({
     personServer(),
     golfServer(),
     battingServer(),
+    keshinServer(),
     clientLogServer(),
   ],
   server: {
@@ -189,6 +224,10 @@ export default defineConfig({
         "demo-09-person-id": fileURLToPath(
           new URL("./demos/09-person-id/index.html", import.meta.url),
         ),
+        // ex9-1: 化身（モデルは dev サーバーだけが配る。build には入らない）
+        "demo-ex9-1-keshin": fileURLToPath(new URL("./demos/ex9-1-keshin/index.html", import.meta.url)),
+        "demo-ex9-1-keshin-overview": fileURLToPath(new URL("./demos/ex9-1-keshin/overview.html", import.meta.url)),
+        "demo-ex9-1-keshin-mirror": fileURLToPath(new URL("./demos/ex9-1-keshin/mirror.html", import.meta.url)),
         "demo-10-golf": fileURLToPath(new URL("./demos/10-golf/index.html", import.meta.url)),
         "demo-10-golf-overview": fileURLToPath(new URL("./demos/10-golf/overview.html", import.meta.url)),
         "demo-10-golf-joycon-test": fileURLToPath(new URL("./demos/10-golf/joycon-test.html", import.meta.url)),

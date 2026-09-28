@@ -72,6 +72,12 @@ export type LandmarkerTracker<R> = {
    * まだフレームが来ていないときは null を返すので、呼び出し側は前回の結果を使い続ける
    */
   detect(video: HTMLVideoElement): R | null;
+  /**
+   * detect と同じ条件（新しいフレーム・縮小・単調なタイムスタンプ）で入力を用意し、推論の呼び出しは run に任せる。
+   * コールバック版の detectForVideo（結果のマスクを複製しない。ex9-1 の segmentation mask）を使うためのもの。
+   * 走らせたら true（lastMs は run 全体の時間）。前回と同じフレームなどで走らせなければ false
+   */
+  detectWith(video: HTMLVideoElement, run: (landmarker: VideoLandmarker<R>, source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number) => void): boolean;
   close(): void;
 };
 
@@ -138,12 +144,19 @@ export async function createLandmarkerTracker<R>(
     lastMs: 0,
     lastInput: "",
     detect(video: HTMLVideoElement): R | null {
-      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+      let result: R | null = null;
+      tracker.detectWith(video, (l, source, ts) => {
+        result = l.detectForVideo(source, ts);
+      });
+      return result;
+    },
+    detectWith(video: HTMLVideoElement, run: (landmarker: VideoLandmarker<R>, source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number) => void): boolean {
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
       // iOS の回転中などサイズが 0 の瞬間は渡さない（MediaPipe 側で例外になる）
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      if (!vw || !vh) return null;
-      if (video.currentTime === lastVideoTime) return null;
+      if (!vw || !vh) return false;
+      if (video.currentTime === lastVideoTime) return false;
       lastVideoTime = video.currentTime;
       // VIDEO モードのタイムスタンプは単調増加が必須（同値・逆行はエラー）。
       // performance.now() は単調だが、同じ ms 内に2回呼ばれ得るので +1 で保証する
@@ -175,9 +188,10 @@ export async function createLandmarkerTracker<R>(
       // video の width 属性は 0 なので、映像の実サイズは videoWidth から取る
       tracker.lastInput =
         source === video ? `${vw}x${vh}` : `${source.width}x${source.height}`;
-      const result = lm.detectForVideo(source, ts);
+      // lastMs は成功したときだけ更新する（detect の従来の意味。run が例外を投げたら前回の値のまま）
+      run(lm, source, ts);
       tracker.lastMs = performance.now() - t0;
-      return result;
+      return true;
     },
     close() {
       lm.close();

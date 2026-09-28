@@ -659,3 +659,95 @@
 - **どう対処したか**: headless では 1 ページだけログを書き（他は `?remoteLog=0`）、room 名を `check-8thwall-board` にして開始行で区別できるようにした。ファイルを分ける仕組みは未対応（未解決）
 - **SDK ならどう解決するか（案）**: ログの送り先をセッション（端末 + ページの読み込み）単位のファイルにする、または行にセッション ID を必ず付けて、読む側のツール（`grep` ではなく小さなビューア）でセッションごとに絞れるようにする。dev サーバーのポートごとにファイルを分けるオプションも持つ
 - **関連**: `src/shared/remote-log.ts`、`server/client-log.ts`、`scripts/headless-08-11-8thwall-board.mjs` の「9. 実機ログ」
+
+## [2026-09-27] ex9-1 化身: StereoEffect で描くと renderer.info が片目ぶんしか数えず、「左右 2 眼込みの三角形数・描画コール」を HUD に出すのに自分でリセットし直す必要がある
+
+- **何が苦しかったか**: 教訓 3・5（処理の重さを最初から測る）で HUD / 実機ログに `renderer.info.render.triangles` と `calls` を出そうとしたが、`StereoEffect.render` は内部で `renderer.render` を左右 2 回呼び、`info.autoReset = true`（既定）だと 2 回目の開始でリセットされるので、読めるのは右目ぶんだけ（実際の半分）。同じく「描画 1 フレームの ms」も `effect.render` を包んで測るしかなく、GPU の時間は取れない（CPU 側の発行時間だけ）
+- **どう対処したか**: `renderer.info.autoReset = false` にしてループの先頭で `renderer.info.reset()` を呼び、`effect.render` の後に読む（左右 2 眼込みの値になる）。描画の ms は `performance.now()` で `effect.render` を挟んだ CPU 時間として HUD に `render=…ms(2眼)` と書いた（GPU の重さは fps で見るしかない）
+- **SDK ならどう解決するか（案）**: `StereoRenderer` が 1 フレームぶん（両目）の統計（三角形・描画コール・CPU 時間、可能なら `EXT_disjoint_timer_query_webgl2` の GPU 時間）をまとめて返す。HUD / 実機ログの「重さの行」を SDK の標準の診断にする
+- **関連**: `demos/ex9-1-keshin/main.ts` の `renderer.info.autoReset` / `measureFrame`
+
+## [2026-09-27] ex9-1 化身: 「目からの距離で消す」「視界の周りのエフェクト」をステレオで破綻させないために、ポストエフェクトを諦めて頭の中心のワールド位置を uniform で配った
+
+- **何が苦しかったか**: 主観の化身は「目から 0.6m 以内を消す」「視界の周り（周辺）にオーラ」が要る。画面空間のポストエフェクト（ビネット・ブルーム）は StereoEffect が片目ずつビューポートを切って 2 回描くのでそのままでは使えない（片目の中心を知らない）。シェーダーで「カメラからの距離」を使うと、StereoEffect の左右のカメラは中心から ±eyeSep/2 ずれているので、左右の目で消える境界が数 cm ずれる
+- **どう対処したか**: 距離は「頭の中心（元のカメラ）のワールド位置」を uniform で渡し、頂点シェーダーでスキン後のワールド位置を varying にして比べた（`onBeforeCompile`。深度の前描画のマテリアルにも同じ条件で discard を入れないと、消した部分の奥が深度で隠れる）。視界の周りのオーラはカメラの子にした粒子を 0.6〜1.2m 先の実際の 3D 位置に置き、片目の視野（aspect = camera.aspect × 0.5）から「中心 60% を空ける」位置を計算した
+- **SDK ならどう解決するか（案）**: `StereoRenderer` が「頭の中心の姿勢」「片目の視野（tan の半角）」を共通の uniform ブロックとして全マテリアルに配る。「視界に貼り付くエフェクト」は画面空間ではなく「頭に付いた 3D の層（距離つき）」として作る API を用意する（ステレオでも 1 つに融合する）
+- **関連**: `demos/ex9-1-keshin/keshin-assets.ts` の `addNearFade`、`demos/ex9-1-keshin/keshin-aura.ts` の `PeripheralAura`
+
+## [2026-09-27] ex9-1 化身: 同じスキンモデルを「自分用」「他人用」で複数出すのに、骨ごとの複製・マテリアルの個別化・深度の前描画・クリッピング平面を毎回自前で組んだ
+
+- **何が苦しかったか**: 化身は同じ GLB を自分用（前傾・目の近くを消す）と他人用（俯瞰画面・段階 2 の相手）で出す。`Object3D.clone()` はスキンの骨を複製しないので `SkeletonUtils.clone` が要り、しかもマテリアルは共有のままなので、不透明度・クリッピング平面（インスタンスごとに違う腰の高さ）を変えると他のインスタンスまで変わる。モデルの README の makeGhost（深度だけ書く複製を子に足す）もインスタンスごとに掛け直しで、描画コールは 2 倍になる。クリッピング平面は親（マーカーのアンカー）の変換を法線行列で掛けてワールドに直す必要がある
+- **どう対処したか**: `createKeshinInstance`（`SkeletonUtils.clone` → マテリアルを複製して個別化 → 下半身を隠す → カリングを切る → 深度の前描画の子を足す → 腰の平面をマテリアルに入れる）を作り、配置は純粋関数（`keshinModelMatrix` / `keshinCutPlane`。テスト済み）の行列をそのまま入れる。見えていないとき（見上げフェード 0）は非表示にして描画コールを減らした
+- **SDK ならどう解決するか（案）**: 「共有空間に置くアバター / キャラクター」の部品として、GLB を 1 回読み、インスタンスごとに（骨・マテリアル・クリッピング・不透明度）を分けて出す `CharacterInstance` を用意する。半透明の内側を隠す（深度の前描画）・腰から下を切る・フェードは標準の表示オプションにする
+- **関連**: `demos/ex9-1-keshin/keshin-assets.ts` の `createKeshinInstance`、`demos/ex9-1-keshin/keshin-view.ts`
+
+## [2026-09-27] ex9-1 化身: 08 のフェイクカメラは見回しても映像が動かないので、PC で「マーカーから目を離す → gyro → 戻る」を再現できなかった
+
+- **何が苦しかったか**: 08 のフェイクカメラ（`fake-markers.ts`）は合成カメラの姿勢が固定で、PC で OrbitControls を回しても映像のマーカーは同じ位置に映り続ける（アンカーが頭と一緒に回る）。化身は「見上げた（マーカーが視界の外）ときの見え方」と「位置の信用度（marker → gyro）」が大事なのに、PC ではマーカーを見失う状況を作れない
+- **どう対処したか**: ex9-1 では描画のたびに「合成カメラの基準の姿勢 × OrbitControls の回転」でマーカーを投影し直すようにした（`worldUp` も同じ姿勢から出すので水平化は崩れない）。見上げるとマーカーが画面外に出て `gyro`、戻すと `marker` に戻ることをヘッドレス確認に入れた。08 系のフェイクカメラは変えていない
+- **SDK ならどう解決するか（案）**: PC のフェイク環境を「仮想の部屋（マーカー・床・壁）+ 仮想の頭（姿勢は見回しに追従）」として 1 つにまとめ、カメラ映像・ジャイロの上・マーカーの見え方を同じ頭の姿勢から作る。見失い・ドリフト・遅延を注入できるようにする
+- **関連**: `demos/ex9-1-keshin/main.ts` の `fakeCamToFieldNow` / `worldUp`、`scripts/headless-keshin.mjs` の「見上げるとマーカーが画面外になり track = gyro」
+
+## [2026-09-27] ex9-1 化身: シェーダーの事前コンパイルが素直に効かない（compileAsync が例外、compile はクリッピング平面の数が違う、レンダーターゲットは色空間が違うプログラムを作る）
+
+- **何が苦しかったか**: 主観の化身は見上げたときに初めて描くので、そこでシェーダーのコンパイル（スキン + クリッピング + onBeforeCompile の組み合わせ）が走ると固まる恐れがある（レビューの指摘）。`renderer.compileAsync(scene, camera)` を呼ぶと、俯瞰画面で three r185 の内部（`checkMaterialsReady` の `program.isReady()`）が currentProgram の無いマテリアルに当たって setTimeout の中で例外を投げた。`renderer.compile` はマテリアルごとのクリッピングの状態（`clipping.setState`）を設定しないので、`clippingPlanes` を持つマテリアルでは描画時と違う `numClippingPlanes` でプログラムを作り、描画時にもう一度コンパイルされる
+  さらに最初の対処（`compile` の後に 1×1 の WebGLRenderTarget へ 1 回描く）も効いていなかった（2 回目のレビューで実測）。レンダーターゲットへ描くと出力の色空間が Linear になり、キャンバス用（sRGB）とは別のプログラムになるので、初めて見上げた瞬間に目の近くを消すプログラムが 4 本新しくリンクされていた。「同じ見た目のプログラム」を作るには、描画先・色空間・クリッピング・左右のカメラまで本番と同じ条件がいる
+- **どう対処したか**: 描画ループの本描画の直前に、化身（と視界の周りのオーラ）を一時的に表示してキャンバスへ本番と同じ `effect.render` で 1 回描き、直後の本描画（autoClear）で消す（`KeshinView.forceVisible`。表示状態と不透明度は finally で戻す）。`renderer.info.programs.length` を見上げる前後で比べ、新しくリンクされるプログラムが 0 本（先行コンパイルをやめると 6→10 本）であることをヘッドレス確認に入れた。時間と本数は HUD（`warmup=`）と実機ログ（`event=warmup`）に出す（PC で 30ms 前後。実機は未確認）
+- **SDK ならどう解決するか（案）**: 「これから出すもの」を登録すると、描画と同じ状態（クリッピング・ライト・スキン）で裏でコンパイルし、終わったら通知する API を SDK が持つ。重い初回描画をロード画面・演出の前に寄せられるようにする
+- **関連**: `demos/ex9-1-keshin/keshin-view.ts` の `warmUp`
+
+## [2026-09-27] ex9-1 化身: 画面ロックや Wi-Fi の瞬断の再接続が「新しい人」になり、俯瞰画面に同じ人が 2 人出る
+
+- **何が苦しかったか**: room-server はソケットごとに id を振るので、半分切れた接続（iPhone の画面ロック・Wi-Fi の瞬断）が heartbeat で消えるまで（最大 20 秒）残っている間に再接続すると、同じ人が別の id でもう 1 人入る。化身の番号は割り当て直され、on も消える。04〜09 でも同じ構造だが、化身は「その人の背後に出ているもの」なので 2 体出ると目立つ
+- **どう対処したか**: タブごとのランダムな session 鍵（`sessionStorage`）を WS の URL に付け、同じ鍵で入ってきたらサーバーが古い接続を `terminate` して化身の番号・on・changedAt・色・直近の pose を引き継ぐ（古い id の leave は全員に配り、古い接続の close では二重に配らない）。きれいに切れた後の再入室も 60 秒以内なら引き継ぐ。満員でも同じ鍵なら入れる。プロトコルを v2 に上げた
+- **SDK ならどう解決するか（案）**: Room サーバーの共通部分（`room-server.ts`）が「接続」と「参加者」を分けて持ち、参加者の id は session 鍵で安定させる（接続が替わっても同じ id）。再接続・置き換え・猶予（TTL）を共通の機能にする
+- **関連**: `server/keshin.ts` の `onJoin` / `onLeave` / `canJoin`、`demos/ex9-1-keshin/keshin-client.ts` の `sessionKey`、`scripts/test-keshin.mjs` の「再接続」
+
+## [2026-09-27] ex9-1 化身（段階 2）: MediaPipe の segmentation mask を three のシェーダーで使うのに、GPU → CPU → GPU の往復と「いまどちらの眼を描いているか」の手作りが要った
+
+- **何が苦しかったか**: 相手の化身を「カメラに写った人の形」で隠すため、PoseLandmarker の segmentation mask を three のマテリアルで読みたい。MediaPipe は自分の WebGL コンテキスト（別 canvas）で推論するので、`MPMask.getAsWebGLTexture()` のテクスチャは three のコンテキストでは使えず、`getAsFloat32Array()` で CPU に読み戻して `DataTexture` に上げ直すしかない（返り値の形の `detectForVideo` はマスクを複製するので `result.close()` も要る）。さらにシェーダーで「画面のこの画素はカメラ画像のどこか」を出すには、背景の cover の変換（`texture.repeat` / `offset`）と「いま描いている眼のビューポート」が要るが、StereoEffect は眼の情報を渡さないので、各メッシュの `onBeforeRender` で `renderer.getCurrentViewport` を uniform に入れる回り道になった。R8 の `DataTexture` は幅が 4 の倍数でないと行がずれる（`unpackAlignment = 1`）
+- **どう対処したか**: 複数人のマスクを CPU で 1 枚の R8 にまとめ（画素ごとの最大）、背景の `texture.matrix` と眼のビューポートを uniform にして、化身の色・深度の前描画・オーラの粒の fragment で同じ判定（ディザで境界をぼかす）を入れた（`keshin-occlusion.ts`）。座標の式は純粋関数（`maskUvFromFragment`、背景の変換は `passthrough-camera.ts` の `coverUvTransform` に切り出し）にして Node でテストし、ヘッドレスでは「画素が人の形の中か外か」を背景の色（フェイクの人の色）で数えて、シェーダーの結果と突き合わせた。
+  前後関係は、最初「本人は必ず手前」として人の形の画素なら全部捨てていたが、相手が向こうを向くと化身は人より手前に来るので間違い（レビュー）。断片のカメラからの距離が持ち主の頭までの距離 − 0.15m より遠いときだけ捨てる形に直した（シェーダーの `cameraPosition` が眼ごとのカメラなので左右で正しい）。PC ではフェイクの人（合成の体を描いて同じ形をマスクに）で確かめ、本物の PoseLandmarker は初期化とマスクの更新まで。**実際の人の輪郭との合い方は実機未確認**
+- **SDK ならどう解決するか（案）**: 「カメラ画像の座標 ↔ 画面の画素（眼ごと）」の変換を SDK の StereoRenderer が uniform ブロックとして全マテリアルに配る（背景の cover・ズーム・眼のビューポート込み）。ML の結果（マスク・深度）は SDK が three と同じコンテキストのテクスチャで受け取れるようにする（MediaPipe に three の GL コンテキストを渡すか、WebGPU で共有）。「人の形で隠す」を標準のオクルージョンの 1 つにする
+- **関連**: `demos/ex9-1-keshin/keshin-occlusion.ts`、`demos/ex9-1-keshin/keshin-math.ts` の `maskUvFromFragment`、`src/shared/passthrough-camera.ts` の `coverUvTransform`、`src/shared/pose-tracker.ts` の `outputSegmentationMasks`
+
+## [2026-09-27] ex9-1 化身（段階 2）: 相手の化身の位置は「相手のアンカーの誤差」と「自分のアンカーの誤差」の両方で跳ぶ
+
+- **何が苦しかったか**: 段階 1 の実機で、マーカーを見直したときに自己位置が最大 1.6m 跳んだ。段階 2 では相手の化身を「相手の申告（相手のマーカー座標系）→ 自分のアンカーで自分のワールド」に置くので、相手の跳びと自分の跳びの両方がそのまま化身の瞬間移動になる。どちらの跳びかは受信側からは区別できない
+- **どう対処したか**: 表示中の位置と向き（自分のワールド）を最新の目標へ時定数 0.25s で寄せる（状態は表示中の値だけ。3m 以上は即座に移す）。跳びの大きさ（目標と表示の差の 1 秒の最大）を HUD とログに出して実機で測る。跳びそのものは減らない（未解決。段階 3 の「見た位置による補正」で相手の位置は直せる見込み）
+- **SDK ならどう解決するか（案）**: 共有座標のアンカーに「世代（見直しで何 m 動いたか）」を持たせ、受信側が自分のアンカーの跳びと相手の申告の跳びを分けて扱えるようにする（自分の跳びは全員の表示を同時に寄せ、相手の跳びは相手の化身だけ寄せる）。08-11 の「座標系の世代」の案と同じ
+- **関連**: `demos/ex9-1-keshin/remote-keshins.ts`、`demos/ex9-1-keshin/keshin-math.ts` の `smoothToward`
+
+## [2026-09-28] 共有 passthrough-camera / ex9-1 化身: 「名前が超広角のカメラ」を選ぶと、iPad では前面カメラが選ばれる
+
+- **何が苦しかったか**: `src/shared/passthrough-camera.ts` は、一度 `facingMode: environment` で開いて許可を取り、`enumerateDevices()` のラベルが `/ultra wide|超広角/i` に合うカメラを `deviceId` で開き直していた。iPhone（`背面超広角カメラ` / `Back Ultra Wide Camera`）では正しいが、iPad（iOS の Chrome、2026-09-27）は超広角が**前面にしか無く**（Center Stage 用。ラベル `前面超広角カメラ`）、HUD に `cam=1280x720 前面超広角カメラ`・`camFov=106` と出て、前面カメラの映像を背景にしていた。映像とジャイロから出すカメラの向きが合わず、マーカーも本人の顔越しにしか見えない。
+  カメラの前後は `MediaDeviceInfo` に無く、ラベルの文字（言語で変わる）か、開いた後の `track.getSettings().facingMode` でしか分からない。`deviceId` で開くと `facingMode` の指定は効かない。ラベルは許可を取った後にしか読めないので「一度開く → 止める → 開き直す」儀式も要る。08 系・09・10 などこの共有コードを使う全デモが同じ問題を持っていた
+- **どう対処したか**: 選び方を純粋関数 `pickBackUltraWide(devices)` にした（名前に `前面|front|FaceTime|user` を含む超広角は外し、`背面|back|rear` を含むものを優先、前後を名乗らないものは次点）。開いた後も `getSettings().facingMode === "user"` なら超広角をやめて `facingMode: environment` で開き直す。どのカメラを・なぜ選んだか（`CameraChoice`: ラベル・facingMode・理由）を `Passthrough.choice` に出し、ex9-1 は HUD の `cam=` とログの `event=camera` に出す。Node テスト（iPhone の日本語 / 英語、iPad の前面だけ超広角、超広角なし、ラベル空）を `test:keshin` に入れた。**実機（iPad）で背面が選ばれることは未確認**
+- **SDK ならどう解決するか（案）**: SDK のカメラ層が「背面・一番広い画角」を意味で指定できる API を持ち、ラベルの言語差・前後の判定・開き直しの儀式・開いた後の検証（facingMode と実際の画角）を吸収する。選んだ結果と理由を診断として必ず返す
+- **関連**: `src/shared/passthrough-camera.ts` の `pickBackUltraWide` / `openBackCameraStream`、`demos/ex9-1-keshin/main.ts` の `cameraChoice`、`scripts/test-keshin.mjs` の「カメラ選び」
+
+## [2026-09-28] ex9-1 化身（鏡モード）: 前面カメラの画角がブラウザから取れず、写った人の距離（= 化身の大きさと足元）が推定値頼みになる
+
+- **何が苦しかったか**: iPad の前面カメラを鏡にして、写った人を PoseLandmarker + 09 の `body-math.ts`（worldLandmarks の実寸を画像上の見え方に当てはめる最小二乗）で 3D 化し、その背後に化身を置く。距離はカメラの画角に比例して変わるが、`MediaTrackSettings` / `getCapabilities` に画角は無く、ラベル（`前面超広角カメラ` 等。OS の言語で変わる）から推定するしかない（背面の 106° / 68° と同じ問題が前面にもある）。iPad の前面の超広角は Center Stage で切り抜かれることもあり、推定がさらに当てにならない。
+  さらに鏡は「表示だけ左右反転」なので、ML（Pose・マスク）は反転前の映像で回し、背景と 3D は CSS でまとめて反転する、という二重の座標系を意識する必要があった（three のシーンの中で反転すると、背景の UV・人の形のマスクの座標・カリング（面の向き）が全部ずれる）
+- **どう対処したか**: 画角は `?camFov=` で上書きでき、既定はラベルから推定（超広角 106 / それ以外 68）して HUD に `fov=68(label-estimate)` と出所付きで出す。人までの距離を HUD の `persons=1 #0:d2.95` に出し、実機で実測と比べて `?camFov=` を合わせる手順を README に書いた（未実測）。反転は canvas に CSS の `scaleX(-1)` を掛けるだけにして、three・マスク・Pose はすべて反転前の座標のまま扱う（HUD と文字は canvas の外なので反転しない）。ヘッドレスでは合成の人の左手首に赤い印を描き、合成後のスクリーンショットで左右が入れ替わっていることを確かめた
+- **SDK ならどう解決するか（案）**: カメラ層が「前面 / 背面」「画角（実測の校正値を端末ごとに保存）」を持ち、校正用の手順（既知の大きさの物や 2 点の距離を写す）を用意する。鏡表示は「表示の反転」フラグとして SDK が持ち、ML の座標は常に反転前で返す
+- **関連**: `demos/ex9-1-keshin/mirror.ts` の `startCamera`、`demos/ex9-1-keshin/mirror-math.ts`、`demos/ex9-1-keshin/mirror.html` の `#app canvas { transform: scaleX(-1) }`
+
+## [2026-09-28] ex9-1 化身（段階 3）: MediaPipe の segmentation mask が iOS / Safari で空になり、GPU → CPU の読み戻しを JS から直せない
+
+- **何が苦しかったか**: 実機（iPad の Chrome = WebKit、Mac の Safari、ゴーグルの iPhone）で、PoseLandmarker は人を見つけて `segmentationMasks` も返すのに、`getAsFloat32Array()` の中身が空（人の画素が 1 つも無い。ログは `poses=1 masks=1 person=0`）。
+  `@mediapipe/tasks-vision` の `MPMask.getAsFloat32Array` は、GPU のマスク（R32F / R16F のテクスチャ）を自前の GL コンテキストで `readPixels(..., FLOAT, ...)` して読む（UA が iOS / iPadOS なら `RGBA`、それ以外は `RED`）。WebKit で float の読み戻しが効かない組み合わせだと、例外もエラーも出ずに 0 のまま返っていると見ている（未確定）。
+  読み戻しの経路は MediaPipe の中にあり、GL コンテキストも MediaPipe のものなので、JS 側から形式を変えて読み直すことができない（three と同じコンテキストでもない）
+- **どう対処したか**: マスクの中身を診断に出し（`mmax` / `mmean` / `mfrac` / `mnan`、0..255 で来ていれば自動で 1/255）、人を見つけているのにマスクの最大が 0.1 未満なら、Pose の 33 点の骨格から人の形（頭の円・胴の四角形・肩幅に比例する太さの腕と脚）を描いてマスクにする（`msrc=skel`。`?maskSource=seg|skel|auto`）。骨格からの形は近似なので服・髪・持ち物の輪郭は出ない
+- **SDK ならどう解決するか（案）**: ML の結果（マスク・深度）を「読み戻さずに描画側のコンテキストのテクスチャとして受け取る」経路を SDK が持つ（MediaPipe に描画側の WebGL2 コンテキストを渡す・WebGPU で共有）。読み戻しが要る場合も、8bit（RGBA / UNSIGNED_BYTE。どの環境でも読める）で読む変換を SDK 側で持つ。骨格からの近似の人の形は、マスクが使えない環境の標準のフォールバックにする
+- **関連**: `demos/ex9-1-keshin/keshin-occlusion.ts` の `maskStats` / `decideMaskSource` / `skeletonPersonShape`、`node_modules/@mediapipe/tasks-vision/vision_bundle.mjs` の MPMask（`_u`）
+
+## [2026-09-28] ex9-1 化身（段階 3）: 相手の位置を「申告（相手のマーカー）」と「自分のカメラで見た体」の 2 つから決めると、座標系と信用度の組み合わせが一気に増える
+
+- **何が苦しかったか**: 相手の化身の位置を、方向は自分のカメラで見た体（Pose → 3D 化 → ジャイロの回転で自分のワールドへ）、距離は申告と混ぜ、見えない間は申告 + 学んだ補正、で決めた。自分のワールド（ジャイロ）・マーカー座標系（自分のアンカー経由）・相手の申告（相手のアンカー経由）の 3 つが混ざり、
+  どれがどの誤差を持つか（自分のアンカーの向きの誤差・相手の申告の古さ・カメラの画角の推定・体の大きさの仮定）を分けて扱う必要がある。フェイクのマーカーでも自分のアンカーの向きが約 14° ずれ、マーカー座標系で比べる確認が成り立たなかった（自分のワールドで比べ直した）。
+  補正はマーカー座標系で持たないと自分のアンカーの見直しで壊れ、自分のワールドで持たないと見えている間の位置と一致しない、という板挟みもある
+- **どう対処したか**: 補正は「マーカー座標系の見えた頭 − 申告位置」で持ち（アンカーが見直されても同じ意味）、見えていた位置 = 申告 + 補正になるようにして、見え隠れで飛ばないようにした。対応づけは方向 → 位置 → 1 人同士の順の簡易なもの。数学はすべて純粋関数（`keshin-hybrid.ts`）で Node テストし、HUD / ログに相手ごとの `src` `camD` `decD` `corr` `dAng` `match` を出して実機で比べる
+- **SDK ならどう解決するか（案）**: SDK が「観測（マーカー・カメラで見た人・申告）」を誤差のモデル付きで受け取り、座標系の変換と融合（フィルタ）を 1 か所で持つ。アプリは「この人の頭はどこか・どれくらい信用できるか」だけを聞く
+- **関連**: `demos/ex9-1-keshin/keshin-hybrid.ts`、`demos/ex9-1-keshin/remote-keshins.ts` の `observe` / `plan`
