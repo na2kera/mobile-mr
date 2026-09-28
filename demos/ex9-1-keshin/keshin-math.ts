@@ -145,6 +145,11 @@ export type KeshinFrameInput = {
   riseM: number;
   /** 前傾 [deg]（主観だけ。他人用は 0） */
   leanDeg: number;
+  /**
+   * 段階 3 の C: 化身の腰（切断面）を本人の頭よりこれだけ上に置く [m]（他人用。未指定なら従来どおり 床 + 腰の高さ）。
+   * 本人の頭・肩に化身の体が被らないように、化身を頭の上・後ろに浮かせる
+   */
+  waistAboveHead?: number;
 };
 
 function translation(x: number, y: number, z: number): number[] {
@@ -174,7 +179,8 @@ function pivotMatrix(p: KeshinFrameInput): number[] {
   const floor = keshinFloor(p);
   const cutW = p.cutY * p.scale;
   let m = mulMat4(translation(floor[0], floor[1], floor[2]), rotationY(p.yaw));
-  m = mulMat4(m, translation(0, cutW, -p.back));
+  const waistH = p.waistAboveHead !== undefined ? p.eyeH + p.waistAboveHead : cutW;
+  m = mulMat4(m, translation(0, waistH, -p.back));
   return mulMat4(m, rotationX(p.leanDeg * DEG));
 }
 
@@ -241,6 +247,12 @@ export function effectiveTrack(
 export function markerToWorld(anchorPos: V3, anchorQuat: Quat, p: V3): V3 {
   const r = rotateByQuat(anchorQuat, p);
   return [anchorPos[0] + r[0], anchorPos[1] + r[1], anchorPos[2] + r[2]];
+}
+
+/** 自分のワールドの点 → マーカー座標系（markerToWorld の逆） */
+export function worldToMarker(anchorPos: V3, anchorQuat: Quat, p: V3): V3 {
+  const inv: Quat = [-anchorQuat[0], -anchorQuat[1], -anchorQuat[2], anchorQuat[3]];
+  return rotateByQuat(inv, [p[0] - anchorPos[0], p[1] - anchorPos[1], p[2] - anchorPos[2]]);
 }
 
 /** 相手の体の向き（マーカー座標系の水平 [x, z]）→ 自分のワールドのヨー（水平面へ射影してから） */

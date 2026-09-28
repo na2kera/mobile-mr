@@ -27,7 +27,7 @@ const CDP_PORT = 9361;
 const BASE = `https://localhost:${PORT}/demos/ex9-1-keshin/`;
 const ROOM = `check${Date.now() % 100000}`;
 // 段階 1 の確認では人の形で隠す処理（MediaPipe）は止める（?occlude=0）。段階 2 の確認は別の room で行う
-const PHONE = `fov=70&camZoom=1&fakecam=1&autostart=1&fakeMarkerPx=80&occlude=0&room=${ROOM}`;
+const PHONE = `fov=70&camZoom=1&fakecam=1&autostart=1&fakeMarkerPx=80&occlude=0&room=${ROOM}&posMode=declared`;
 const ROOM2 = `${ROOM}s2`;
 const SHOT_DIR = join(ROOT, "logs", "keshin-check");
 const LOG_FILE = join(ROOT, "logs", "client.log");
@@ -335,7 +335,7 @@ try {
   const ov2 = await newWindow("overview2", `${BASE}overview.html?room=${ROOM}&remoteLog=0`);
   const late = await waitUntil(async () => {
     const me = (await overviewState(ov2)).find((x) => x.id === p1id);
-    return { ok: !!me, me };
+    return { ok: !!me && me.u !== null, me };
   }, 10000);
   check("後から開いた俯瞰画面 2: スマホ 1 の化身は演出なしで出切った状態（u = 1.5）", late?.me && late.me.on === true && late.me.u === 1.5, JSON.stringify(late?.me && { on: late.me.on, u: late.me.u }));
 
@@ -409,10 +409,12 @@ try {
   pages.length = 0;
   await sleep(500);
   // 段階 2 は部屋を広く使うので、フェイクカメラのマーカーを 600mm にする（3.6m 先でも確実に検出できる大きさ）
-  const S2 = `fov=70&camZoom=1&fakecam=1&autostart=1&markerMm=600&room=${ROOM2}&remoteLog=0`;
+  // 段階 2 の確認は段階 2 の位置の決め方（申告位置）で。段階 3 の B は下の「段階 3」で確かめる
+  const S2 = `fov=70&camZoom=1&fakecam=1&autostart=1&markerMm=600&room=${ROOM2}&remoteLog=0&posMode=declared`;
   const ovS2 = await newWindow("overview-s2", `${BASE}overview.html?room=${ROOM2}&markerMm=600&remoteLog=0`);
   // A: マーカーの右 0.3m・3.6m 手前。?fakeperson=1 で相手の申告位置に合成の体を描き、同じ形をマスクに使う（化身 0）
-  const pA = await newWindow("A", `${BASE}?${S2}&fakeperson=1&fakeCamPos=0.3,0,3.6&name=A`);
+  // A は人の形で隠す仕組みの確認用に段階 2 の見え方（?look=0: 化身が人に重なる配置）。段階 3 の C の見え方は鏡と段階 3 で確かめる
+  const pA = await newWindow("A", `${BASE}?${S2}&fakeperson=1&fakeCamPos=0.3,0,3.6&name=A&look=0`);
   const sA = await waitUntil(async () => {
     const s = await phoneState(pA);
     return { ok: s && s.me && s.track === "marker" && s.warmup !== "-" && s.model !== "loading" && s.model !== "idle", s };
@@ -566,6 +568,16 @@ try {
   await pA.eval("window.__keshin.setOcclusionDisabled(true)");
   await sleep(300);
   await pA.shot("stage2-facing-no-occlusion.png");
+  // 段階 3 の A: 骨格から描いた人の形（?maskSource=skel。フェイクの骨格から描く）でも、人の上の化身は隠れる
+  await pA.eval("window.__keshin.setOcclusionDisabled(false)");
+  await pA.eval("window.__keshin.setMaskSource('skel')");
+  await sleep(500);
+  const vSkel = await pA.eval(`window.__keshin.pixelDiffRemote(${JSON.stringify(vId)}, true, "model")`);
+  const occSkel = await pA.eval("window.__keshin.occlusionState()");
+  console.log(`A pixels（骨格から描いた人の形）: ${JSON.stringify(vSkel)} ${occSkel.text}`);
+  check("段階 3・A: 骨格から描いた人の形（msrc=skel）でも、人の上の化身は隠れる（隠さないときの 5% 未満）・人のいない所は残る", vSkel && vOff && /msrc=skel/.test(occSkel.text) && vSkel.inside < vOff.inside * 0.05 && vSkel.outside >= vOff.outside * 0.85, `skel on=${vSkel?.inside}/${vSkel?.outside} off=${vOff?.inside}/${vOff?.outside}`);
+  await pA.shot("stage3-skel-mask.png");
+  await pA.eval("window.__keshin.setMaskSource('auto')");
   await pA.eval("window.__keshin.setOcclusionDisabled(false)");
   clearInterval(vPoseTimer);
   check("段階 2: 相手が marker のとき描く（薄さ 1）", vm?.ok && vm.r.fade === 1, JSON.stringify(vm?.r && { track: vm.r.track, fade: vm.r.fade }));
@@ -645,16 +657,21 @@ try {
   }, 90000, 1000);
   console.log(`real pose: ${oR?.o?.text}`);
   check("段階 2: 本物の PoseLandmarker（segmentation mask）が初期化でき、相手の化身が視野にある間マスクを更新する", oR?.o?.status === "ready" && oR.o.hz > 0 && oR.o.poseMs > 0, oR?.o?.text);
-  const rR = (await pR.eval("window.__keshin.remoteState()")).find((x) => x.id === bId);
-  check("段階 2: 人が写っていなければ隠さず描く", rR && rR.drawn, JSON.stringify(rR && { drawn: rR.drawn }));
+  // B は化身を出し直したばかりなので、出現の演出（不透明度が上がるまで約 0.3 秒）を待ってから見る
+  const rRw = await waitUntil(async () => {
+    const r = (await pR.eval("window.__keshin.remoteState()")).find((x) => x.id === bId);
+    return { ok: r && r.drawn, r };
+  }, 8000);
+  const rR = rRw?.r;
+  check("段階 2: 人が写っていなければ隠さず描く", rR && rR.drawn, JSON.stringify(rR && { drawn: rR.drawn, reason: rR.reason }));
   const hudA = await pA.eval("document.querySelector('#hud')?.textContent ?? ''");
   console.log(`A HUD:\n${hudA}`);
-  check("段階 2: HUD に相手ごとの行（track・距離・描画・薄さ・跳び）と occlusion（Pose の ms・Hz・段・マスクの古さ・人数・マスクの枚数・入力・明るさ・delegate）", /remote B\(p\d+\) #2o(n|ff) marker( [\d.]+s)? dist=[\d.]+m drawn=[01]\(\w+\) fade=[\d.]+ jump=[\d.]+m/.test(hudA) && /occlude=fake .* pose=\d+ms mask=\d+ms hz=\d+ maskHz=\d+\/15 age=\d+ms person=[01] poses=\d masks=\d in=\d+x\d+ lum=\d+ dg=fake found=/.test(hudA));
+  check("段階 2: HUD に相手ごとの行（track・距離・描画・薄さ・跳び）と occlusion（Pose の ms・Hz・段・マスクの古さ・人数・マスクの枚数・入力・明るさ・delegate）", /remote B\(p\d+\) #2o(n|ff) marker( [\d.]+s)? dist=[\d.]+m drawn=[01]\(\w+\) fade=[\d.]+ jump=[\d.]+m/.test(hudA) && /occlude=fake .* pose=\d+ms mask=\d+ms hz=\d+ maskHz=\d+\/15 age=\d+ms person=[01] poses=\d masks=\d mmax=\S+ mmean=\S+ mfrac=\S+ msrc=\w+ in=\d+x\d+ lum=\d+ dg=fake found=/.test(hudA));
   check("段階 2: HUD の cam= に facingMode と選んだ理由（フェイクカメラは facing=fake）", /cam=\d+x\d+ .*facing=fake/.test(hudA), (hudA.match(/cam=.*/) ?? [""])[0]);
   // 本物の Pose の診断（1 回の結果の人数・マスクの枚数・入力の大きさ・明るさ・delegate）
   const oRd = await pR.eval("window.__keshin.occlusionState()");
   console.log(`real pose diag: ${oRd.text}`);
-  check("段階 2: 本物の Pose の診断が出る（入力は長辺 ?maskDetW=512・明るさは真っ黒でない・delegate・人数とマスクの枚数）", oRd.lastInput === "512x384" && oRd.lastLuma > 20 && /^(GPU|CPU)$/.test(oRd.delegate) && Number.isInteger(oRd.lastPoses) && Number.isInteger(oRd.lastMasks) && /poses=\d masks=\d in=512x384 lum=\d+ dg=(GPU|CPU) found=\d+\/\d+/.test(oRd.text), JSON.stringify({ in: oRd.lastInput, lum: oRd.lastLuma, dg: oRd.delegate, poses: oRd.lastPoses, masks: oRd.lastMasks }));
+  check("段階 2: 本物の Pose の診断が出る（入力は長辺 ?maskDetW=512・明るさは真っ黒でない・delegate・人数とマスクの枚数）", oRd.lastInput === "512x384" && oRd.lastLuma > 20 && /^(GPU|CPU)$/.test(oRd.delegate) && Number.isInteger(oRd.lastPoses) && Number.isInteger(oRd.lastMasks) && /poses=\d masks=\d mmax=[\d.]+ mmean=[\d.]+ mfrac=[\d.]+ msrc=\w+ in=512x384 lum=\d+ dg=(GPU|CPU) found=\d+\/\d+/.test(oRd.text), JSON.stringify({ in: oRd.lastInput, lum: oRd.lastLuma, dg: oRd.delegate, poses: oRd.lastPoses, masks: oRd.lastMasks }));
   const hzLogs = pages.flatMap((p) => p.logs.filter((l) => /event=mask-hz/.test(l)).map((l) => `${p.name}: ${l}`));
   console.log(`mask-hz events: ${hzLogs.length ? hzLogs.join(" | ") : "(none)"}`);
   await browser.send("Target.closeTarget", { targetId: pR.targetId });
@@ -694,7 +711,7 @@ try {
   const logText2 = existsSync(LOG_FILE) ? readFileSync(LOG_FILE).subarray(logSize2).toString("utf8") : "";
   const diagLine = logText2.split("\n").filter((l) => l.includes("keshin-phone") && /poses=/.test(l)).at(-1) ?? "";
   console.log(`diag log line: ${diagLine}`);
-  check("段階 2: 実機ログの 1 行に診断が全部入る（人数・マスクの枚数・入力の大きさ・明るさ・delegate・段・カメラ）", /poses=\d masks=\d in=512x384 lum=\d+ dg=(GPU|CPU)/.test(diagLine) && /maskHz=\d+\/15/.test(diagLine) && /cam=facing=fake/.test(diagLine), diagLine.slice(0, 400));
+  check("段階 2: 実機ログの 1 行に診断が全部入る（人数・マスクの枚数・入力の大きさ・明るさ・delegate・段・カメラ）", /poses=\d masks=\d mmax=[\d.]+ mmean=[\d.]+ mfrac=[\d.]+ msrc=\w+ in=512x384 lum=\d+ dg=(GPU|CPU)/.test(diagLine) && /maskHz=\d+\/15/.test(diagLine) && /cam=facing=fake/.test(diagLine), diagLine.slice(0, 400));
   await browser.send("Target.closeTarget", { targetId: pD.targetId });
   pages.splice(pages.indexOf(pD), 1);
   // ?maskDebug=1（フェイクの人）: マスクが人の形に出るところの画面
@@ -719,7 +736,8 @@ try {
     return { ok: st && st.me, st };
   }, 40000);
   const pId = sP?.st?.me;
-  const pM = await newWindow("mirror", `${BASE}mirror.html?room=${ROOMM}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0`);
+  // 人の形で隠す仕組みの確認は段階 2 の見え方（?look=0）で。段階 3 の C の見え方は下の「鏡: 見え方」で
+  const pM = await newWindow("mirror", `${BASE}mirror.html?room=${ROOMM}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0&look=0`);
   const mirrorState = () => pM.eval("window.__keshinMirror?.state() ?? null");
   const m0 = await waitUntil(async () => {
     const st = await mirrorState();
@@ -785,6 +803,24 @@ try {
   await sleep(300);
   await pM.shot("mirror-3-no-occlusion.png");
   await pM.eval("window.__keshinMirror.setOcclusionDisabled(false)");
+  // 段階 3 の C（既定の見え方）: 腰を頭より上・後ろへ、下端を光に溶かし、背中から腰へ光の流れ。鏡をもう 1 つ開いて同じ人・同じ化身で確かめる
+  const pML = await newWindow("mirror-look", `${BASE}mirror.html?room=${ROOMM}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0`);
+  const ml = await waitUntil(async () => {
+    const st = await pML.eval("window.__keshinMirror?.state() ?? null");
+    const e = st?.entries.find((x) => x.id === pId);
+    return { ok: e && e.drawn && e.world, e };
+  }, 30000);
+  await sleep(1900);
+  const mlOver = await pML.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, false)`);
+  const probe = await pML.eval(`window.__keshinMirror.lookProbe(${JSON.stringify(pId)})`);
+  console.log(`mirror look: over=${JSON.stringify(mlOver)} dissolve=${JSON.stringify(probe?.dissolve)} stream=${JSON.stringify(probe?.stream && { hits: probe.stream.hits, total: probe.stream.total })}`);
+  check("鏡・見え方: 化身の体が本人の頭・肩に被らない（人の形で隠す処理を切っても、人の画素に重なる化身の画素が 50 未満）", ml?.ok && mlOver && mlOver.inside < 50 && mlOver.changed > 3000, `inside=${mlOver?.inside} changed=${mlOver?.changed}`);
+  const bands = probe?.dissolve?.bands ?? [];
+  check("鏡・見え方: 切り口が無い（腰の近くほど化身の画素が疎ら: 溶ける範囲の上 > 範囲の上半分 > 腰の近く、腰の近くは上の半分未満）", bands.length === 3 && bands[0] > bands[1] && bands[1] > bands[2] && bands[2] < bands[0] * 0.5, JSON.stringify(bands.map((b) => b.toFixed(3))));
+  check("鏡・見え方: 背中から化身の腰まで光の流れがつながって描かれている（曲線上の 7 点すべてに流れの画素）", probe?.stream && probe.stream.hits === probe.stream.total, JSON.stringify(probe?.stream?.samples?.map((q) => `${q.t.toFixed(2)}:${q.hit ? 1 : 0}`)));
+  await pML.shot("mirror-look.png");
+  await browser.send("Target.closeTarget", { targetId: pML.targetId });
+  pages.splice(pages.indexOf(pML), 1);
   // 見失う → 0.5 秒保持 → 0.5 秒で消える → 見つけ直したらすぐ出す
   await pM.eval("window.__keshinMirror.setFakePeople([])");
   await sleep(350);
@@ -890,7 +926,185 @@ try {
   const dupSt = await pD2.eval("window.__keshinMirror?.state() ?? null");
   const keys = await pD2.eval("Object.keys(sessionStorage).filter((k) => k.startsWith('keshin-session-')).sort().join(',')");
   check("鏡: 俯瞰画面のタブを複製して鏡を開いても、互いに切断しない（鍵は keshin-session-mirror で別）", dupM?.ok && /ws=open/.test(ovStatus) && dupSt?.ws === "open" && keys === "keshin-session-mirror,keshin-session-overview", `overview=${ovStatus.split("\n")[0]} mirror=${dupSt?.ws} keys=${keys} copied=${ss}`);
-  check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人・割り当てが出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)/.test(hudM) && /→person/.test(hudM));
+  check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人・割り当てが出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 mmax=\S+ mmean=\S+ mfrac=\S+ msrc=fake in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)/.test(hudM) && /→person/.test(hudM));
+  // ================= 段階 3 の B: カメラで見た人で相手の化身の位置を決める（ハイブリッド）=================
+  {
+  // A3（スマホ、?fakeperson=1）の前に合成の人を「本当の位置」T に立たせ、仮想のプレイヤー V3 の申告位置 D は 1m 横にずらす。
+  // まずユーザーの場面そのもの（V3 は壁を見てから 30 秒 = gyro の ageMs 30000。申告が古い）→ 次に申告が新しい場合 → 2 人が並ぶ場合。
+  // 補正の弱まりは既定（?corrDecaySec=10）のまま。方向で結ぶしきい値は、フェイクのマーカーから推定したアンカーの向きの誤差（約 14°）を見込んで ?matchDeg=30
+  const ROOM3 = `${ROOM}s3`;
+  const T3 = [-0.3, 0, 2.2];
+  const D3 = [0.7, 0, 2.2];
+  const E3 = [0.3, 0, 3.6];
+  const faceTo = (from, to) => {
+    const d = [to[0] - from[0], to[2] - from[2]];
+    const l = Math.hypot(...d);
+    return [d[0] / l, d[1] / l];
+  };
+  const f3 = faceTo(T3, E3);
+  const ov3 = await newWindow("overview-s3", `${BASE}overview.html?room=${ROOM3}&markerMm=600&remoteLog=0`);
+  const pA3 = await newWindow("A3", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&markerMm=600&room=${ROOM3}&remoteLog=0&fakeperson=1&fakeCamPos=${E3.join(",")}&name=A3&matchDeg=30`);
+  const sA3 = await waitUntil(async () => {
+    const st = await phoneState(pA3);
+    return { ok: st && st.me && st.track === "marker" && st.model !== "loading" && st.model !== "idle", st };
+  }, 40000);
+  check("段階 3: A3 が入室してマーカーを見ている（位置の決め方 hybrid・見え方は既定）", sA3?.ok, JSON.stringify(sA3?.st && { track: sA3.st.track }));
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(f3)} }])`);
+  const virtual = async (name, session) => {
+    const q = new URLSearchParams({ room: ROOM3, role: "player", v: String(KESHIN_PROTOCOL_VERSION), markerId: "0", markerMm: "600", name, session });
+    const ws = new WebSocket(`wss://localhost:${PORT}${KESHIN_PATH}?${q}`, { rejectUnauthorized: false, headers: { origin: `https://localhost:${PORT}` } });
+    const msgs = [];
+    ws.on("message", (d) => msgs.push(JSON.parse(d.toString())));
+    ws.on("error", () => {});
+    await waitUntil(async () => ({ ok: msgs.some((m) => m.type === "welcome") }), 5000);
+    const v = { ws, id: msgs.find((m) => m.type === "welcome")?.id, pose: null, timer: null };
+    v.timer = setInterval(() => v.pose && ws.send(JSON.stringify({ type: "pose", ...v.pose })), 100);
+    return v;
+  };
+  const v3 = await virtual("V3", "virtualPlayerV3x");
+  const v3Id = v3.id;
+  // 壁を見てから 30 秒経った相手（申告は古い）
+  v3.pose = { pos: D3, quat: [0, 1, 0, 0], fwd: f3, track: "gyro", ageMs: 30000 };
+  await waitUntil(async () => {
+    const r = (await pA3.eval("window.__keshin.remoteState()")).find((x) => x.id === v3Id);
+    return { ok: r && r.warmPending === null };
+  }, 20000);
+  await sleep(600);
+  const prog3a = (await phoneState(pA3)).programs;
+  v3.ws.send(JSON.stringify({ type: "keshin", on: true }));
+  const st3 = async () => (await pA3.eval("window.__keshin.remoteState()")).find((x) => x.id === v3Id);
+  const r3 = await waitUntil(async () => {
+    const r = await st3();
+    return { ok: r && r.drawn && r.source === "camera", r };
+  }, 15000);
+  await sleep(1800);
+  const prog3b = (await phoneState(pA3)).programs;
+  const dist = (a, b) => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : NaN);
+  // 比べるのは自分のワールド（画面に映っている合成の人の本当の位置 = フェイクカメラから直した点）。マーカー座標系で比べると、
+  // フェイクのマーカーから推定したアンカーの向きの誤差（この配置で約 14°）が入るため
+  const Tw = await pA3.eval(`window.__keshin.fakeTrueWorld(${JSON.stringify(T3)})`);
+  const eye3 = await pA3.eval("window.__keshin.eyeWorld()");
+  const angTo = (p, q) => {
+    const a = [p[0] - eye3[0], p[1] - eye3[1], p[2] - eye3[2]];
+    const b = [q[0] - eye3[0], q[1] - eye3[1], q[2] - eye3[2]];
+    const c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (Math.hypot(...a) * Math.hypot(...b));
+    return (Math.acos(Math.min(1, Math.max(-1, c))) * 180) / Math.PI;
+  };
+  const h0 = await st3();
+  console.log(`stage3 stale-visible: ${JSON.stringify(h0 && { source: h0.source, match: h0.matchReason, head: h0.head, Tw, camDist: h0.camDist, declDist: h0.declDist, dirDeg: h0.dirDeg, track: h0.track, ageMs: h0.ageMs })}`);
+  const firstMatch = pA3.logs.find((l) => /event=remote-match/.test(l) && l.includes(`${v3Id}:`) && !l.includes(`${v3Id}:-`)) ?? "";
+  check("段階 3・申告が古い相手（壁を見てから 30 秒）: カメラで見た人に結び（最初は only-one、以後は tracked）、本当の位置に出る（自分のワールドで T から 5cm 以内・src=camera）", r3?.ok && /only-one/.test(firstMatch) && (h0.matchReason === "only-one" || h0.matchReason === "tracked") && dist(h0.head, Tw) < 0.05, `T=${dist(h0?.head, Tw).toFixed(3)} src=${h0?.source} match=${h0?.matchReason} first=${firstMatch}`);
+  check("段階 3: 化身が初めて出たときに新しくリンクされたプログラムは 0 本（光の流れ・溶ける下端を含む）", prog3a === prog3b, `programs ${prog3a}→${prog3b}`);
+  await pA3.shot("stage3-hybrid.png");
+  // 画面から外れる（合成の人を消す）→ 補正付きで残る → 薄くなる → 最後に見えてから staleHideMs（8s）+ フェードで消える（補正の弱まりは既定 10s）
+  const hVis = await st3();
+  await pA3.eval("window.__keshin.setFakeBodies([])");
+  await sleep(1000);
+  const q1 = await st3();
+  await sleep(4000);
+  const q5 = await st3();
+  await sleep(4800);
+  const q10 = await st3();
+  console.log(`stage3 stale-hidden: +1s ${JSON.stringify(q1 && { src: q1.source, drawn: q1.drawn, fade: q1.fade })} +5s ${JSON.stringify(q5 && { src: q5.source, drawn: q5.drawn, fade: q5.fade })} +9.8s ${JSON.stringify(q10 && { drawn: q10.drawn, reason: q10.reason })}`);
+  check("段階 3・申告が古い相手が見えなくなって 1 秒: 消えずに補正付きで見えていた位置の近くに残る（15cm 以内・src=declared+corr・補正の弱まりは既定 10s）", q1 && q1.drawn && q1.source === "declared+corr" && dist(q1.head, hVis.head) < 0.15, `d=${dist(q1?.head, hVis?.head).toFixed(3)} src=${q1?.source}`);
+  check("段階 3・5 秒: まだ出ていて薄くなっている（最後に見えてから数える）", q5 && q5.drawn && q5.fade < 0.7 && q5.fade > 0.3, `fade=${q5?.fade?.toFixed(2)}`);
+  check("段階 3・9.8 秒: 最後に見えてから staleHideMs + フェードで消える（申告が古いので）", q10 && !q10.drawn, JSON.stringify(q10 && { drawn: q10.drawn, reason: q10.reason }));
+  // 見つけ直したら、また本当の位置に出る
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(f3)} }])`);
+  const back3 = await waitUntil(async () => {
+    const r = await st3();
+    return { ok: r && r.drawn && dist(r.head, Tw) < 0.05, r };
+  }, 5000);
+  check("段階 3・見つけ直したら、また本当の位置に出る", back3?.ok, JSON.stringify(back3?.r && { head: back3.r.head, src: back3.r.source, match: back3.r.matchReason }));
+  // 申告が新しい場合（V3 がマーカーを見ている。申告は 0.3m ずれ）: 方向はカメラ、距離は申告 0.7 + カメラ 0.3
+  const D3b = [T3[0] + 0.3, 0, T3[2]];
+  v3.pose = { pos: D3b, quat: [0, 1, 0, 0], fwd: f3, track: "marker", ageMs: 0 };
+  await sleep(1800);
+  const h1 = await st3();
+  const blendD = h1 ? 0.7 * h1.declDist + 0.3 * h1.camDist : NaN;
+  console.log(`stage3 fresh: ${JSON.stringify(h1 && { source: h1.source, match: h1.matchReason, head: h1.head, camDist: h1.camDist, declDist: h1.declDist, dirDeg: h1.dirDeg })}`);
+  check("段階 3・申告が新しい相手: 方向はカメラで見た人（本当の位置との方向の差 < 1.5°）・距離は申告 0.7 + カメラ 0.3 の混ぜた値 ±5cm（src=hybrid）", h1 && h1.source === "hybrid" && angTo(h1.head, Tw) < 1.5 && Math.abs(dist(h1.head, eye3) - blendD) < 0.05, `方向の差=${angTo(h1?.head, Tw).toFixed(2)}° 距離=${dist(h1?.head, eye3).toFixed(3)} 混ぜた値=${blendD.toFixed(3)} match=${h1?.matchReason}`);
+  const hudA3 = await pA3.eval("document.querySelector('#hud')?.textContent ?? ''");
+  check("段階 3: HUD に相手ごとの出どころ・カメラの推定距離・申告距離・補正・方向のずれ・結び方", /src=hybrid camD=[\d.]+ decD=[\d.]+ corr=[\d.]+m×[\d.]+ n=\d+ dAng=\d+deg match=(declared-dir|tracked|only-one)/.test(hudA3), (hudA3.match(/src=.*/) ?? [""])[0]);
+  await pA3.eval("window.__keshin.setPosMode('camera')");
+  await sleep(1500);
+  const h2 = await st3();
+  check("段階 3・camera: カメラだけなら本当の位置に出る（自分のワールドで T から 5cm 以内）", h2 && h2.drawn && h2.source === "camera" && dist(h2.head, Tw) < 0.05, `T=${dist(h2?.head, Tw).toFixed(3)} src=${h2?.source}`);
+  await pA3.eval("window.__keshin.setPosMode('declared')");
+  await sleep(1500);
+  const h3 = await st3();
+  check("段階 3・declared: 段階 2 と同じく申告位置の方に出る（D から 5cm 以内）", h3 && h3.drawn && h3.source === "declared" && dist(h3.headMarker, D3b) < 0.05, `D=${dist(h3?.headMarker, D3b).toFixed(3)}`);
+  await pA3.shot("stage3-declared.png");
+  await pA3.eval("window.__keshin.setPosMode('hybrid')");
+  await sleep(1500);
+  // 申告が新しい相手は、見えなくなっても消えない（補正付き → 申告位置へ）
+  await pA3.eval("window.__keshin.setFakeBodies([])");
+  await sleep(1200);
+  const hf = await st3();
+  check("段階 3・申告が新しい相手は見えなくなっても出続ける（src=declared+corr・薄さ 1）", hf && hf.drawn && hf.source === "declared+corr" && hf.fade === 1, JSON.stringify(hf && { drawn: hf.drawn, src: hf.source, fade: hf.fade }));
+  // 本当の位置の人の形で化身が隠れる（hybrid の位置 = 人の背後、持ち主の頭 = hybrid の頭）。人の形で隠す仕組みの確認なので見え方は段階 2（化身が人に重なる配置）
+  // 1.5m だと化身の翼・腕が人より手前に来て隠さない（正しい）ので、2m ほど離れた位置で確かめる
+  const T5 = [-0.5, 0, 1.8];
+  const f5 = faceTo(T5, E3);
+  v3.pose = { pos: [T5[0] + 0.2, 0, T5[2]], quat: [0, 1, 0, 0], fwd: f5, track: "marker", ageMs: 0 };
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T5)}, fwd: ${JSON.stringify(f5)} }])`);
+  await pA3.eval("window.__keshin.setRemoteLook(false)");
+  // 人を視野の中央に（段階 2 の向き合った確認と同じく左へ見回す。画面の端では化身の腕・翼が人より手前に来る部分が多い）
+  await pA3.eval("window.__keshin.setLook(0, 22)");
+  const rlook = await waitUntil(async () => {
+    const r = await st3();
+    return { ok: r && r.drawn && r.warmPending === null && (r.source === "hybrid" || r.source === "camera"), r };
+  }, 10000);
+  await sleep(1500);
+  const mOn = await pA3.eval(`window.__keshin.pixelDiffRemote(${JSON.stringify(v3Id)}, true, "model")`);
+  const mOff = await pA3.eval(`window.__keshin.pixelDiffRemote(${JSON.stringify(v3Id)}, false, "model")`);
+  // 前後の判定を外した（余裕 5m = 持ち主の頭の 5m 手前より奥は全部 = 人の形の上は全部隠す）ときの残り: 人の形と化身の位置が合っていれば 0 に近い。
+  // 通常の余裕（0.15m）で残る分は、化身のうち持ち主の頭より手前に来る部分（翼・腕・髪。アンカーの向きの誤差で化身が少し回っている）
+  await pA3.eval("window.__keshin.setMaskDepthMargin(5)");
+  const mAll = await pA3.eval(`window.__keshin.pixelDiffRemote(${JSON.stringify(v3Id)}, true, "model")`);
+  await pA3.eval("window.__keshin.setMaskDepthMargin(0.15)");
+  console.log(`stage3 mask: on=${mOn?.inside}/${mOn?.outside} all=${mAll?.inside}/${mAll?.outside} off=${mOff?.inside}/${mOff?.outside}`);
+  check("段階 3・hybrid: 本当の位置にいる人の形と化身の位置が合う（前後の判定を外すと人の上の化身は隠れる: 隠さないときの 5% 未満）・人のいない所は残る", rlook?.ok && mOff && mOff.inside > 300 && mAll.inside < mOff.inside * 0.05 && mAll.outside >= mOff.outside * 0.85, `all=${mAll?.inside}/${mAll?.outside} off=${mOff?.inside}/${mOff?.outside}`);
+  check("段階 3・hybrid: 通常の前後の判定（持ち主の頭より奥だけ隠す）でも、人の上の化身の大半が隠れる（隠さないときの 30% 未満。残りは頭より手前の部分）", mOn && mOn.inside < mOff.inside * 0.3, `on=${mOn?.inside} off=${mOff?.inside}`);
+  await pA3.shot("stage3-hybrid-mask.png");
+  await pA3.eval("window.__keshin.setLook(0, 0)");
+  await pA3.eval("window.__keshin.setRemoteLook(true)");
+  v3.pose = { pos: D3b, quat: [0, 1, 0, 0], fwd: f3, track: "marker", ageMs: 0 };
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(f3)} }])`);
+  // ビューを作り直したので、V3 を T の人に結び直してから V4 を入れる（相手 1 人・検出 1 人 → 以後は前回の位置で追う）
+  await waitUntil(async () => {
+    const r = await st3();
+    return { ok: r && r.drawn && r.source === "hybrid" && angTo(r.head, Tw) < 1.5 };
+  }, 10000);
+  await sleep(500);
+  // 2 人が並ぶ: V4（本当の位置 T4・申告は新しく 0.1m ずれ）と V3（申告は新しく 0.3m ずれ）。1 対 1 で、それぞれ自分の体の方向に出る
+  const T4 = [0.6, 0, 2.0];
+  const f4 = faceTo(T4, E3);
+  const v4 = await virtual("V4", "virtualPlayerV4x");
+  v4.pose = { pos: [T4[0] + 0.1, 0, T4[2]], quat: [0, 1, 0, 0], fwd: f4, track: "marker", ageMs: 0 };
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(f3)} }, { head: ${JSON.stringify(T4)}, fwd: ${JSON.stringify(f4)} }])`);
+  v4.ws.send(JSON.stringify({ type: "keshin", on: true }));
+  const T4w = await pA3.eval(`window.__keshin.fakeTrueWorld(${JSON.stringify(T4)})`);
+  const two = await waitUntil(async () => {
+    const list = await pA3.eval("window.__keshin.remoteState()");
+    const a = list.find((x) => x.id === v3Id);
+    const b = list.find((x) => x.id === v4.id);
+    return { ok: a?.drawn && b?.drawn && a.source === "hybrid" && b.source === "hybrid" && angTo(a.head, Tw) < 1.5 && angTo(b.head, T4w) < 1.5, a, b };
+  }, 12000);
+  console.log(`stage3 two: ${JSON.stringify(two && { a: two.a && { match: two.a.matchReason, ang: angTo(two.a.head, Tw).toFixed(2) }, b: two.b && { match: two.b.matchReason, ang: angTo(two.b.head, T4w).toFixed(2) } })}`);
+  check("段階 3・2 人が並ぶ: それぞれ自分の体の方向に 1 対 1 で出る（方向の差 < 1.5°）", two?.ok, JSON.stringify(two && { a: two.a && { match: two.a.matchReason, src: two.a.source }, b: two.b && { match: two.b.matchReason, src: two.b.source } }));
+  await pA3.shot("stage3-two.png");
+  const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && l.includes(v3Id)) ?? "";
+  check("段階 3: 結び方の理由がログに出る（event=remote-match）", /only-one|declared-dir|tracked/.test(matchLog), matchLog);
+  await ov3.eval("window.__keshinOverview.setView([3.6, 2.6, 5.4], [0.2, -0.3, 1.8])");
+  await sleep(400);
+  await ov3.shot("stage3-overview.png");
+  for (const v of [v3, v4]) {
+    clearInterval(v.timer);
+    v.ws.close();
+  }
+
+  }
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
   const shader2 = pages.flatMap((p) => p.logs.filter((l) => /Shader Error|WebGLProgram|THREE\.WebGLRenderer/.test(l)).map((l) => `${p.name}: ${l.slice(0, 200)}`));

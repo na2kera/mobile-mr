@@ -16,6 +16,7 @@ import { KESHIN_SPECS, loadKeshinModel } from "./keshin-assets";
 import type { LoadedKeshin } from "./keshin-assets";
 import { KeshinView } from "./keshin-view";
 import { connectKeshin } from "./keshin-client";
+import { describeLook, lookFromParams } from "./keshin-look";
 import type { KeshinClient } from "./keshin-client";
 
 // ex9-1: 化身の PC 俯瞰画面（08 の overview を参考にした最小限の版）。カメラもゴーグルも使わず、同じ room に「俯瞰」役で入って
@@ -39,6 +40,8 @@ const AURA_N = Math.round(numParam("auraN", 400, { min: 0, max: 20000 }));
 const STALE_MS = numParam("staleMs", 3000, { min: 100, max: 60000 });
 /** pose がこれだけ届かなければ「通信なし」（marker でも gyro 扱いで薄くする）[ms] */
 const NO_POSE_MS = numParam("noPoseMs", 1000, { min: 100, max: 60000 });
+/** 段階 3 の C: 化身の見え方（腰を頭より上・溶ける下端・背中からの光の流れ）。?look=0 で段階 2 まで */
+const LOOK = lookFromParams();
 
 // ---- 実機ログ ----
 startRemoteLog({ tag: "keshin-overview", snapshot: () => diagSummary(), snapshotMs: 1000 });
@@ -185,6 +188,7 @@ function createView(p: PlayerState): PlayerView {
     opacity: OTHER_OPACITY,
     auraN: AURA_N,
     nearFade: null,
+    look: LOOK,
   });
   scene.add(view.group);
   requestModel(p.info.keshin);
@@ -335,6 +339,7 @@ function connect() {
   );
 }
 connect();
+logEvent("start", `room=${ROOM} ${describeLook(LOOK)}`);
 
 // ---- パネル・HUD ----
 const playersEl = document.querySelector<HTMLUListElement>("#players")!;

@@ -160,7 +160,7 @@ export class PersonMask {
    * MediaPipe の confidence mask（0..1 の float、人数ぶん。行 0 が画像の上 = MPImage の getAsImageData と同じ並び）から作る。
    * 複数人は画素ごとの最大。確信度は edge で裾を切ってから 0..255 にする
    */
-  setFromFloat(masks: readonly Float32Array[], w: number, h: number) {
+  setFromFloat(masks: readonly Float32Array[], w: number, h: number, valueScale = 1) {
     this.ensure(w, h);
     const out = this.data;
     out.fill(0);
@@ -170,7 +170,7 @@ export class PersonMask {
     for (const m of masks) {
       const n = Math.min(m.length, out.length);
       for (let i = 0; i < n; i++) {
-        let t = (m[i] - lo) / span;
+        let t = (m[i] * valueScale - lo) / span;
         if (t <= 0) continue;
         if (t > 1) t = 1;
         const v = Math.round(t * t * (3 - 2 * t) * 255);
@@ -295,6 +295,114 @@ export function drawPersonShape(ctx: CanvasRenderingContext2D, s: PersonShape, f
   ctx.restore();
 }
 
+// ---- 人の形のマスクの中身の診断と、骨格から描く人の形（段階 3 の A）----
+
+/**
+ * マスク（MediaPipe の confidence。人数ぶん）の中身の統計: 最大・平均・0.5 を超える画素の割合・NaN の割合。
+ * 実機（iOS / Safari）では poses=1 masks=1 なのに person=0 だった。vision_bundle の MPMask.getAsFloat32Array は
+ * GPU のマスクを readPixels(FLOAT) で読むので、その読み戻しが効かない環境では 0（や NaN）が返っていると見ている。
+ * 値が 0..255 の float で来る想定違いも疑い、最大が 1.5 を超えたら scale = 1/255 を返す（setFromFloat の valueScale に渡す）
+ */
+export function maskStats(masks: readonly Float32Array[]): { max: number; mean: number; frac: number; nan: number; scale: number } {
+  let max = 0;
+  let sum = 0;
+  let over = 0;
+  let nan = 0;
+  let n = 0;
+  for (const m of masks) {
+    for (let i = 0; i < m.length; i++) {
+      const v = m[i];
+      n++;
+      if (!(v === v)) {
+        nan++;
+        continue;
+      }
+      if (v > max) max = v;
+      sum += v;
+    }
+  }
+  const scale = max > 1.5 ? 1 / 255 : 1;
+  if (n > 0) for (const m of masks) for (let i = 0; i < m.length; i++) if (m[i] * scale > 0.5) over++;
+  return { max, mean: n > 0 ? (sum / n) * scale : 0, frac: n > 0 ? over / n : 0, nan: n > 0 ? nan / n : 0, scale };
+}
+
+export type MaskSource = "seg" | "skel" | "fake";
+
+/** 出どころを切り替えるのに要る「続けて反対を示した結果」の回数（1 回のばらつきで切り替わらないように） */
+export const MASK_SOURCE_SWITCH_N = 5;
+
+/** 出どころの状態: 今の source と、反対を示す結果がそのまま続いた回数だけ（教訓 4） */
+export type MaskSourceState = { source: MaskSource; run: number };
+
+/**
+ * 人の形の出どころを決める。mode = ?maskSource=（seg / skel / auto。seg・skel は強制）。
+ * auto: 人を見つけている（poses > 0）のにマスクの最大（0..1 に直した値）が minMax 未満なら skel 寄り、以上なら seg 寄り。
+ * 今と反対を示す結果が switchN 回続いたら切り替える（途中で今と同じ側の結果が出たら数え直し）。人がいない結果（poses = 0）では変えない
+ */
+export function decideMaskSource(
+  state: MaskSourceState,
+  mode: "seg" | "skel" | "auto",
+  poses: number,
+  mmaxNorm: number,
+  minMax: number,
+  switchN = MASK_SOURCE_SWITCH_N,
+): MaskSourceState {
+  if (mode === "seg" || mode === "skel") return { source: mode, run: 0 };
+  const cur: MaskSource = state.source === "fake" ? "seg" : state.source;
+  if (poses <= 0) return { source: cur, run: state.run };
+  const want: MaskSource = mmaxNorm < minMax ? "skel" : "seg";
+  if (want === cur) return { source: cur, run: 0 };
+  const run = state.run + 1;
+  return run >= switchN ? { source: want, run: 0 } : { source: cur, run };
+}
+
+type Lm = { x: number; y: number; visibility?: number };
+
+/**
+ * Pose の 33 点（画像の正規化座標）から人の形を作る（マスクの画素 w × h の座標）。drawPersonShape で塗れる形:
+ * 頭 = 円（両耳の中点、見えなければ鼻。半径は両耳の間隔か肩幅から）、胴 = 両肩・両腰の四角形（腰が見えなければ肩から下へ肩幅 × 1.3）、
+ * 首・腕・脚 = 太さのあるカプセル（太さは肩幅に比例: 首 0.45・腕 0.32・脚 0.42）。visibility が minVis 未満の点は使わない
+ * （肩が両方見えなければ null）
+ */
+export function skeletonPersonShape(lm: readonly Lm[], w: number, h: number, minVis = 0.3): PersonShape | null {
+  if (lm.length < 33) return null;
+  const ok = (i: number) => (lm[i].visibility ?? 1) >= minVis;
+  const P = (i: number): [number, number] => [lm[i].x * w, lm[i].y * h];
+  if (!ok(11) || !ok(12)) return null;
+  const ls = P(11);
+  const rs = P(12);
+  const sw = Math.max(4, Math.hypot(ls[0] - rs[0], ls[1] - rs[1]));
+  let head: { x: number; y: number; r: number };
+  if (ok(7) && ok(8)) {
+    const a = P(7);
+    const b = P(8);
+    head = { x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2, r: Math.max(0.55 * Math.hypot(a[0] - b[0], a[1] - b[1]), 0.3 * sw) };
+  } else if (ok(0)) {
+    const n = P(0);
+    head = { x: n[0], y: n[1], r: 0.38 * sw };
+  } else {
+    // 頭の点が見えない: 肩の中点の上に肩幅から置く
+    head = { x: (ls[0] + rs[0]) / 2, y: (ls[1] + rs[1]) / 2 - 0.7 * sw, r: 0.36 * sw };
+  }
+  const hips: [number, number][] = ok(23) && ok(24) ? [P(23), P(24)] : [[ls[0], ls[1] + 1.3 * sw], [rs[0], rs[1] + 1.3 * sw]];
+  const torso: [number, number][] = [ls, rs, hips[1], hips[0]];
+  const limbs: PersonShape["limbs"] = [];
+  const mid: [number, number] = [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2];
+  limbs.push({ a: mid, b: [head.x, head.y], w: 0.45 * sw });
+  const cap = (a: number, b: number, k: number) => {
+    if (ok(a) && ok(b)) limbs.push({ a: P(a), b: P(b), w: k * sw });
+  };
+  cap(11, 13, 0.32);
+  cap(13, 15, 0.28);
+  cap(12, 14, 0.32);
+  cap(14, 16, 0.28);
+  cap(23, 25, 0.42);
+  cap(25, 27, 0.36);
+  cap(24, 26, 0.42);
+  cap(26, 28, 0.36);
+  return { head, torso, limbs, leftHand: P(15) };
+}
+
 // ---- 遅い端末では検出の回数を自動で下げる（stage2-fix2 の 4）----
 
 /** 検出の回数の段 [回/s]。URL の ?maskHz= が上限（先頭）になる */
@@ -413,6 +521,10 @@ export type OcclusionOptions = {
    * コールバックの中で呼ぶので、受け取った側は必要なら写してから持つ
    */
   onPoses?: (landmarks: BodyLandmarkLike[][], worldLandmarks: BodyLandmarkLike[][], now: number) => void;
+  /** 人の形の出どころ（?maskSource=seg|skel|auto。既定 auto: seg の中身が空なら骨格から描く） */
+  maskSource?: "seg" | "skel" | "auto";
+  /** auto で「seg の中身が空」とみなすマスクの最大値（?maskMinMax=0.1） */
+  maskMinMax?: number;
   /** ?fakeperson=1 のときの合成の骨格（onPoses に渡す。MediaPipe の代わり） */
   fakePoses?: () => { landmarks: BodyLandmarkLike[][]; worldLandmarks: BodyLandmarkLike[][] };
   log: (kind: string, detail: string) => void;
@@ -489,6 +601,13 @@ export class OcclusionController {
   /** 直近 1 回の結果の人数（landmarks.length）とマスクの枚数（segmentationMasks.length）。null = まだ回していない */
   lastPoses: number | null = null;
   lastMasks: number | null = null;
+  /** 直近の結果のマスクの中身（最大・平均・0.5 を超える割合・NaN の割合）。null = まだ */
+  lastMaskStats: { max: number; mean: number; frac: number; nan: number; scale: number } | null = null;
+  /** 人の形の出どころ（今の source）と、反対を示す結果が続いた回数。切り替えの状態はこれだけ */
+  source: MaskSource = "seg";
+  private sourceRun = 0;
+  private sourceMode: "seg" | "skel" | "auto";
+  private skelCanvas: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
   /** 直近に Pose に渡した入力の大きさ（"512x288"） */
   lastInput = "";
   /** 入力の平均の明るさ（0〜255、1 秒ごと）。null = まだ測っていない */
@@ -517,7 +636,42 @@ export class OcclusionController {
     this.uniforms = createMaskUniforms(dilatePx, depthMarginM);
     this.mask = new PersonMask(this.uniforms, edge);
     this.governor = new MaskHzGovernor(opts.maskHz, opts.maskHzAuto);
+    this.sourceMode = opts.maskSource ?? "auto";
+    if (opts.fake) this.source = this.sourceMode === "skel" ? "skel" : "fake";
     if (!opts.enabled) this.status = "off";
+  }
+
+  /** 人の形の出どころを変える（確認用。?maskSource= と同じ） */
+  setMaskSource(mode: "seg" | "skel" | "auto") {
+    this.sourceMode = mode;
+    if (this.opts.fake) this.setSource(mode === "skel" ? "skel" : "fake", "set");
+  }
+
+  private setSource(next: MaskSource, reason: string) {
+    if (next === this.source) return;
+    this.sourceRun = 0;
+    this.opts.log("mask-source", `${this.source}→${next} ${reason}`);
+    this.source = next;
+  }
+
+  /** 骨格（人ごとの 33 点の正規化座標）から人の形を w × h に塗ってマスクにする */
+  private setFromSkeleton(people: readonly (readonly Lm[])[], w: number, h: number) {
+    if (!this.skelCanvas) {
+      const canvas = document.createElement("canvas");
+      this.skelCanvas = { canvas, ctx: canvas.getContext("2d", { willReadFrequently: true })! };
+    }
+    const { canvas, ctx } = this.skelCanvas;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    for (const lm of people) {
+      const shape = skeletonPersonShape(lm, w, h);
+      if (shape) drawPersonShape(ctx, shape, "#fff");
+    }
+    this.mask.setFromImageData(ctx.getImageData(0, 0, w, h));
   }
 
   /** ?maskDebug=1 の縮小画像の描き先 */
@@ -551,14 +705,23 @@ export class OcclusionController {
    * 毎フレーム呼ぶ。need = 相手の化身（モデルかオーラ）が視野に入っていそう、markerRan = このフレームでマーカー検出をした、
    * others = 相手の人数（1 人でもいれば読み込みだけ先に済ませる）、fakeImage = フェイクの人の形（?fakeperson=1 のとき）
    */
-  update(now: number, need: boolean, video: HTMLVideoElement | null, markerRan: boolean, others: number, fakeImage: (() => ImageData | null) | null) {
+  update(
+    now: number,
+    need: boolean,
+    video: HTMLVideoElement | null,
+    markerRan: boolean,
+    others: number,
+    fakeImage: (() => ImageData | null) | null,
+    /** 化身が視野に無くても回す（段階 3 の B: カメラで見た位置の割り当てと補正の学習のため。隠す処理は need のときだけ） */
+    runAnyway = false,
+  ) {
     if (!this.opts.enabled) {
       this.uniforms.uMaskOn.value = 0;
       return;
     }
     if (!this.opts.fake && this.status === "idle" && (others > 0 || this.opts.debug)) void this.load(this.opts.maxPoses);
     // ?maskDebug=1 は化身が視野に無くても回す（隠すのは化身が視野にあるときだけなのは同じ）
-    const run = need || this.opts.debug;
+    const run = need || this.opts.debug || runAnyway;
     if (run !== this.running) {
       this.running = run;
       this.opts.log(run ? "mask-start" : "mask-stop", `${this.opts.fake ? "fake" : "pose"} status=${this.status} maskHz=${this.governor.hz}`);
@@ -571,12 +734,13 @@ export class OcclusionController {
       if (this.opts.fake) {
         this.lastRunMs = now;
         const t0 = performance.now();
+        const fp = this.opts.fakePoses?.();
         const img = fakeImage?.() ?? null;
-        if (img) this.mask.setFromImageData(img);
+        if (this.source === "skel" && fp && img) this.setFromSkeleton(fp.landmarks, img.width, img.height);
+        else if (img) this.mask.setFromImageData(img);
         else this.mask.clear();
         this.maskMs = performance.now() - t0;
         this.updates.push(now);
-        const fp = this.opts.fakePoses?.();
         if (fp) this.opts.onPoses?.(fp.landmarks, fp.worldLandmarks, now);
         this.lastPoses = fp ? fp.landmarks.length : img ? (this.mask.hasPerson ? 1 : 0) : 0;
         this.lastMasks = img ? 1 : 0;
@@ -616,7 +780,19 @@ export class OcclusionController {
             this.opts.onPoses?.(result.landmarks ?? [], result.worldLandmarks ?? [], now);
             const masks = result.segmentationMasks ?? [];
             masksN = masks.length;
-            if (masks.length > 0) this.mask.setFromFloat(masks.map((m) => m.getAsFloat32Array()), masks[0].width, masks[0].height);
+            const floats = masks.map((m) => m.getAsFloat32Array());
+            const st = maskStats(floats);
+            this.lastMaskStats = st;
+            // 判定は 0..1 に直した最大で（0..255 で来たときに生の値で判定しない）
+            const mmaxNorm = st.max * st.scale;
+            const next = decideMaskSource({ source: this.source, run: this.sourceRun }, this.sourceMode, poses, mmaxNorm, this.opts.maskMinMax ?? 0.1);
+            this.setSource(next.source, `poses=${poses} mmax=${mmaxNorm.toFixed(3)} min=${this.opts.maskMinMax ?? 0.1} after=${MASK_SOURCE_SWITCH_N}`);
+            this.sourceRun = next.run;
+            if (this.source === "skel" && poses > 0) {
+              const w = masks[0]?.width ?? (source instanceof HTMLVideoElement ? source.videoWidth : source.width);
+              const h = masks[0]?.height ?? (source instanceof HTMLVideoElement ? source.videoHeight : source.height);
+              this.setFromSkeleton(result.landmarks ?? [], w, h);
+            } else if (masks.length > 0) this.mask.setFromFloat(floats, masks[0].width, masks[0].height, st.scale);
             else this.mask.clear();
           } catch (e: unknown) {
             error = `mask: ${e instanceof Error ? e.message : String(e)}`;
@@ -875,6 +1051,13 @@ export class OcclusionController {
     this.opts.log("mask-failed", this.detail);
   }
 
+  /** マスクの中身（mmax / mmean / mfrac。NaN があれば mnan、0..255 で来ていれば x255） */
+  private describeMaskStats(): string {
+    const st = this.lastMaskStats;
+    if (!st) return "mmax=- mmean=- mfrac=-";
+    return `mmax=${st.max.toFixed(3)} mmean=${st.mean.toFixed(3)} mfrac=${st.frac.toFixed(3)}${st.nan > 0 ? ` mnan=${st.nan.toFixed(2)}` : ""}${st.scale !== 1 ? " x255" : ""}`;
+  }
+
   /**
    * HUD / ログの 1 行。人の形が出ない原因を実機のログ 1 行で切り分けられるように、1 回の結果の人数（poses = landmarks.length）・
    * マスクの枚数（masks = segmentationMasks.length）・入力の大きさ（in=）・入力の平均の明るさ（lum=、0 に近ければ真っ黒）・
@@ -887,7 +1070,7 @@ export class OcclusionController {
     return (
       `occlude=${this.opts.fake ? "fake" : this.status}${this.detail ? `(${this.detail})` : ""} run=${this.running ? 1 : 0} on=${this.uniforms.uMaskOn.value} ` +
       `pose=${this.poseMs.toFixed(0)}ms mask=${this.maskMs.toFixed(0)}ms hz=${this.hz} maskHz=${this.governor.hz}/${this.governor.cap} age=${age} person=${this.mask.hasPerson ? 1 : 0} ` +
-      `poses=${this.lastPoses ?? "-"} masks=${this.lastMasks ?? "-"} in=${this.lastInput || "-"} lum=${lum} dg=${this.delegate} found=${this.runsWithPerson}/${this.runs}` +
+      `poses=${this.lastPoses ?? "-"} masks=${this.lastMasks ?? "-"} ${this.describeMaskStats()} msrc=${this.source} in=${this.lastInput || "-"} lum=${lum} dg=${this.delegate} found=${this.runsWithPerson}/${this.runs}` +
       (this.probe !== "-" ? ` probe=${this.probe}` : "")
     );
   }

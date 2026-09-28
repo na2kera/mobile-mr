@@ -9,12 +9,15 @@
 import * as THREE from "three";
 import type { KeshinPlayer } from "../../src/shared/keshin-protocol";
 import { keshinTimeline } from "../../src/shared/keshin-timeline";
-import { markerFwdToWorldYaw, markerToWorld, remoteDisplay, smoothToward, smoothYaw } from "./keshin-math";
+import { effectiveTrack, markerFwdToWorldYaw, markerToWorld, remoteDisplay, smoothToward, smoothYaw, worldToMarker } from "./keshin-math";
+import { angleFromEyeDeg, correctionAt, hybridHead, matchRemotes, planRemote, pruneCorr } from "./keshin-hybrid";
+import type { CamDetection, CorrSample, MatchReason } from "./keshin-hybrid";
 import type { Quat, V3 } from "./keshin-math";
 import { KESHIN_SPECS } from "./keshin-assets";
 import type { LoadedKeshin } from "./keshin-assets";
 import { KeshinView } from "./keshin-view";
 import type { MaskUniforms } from "./keshin-occlusion";
+import type { KeshinLook } from "./keshin-look";
 
 export type RemoteOptions = {
   heightM: number;
@@ -32,7 +35,30 @@ export type RemoteOptions = {
   noPoseMs: number;
   /** pose がこれだけ届かなければ通信切れとして描かない [ms]（?peerLostMs=） */
   lostMs: number;
+  /** 段階 3 の C の見え方（null = 段階 2 まで） */
+  look: KeshinLook | null;
+  /** 段階 3 の B: 位置の決め方（?posMode=declared|camera|hybrid。既定 hybrid） */
+  posMode: PosMode;
+  /** 方向で結ぶ角度のしきい値 [deg]（?matchDeg=） */
+  matchDeg: number;
+  /** 相手 1 人・検出 1 人で結ぶとき、新しい申告があれば方向の差の上限 [deg]（?onlyOneMaxDeg=） */
+  onlyOneMaxDeg: number;
+  /** 見えなくなった瞬間の補正に使う直近の観測 [s]（?corrRecentSec=） */
+  corrRecentSec: number;
+  /** camera モードで見えなくなってから消すまで [ms] */
+  cameraFadeMs: number;
+  /** 前の結果の人と位置で結ぶしきい値 [m]（?matchM=） */
+  matchM: number;
+  /** 距離の混ぜ方: 申告までの距離の重み（?distW=。申告寄り） */
+  distW: number;
+  /** 補正を平均する窓 [s]（?corrWindowSec=）と、見えなくなってから 0 へ弱める時間 [s]（?corrDecaySec=） */
+  corrWindowSec: number;
+  corrDecaySec: number;
+  /** Pose の結果がこれより古ければ「見えていない」とする [ms] */
+  camStaleMs: number;
 };
+
+export type PosMode = "declared" | "camera" | "hybrid";
 
 /** 相手 1 人ぶんの受信状態（main.ts の players と同じもの） */
 export type RemotePlayerInput = { info: KeshinPlayer; startLocalMs: number; poseRecvMs: number };
@@ -59,6 +85,22 @@ type RemoteEntry = {
   gapMax: number;
   gapNow: number;
   snaps: number;
+  // ---- 段階 3 の B（カメラで見た位置）----
+  /** 直近の Pose の結果でこの相手に結んだ人（自分のワールド）と、その結果の時刻・結び方 */
+  cam: CamDetection | null;
+  camAtMs: number;
+  matchReason: MatchReason | "-";
+  /** 最後にカメラで見えた時刻と、そのときの頭（次の結果の対応づけに使う） */
+  lastCamSeenMs: number;
+  lastCamHead: V3 | null;
+  lastCamFwd: [number, number] | null;
+  /** 補正の観測（マーカー座標系の「カメラで見た頭 − 申告位置」。直近の窓だけ持つ） */
+  corr: CorrSample[];
+  /** 表示の出どころ（camera / hybrid / declared / declared+corr / hidden）と診断 */
+  source: string;
+  declDist: number | null;
+  camDist: number | null;
+  dirDeg: number | null;
 };
 
 const tmpQuat = new THREE.Quaternion();
@@ -77,6 +119,9 @@ export class RemoteKeshins {
   private gapWindowStart = performance.now();
   /** 直前の 1 秒の跳びの最大（ログ用。1 秒ごとに入れ替える） */
   private gapLastWindow = new Map<string, number>();
+  /** 直近の Pose の結果の時刻（見えているかの判定。observe で更新） */
+  private lastResultMs = -Infinity;
+  private lastMatchKey = "";
 
   constructor(
     scene: THREE.Scene,
@@ -118,6 +163,7 @@ export class RemoteKeshins {
           auraN: this.opts.auraN,
           nearFade: null,
           mask: this.mask,
+          look: this.opts.look,
         },
         this.getModel(p.info.keshin),
       );
@@ -139,6 +185,17 @@ export class RemoteKeshins {
         gapMax: 0,
         gapNow: 0,
         snaps: 0,
+        cam: null,
+        camAtMs: -Infinity,
+        matchReason: "-",
+        lastCamSeenMs: -Infinity,
+        lastCamHead: null,
+        lastCamFwd: null,
+        corr: [],
+        source: "-",
+        declDist: null,
+        camDist: null,
+        dirDeg: null,
       });
     }
   }
@@ -148,11 +205,98 @@ export class RemoteKeshins {
     for (const e of this.views.values()) if (e.view.spec.index === index) e.view.setModel(loaded);
   }
 
+  /** 見え方を変える（確認用。ビューを作り直す。相手ごとの学習した補正なども捨てる） */
+  setLook(look: KeshinLook | null, players: ReadonlyMap<string, RemotePlayerInput>, selfId: string) {
+    this.opts.look = look;
+    for (const e of this.views.values()) e.view.dispose();
+    this.views.clear();
+    this.sync(players, selfId);
+  }
+
+  /** 位置の決め方を変える（比べる用。?posMode= と同じ） */
+  setPosMode(mode: PosMode) {
+    this.opts.posMode = mode;
+  }
+  get posMode(): PosMode {
+    return this.opts.posMode;
+  }
+
+  /**
+   * 段階 3 の B: Pose の結果（自分のワールドの人）が届くたびに呼ぶ。相手と 1 対 1 で結び（matchRemotes）、見えた相手は補正を学ぶ
+   * （マーカー座標系の「カメラで見た頭（ハイブリッド）− 申告位置」。自分のアンカーがあるときだけ）
+   */
+  observe(
+    now: number,
+    detections: readonly CamDetection[],
+    players: ReadonlyMap<string, RemotePlayerInput>,
+    ctx: { anchor: THREE.Object3D | null; eye: V3; selfAnchorFresh: boolean },
+  ) {
+    this.lastResultMs = now;
+    const a = this.anchorOf(ctx.anchor);
+    const remotes = [...this.views.values()].map((e) => {
+      const p = players.get(e.id);
+      const pose = p?.info.pose;
+      const decl = a && pose?.pos ? markerToWorld(a.pos, a.quat, [pose.pos[0], pose.pos[1], pose.pos[2]]) : null;
+      return {
+        id: e.id,
+        declared: decl,
+        fresh: !!decl && ctx.selfAnchorFresh && this.declaredFresh(p, now),
+        last: e.lastCamHead && now - e.lastCamSeenMs <= 3000 ? e.lastCamHead : null,
+      };
+    });
+    const m = matchRemotes(detections, remotes, ctx.eye, { matchDeg: this.opts.matchDeg, matchM: this.opts.matchM, onlyOneMaxDeg: this.opts.onlyOneMaxDeg });
+    for (const r of remotes) {
+      const e = this.views.get(r.id)!;
+      const hit = m.get(r.id);
+      if (!hit) {
+        e.cam = null;
+        e.matchReason = "-";
+        continue;
+      }
+      const d = detections[hit.index];
+      e.cam = d;
+      e.camAtMs = now;
+      e.matchReason = hit.reason;
+      e.lastCamSeenMs = now;
+      e.lastCamHead = d.head;
+      e.lastCamFwd = d.fwd;
+      e.dirDeg = r.declared ? angleFromEyeDeg(ctx.eye, r.declared, d.head) : null;
+      // 補正の学習: 見えている位置（ハイブリッドの頭）をマーカー座標系に直して申告位置との差を窓に入れる
+      const p = players.get(r.id);
+      if (a && p?.info.pose?.pos && r.declared) {
+        const h = hybridHead(ctx.eye, d.head, r.declared, r.fresh, this.opts.distW);
+        const hm = worldToMarker(a.pos, a.quat, h);
+        const dm = p.info.pose.pos;
+        e.corr.push({ t: now, c: [hm[0] - dm[0], hm[1] - dm[1], hm[2] - dm[2]] });
+        e.corr = pruneCorr(e.corr, this.opts.corrWindowSec);
+      }
+    }
+    const key = remotes.map((r) => `${r.id}:${m.get(r.id)?.reason ?? "-"}`).join(",");
+    if (key !== this.lastMatchKey) {
+      this.lastMatchKey = key;
+      this.log("remote-match", `${key} persons=${detections.length}`);
+    }
+  }
+
+  private anchorOf(anchor: THREE.Object3D | null): { pos: V3; quat: Quat } | null {
+    if (!anchor) return null;
+    anchor.updateWorldMatrix(true, false);
+    anchor.matrixWorld.decompose(tmpPos, tmpQuat, new THREE.Vector3());
+    return { pos: [tmpPos.x, tmpPos.y, tmpPos.z], quat: [tmpQuat.x, tmpQuat.y, tmpQuat.z, tmpQuat.w] };
+  }
+
+  /** 申告が新しいか（marker、または gyro で staleMs 未満） */
+  private declaredFresh(p: RemotePlayerInput | undefined, now: number): boolean {
+    if (!p?.info.pose) return false;
+    const eff = effectiveTrack(p.info.pose, now - p.poseRecvMs, this.opts.noPoseMs);
+    return eff.track === "marker" || (eff.track === "gyro" && (eff.ageMs ?? Infinity) < this.opts.staleMs);
+  }
+
   update(
     now: number,
     dtSec: number,
     players: ReadonlyMap<string, RemotePlayerInput>,
-    ctx: { anchor: THREE.Object3D | null; camWorldPos: THREE.Vector3; viewportH: number },
+    ctx: { anchor: THREE.Object3D | null; camWorldPos: THREE.Vector3; viewportH: number; selfAnchorFresh?: boolean },
   ) {
     let anchorPos: V3 | null = null;
     let anchorQuat: Quat | null = null;
@@ -162,6 +306,7 @@ export class RemoteKeshins {
       anchorPos = [tmpPos.x, tmpPos.y, tmpPos.z];
       anchorQuat = [tmpQuat.x, tmpQuat.y, tmpQuat.z, tmpQuat.w];
     }
+    const eye: V3 = [ctx.camWorldPos.x, ctx.camWorldPos.y, ctx.camWorldPos.z];
     // 跳びの最大は 1 秒ごとに入れ替える（ログは直前の 1 秒）
     if (now - this.gapWindowStart >= 1000) {
       this.gapWindowStart = now;
@@ -175,23 +320,25 @@ export class RemoteKeshins {
       const disp = remoteDisplay(anchorPos !== null, pose, now - p.poseRecvMs, this.opts);
       e.track = disp.track;
       e.ageMs = disp.ageMs;
-      e.fade = disp.fade;
       const visual = keshinTimeline((now - p.startLocalMs) / 1000, p.info.on ? "appear" : "vanish");
-      const canPlace = disp.draw && anchorPos && anchorQuat && pose?.pos && pose.fwd;
-      if (!canPlace) {
-        this.setDrawn(e, false, disp.reason);
+      // gyro で staleMs を過ぎたら、マーカー座標系の頭の位置は最後の値で止める（向きはジャイロで正しいので受け取ったまま）
+      if (disp.draw && pose?.pos && (!disp.freeze || !e.frozenMarkerHead)) e.frozenMarkerHead = [pose.pos[0], pose.pos[1], pose.pos[2]];
+      const plan = this.plan(e, p, disp, now, anchorPos, anchorQuat, eye, !!ctx.selfAnchorFresh);
+      e.fade = plan.fade;
+      e.source = plan.source;
+      if (!plan.target || plan.yaw === null) {
+        this.setDrawn(e, false, plan.reason);
         e.active = false;
         e.view.hide();
         // 描けない間は表示中の値を捨てる（戻ったときは目標へ即座に置く）
         e.shownHead = null;
         e.shownYaw = null;
-        if (disp.reason !== "ok") e.frozenMarkerHead = null;
+        // 表示を止めた申告位置を捨てるのは declared モードだけ（hybrid の補正の基準は最新の申告位置で、これとは別）
+        if (this.opts.posMode === "declared" && plan.reason !== "ok") e.frozenMarkerHead = null;
         continue;
       }
-      // gyro で staleMs を過ぎたら、マーカー座標系の頭の位置は最後の値で止める（向きはジャイロで正しいので受け取ったまま）
-      if (!disp.freeze || !e.frozenMarkerHead) e.frozenMarkerHead = [pose!.pos![0], pose!.pos![1], pose!.pos![2]];
-      const target = markerToWorld(anchorPos!, anchorQuat!, e.frozenMarkerHead);
-      const targetYaw = markerFwdToWorldYaw(anchorQuat!, pose!.fwd!);
+      const target = plan.target;
+      const targetYaw = plan.yaw;
       const sm = smoothToward(e.shownHead, target, dtSec, this.opts.smoothSec, this.opts.snapM);
       if (sm.snapped && e.shownHead !== null) {
         e.snaps++;
@@ -202,10 +349,66 @@ export class RemoteKeshins {
       e.shownHead = sm.pos;
       e.shownYaw = sm.snapped || e.shownYaw === null ? targetYaw : smoothYaw(e.shownYaw, targetYaw, dtSec, this.opts.smoothSec);
       e.dist = Math.hypot(sm.pos[0] - ctx.camWorldPos.x, sm.pos[1] - ctx.camWorldPos.y, sm.pos[2] - ctx.camWorldPos.z);
-      e.view.update({ head: e.shownHead, yaw: e.shownYaw, visual, fade: disp.fade, aura: true, timeSec: now / 1000, viewportH: ctx.viewportH });
-      this.setDrawn(e, !visual.hidden && e.view.modelVisible, visual.hidden ? "off" : disp.reason);
+      e.view.update({ head: e.shownHead, yaw: e.shownYaw, visual, fade: plan.fade, aura: true, timeSec: now / 1000, viewportH: ctx.viewportH });
+      this.setDrawn(e, !visual.hidden && e.view.modelVisible, visual.hidden ? "off" : plan.reason);
       e.active = !visual.hidden && (e.view.modelVisible || e.view.auraVisible);
     }
+  }
+
+  /**
+   * どこに・どの薄さで描くか（位置の決め方 posMode ごと）。target = null なら描かない
+   *   declared: 段階 2 と同じ（申告位置。信用度で薄く・古ければ消す）
+   *   camera: 見えている間はカメラの位置だけ（距離もカメラの推定）。見えなくなったら 0.5 秒保持してフェードで消す
+   *   hybrid: 見えている間は方向 = カメラ・距離 = 申告と混ぜる（アンカーやマーカーが無くても描く）。見えていない間は申告位置 + 補正（弱めながら）。
+   *     補正を学べていた相手は、薄さと staleHideMs を「最後に見えてから」で数える
+   */
+  private plan(
+    e: RemoteEntry,
+    p: RemotePlayerInput,
+    disp: ReturnType<typeof remoteDisplay>,
+    now: number,
+    anchorPos: V3 | null,
+    anchorQuat: Quat | null,
+    eye: V3,
+    selfAnchorFresh: boolean,
+  ): ReturnType<typeof planRemote> {
+    const pose = p.info.pose;
+    const anchor = anchorPos && anchorQuat ? { pos: anchorPos, quat: anchorQuat } : null;
+    const declMarker: V3 | null = pose?.pos ? [pose.pos[0], pose.pos[1], pose.pos[2]] : null;
+    const declWorld = anchor && declMarker ? markerToWorld(anchor.pos, anchor.quat, declMarker) : null;
+    const seen = e.cam !== null && e.camAtMs === this.lastResultMs && now - this.lastResultMs <= this.opts.camStaleMs;
+    e.declDist = declWorld ? Math.hypot(declWorld[0] - eye[0], declWorld[1] - eye[1], declWorld[2] - eye[2]) : null;
+    e.camDist = seen && e.cam ? e.cam.camDist : null;
+    return planRemote({
+      mode: this.opts.posMode,
+      now,
+      disp,
+      anchor,
+      declMarker,
+      declMarkerFrozen: e.frozenMarkerHead,
+      declYaw: anchorQuat && pose?.fwd ? markerFwdToWorldYaw(anchorQuat, pose.fwd) : null,
+      fresh: !!declWorld && selfAnchorFresh && this.declaredFresh(p, now),
+      seen,
+      cam: e.cam,
+      lastCamSeenMs: e.lastCamSeenMs,
+      lastCamHead: e.lastCamHead,
+      lastCamFwd: e.lastCamFwd,
+      corr: e.corr,
+      eye,
+      opts: {
+        distW: this.opts.distW,
+        corrWindowSec: this.opts.corrWindowSec,
+        corrDecaySec: this.opts.corrDecaySec,
+        corrRecentSec: this.opts.corrRecentSec,
+        staleMs: this.opts.staleMs,
+        staleHideMs: this.opts.staleHideMs,
+        noPoseMs: this.opts.noPoseMs,
+        lostMs: this.opts.lostMs,
+        cameraFadeMs: this.opts.cameraFadeMs,
+      },
+      display: (q) => remoteDisplay(true, q, 0, this.opts),
+      markerToWorld,
+    });
   }
 
   private setDrawn(e: RemoteEntry, drawn: boolean, reason: string) {
@@ -248,13 +451,20 @@ export class RemoteKeshins {
       const p = players.get(e.id);
       const name = p ? p.info.name : e.id;
       const age = e.ageMs !== null ? ` ${(e.ageMs / 1000).toFixed(1)}s` : "";
-      return `remote ${name}(${e.id}) #${e.view.spec.index}${p?.info.on ? "on" : "off"} ${e.track}${age} dist=${Number.isFinite(e.dist) ? e.dist.toFixed(2) : "-"}m drawn=${e.drawn ? 1 : 0}(${e.reason}) fade=${e.fade.toFixed(2)} jump=${(this.gapLastWindow.get(e.id) ?? e.gapMax).toFixed(2)}m snaps=${e.snaps}`;
+      return `remote ${name}(${e.id}) #${e.view.spec.index}${p?.info.on ? "on" : "off"} ${e.track}${age} dist=${Number.isFinite(e.dist) ? e.dist.toFixed(2) : "-"}m drawn=${e.drawn ? 1 : 0}(${e.reason}) fade=${e.fade.toFixed(2)} jump=${(this.gapLastWindow.get(e.id) ?? e.gapMax).toFixed(2)}m snaps=${e.snaps} ${this.describeHybrid(e)}`;
     });
+  }
+
+  /** 段階 3 の B の診断: 出どころ・カメラの推定距離・申告距離・補正の大きさと窓の件数・方向のずれ・結び方 */
+  private describeHybrid(e: RemoteEntry): string {
+    const c = correctionAt(e.corr, performance.now(), this.opts.corrWindowSec, this.opts.corrDecaySec, this.opts.corrRecentSec, e.lastCamSeenMs);
+    const f = (v: number | null, d = 2) => (v === null ? "-" : v.toFixed(d));
+    return `src=${e.source} camD=${f(e.camDist)} decD=${f(e.declDist)} corr=${Math.hypot(...c.raw).toFixed(2)}m×${c.k.toFixed(2)} n=${c.n} dAng=${f(e.dirDeg, 0)}deg match=${e.matchReason}`;
   }
 
   /** 実機ログの snapshot 用（1 行に収める） */
   diag(): string {
-    const list = [...this.views.values()].map((e) => `${e.id}:#${e.view.spec.index}/${e.track}${e.ageMs ? `@${(e.ageMs / 1000).toFixed(1)}` : ""}/d${Number.isFinite(e.dist) ? e.dist.toFixed(1) : "-"}/${e.drawn ? "drawn" : e.reason}/f${e.fade.toFixed(2)}/j${(this.gapLastWindow.get(e.id) ?? 0).toFixed(2)}`);
+    const list = [...this.views.values()].map((e) => `${e.id}:#${e.view.spec.index}/${e.track}${e.ageMs ? `@${(e.ageMs / 1000).toFixed(1)}` : ""}/d${Number.isFinite(e.dist) ? e.dist.toFixed(1) : "-"}/${e.drawn ? "drawn" : e.reason}/f${e.fade.toFixed(2)}/j${(this.gapLastWindow.get(e.id) ?? 0).toFixed(2)}/${this.describeHybrid(e).replace(/ /g, "/")}`);
     return list.length ? `remotes=[${list.join(" ")}]` : "remotes=-";
   }
 

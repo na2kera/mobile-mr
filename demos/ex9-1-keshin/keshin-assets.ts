@@ -145,6 +145,17 @@ function isUnder(o: THREE.Object3D, names: readonly string[]): boolean {
 
 // ---- 1 体ぶんのインスタンス（自分用・他人用で別々に作る。マテリアルとクリッピング平面は個別）----
 
+/** 段階 3 の C: 腰の切り口を溶かす uniform（他人用。plane = 腰の切断面（ワールド。法線は上）、m = 溶ける長さ [m]、time = 揺らめき） */
+export type DissolveUniforms = {
+  uDissolvePlane: { value: THREE.Vector4 };
+  uDissolveM: { value: number };
+  uDissolveTime: { value: number };
+};
+
+export function createDissolveUniforms(m: number): DissolveUniforms {
+  return { uDissolvePlane: { value: new THREE.Vector4(0, 1, 0, 0) }, uDissolveM: { value: m }, uDissolveTime: { value: 0 } };
+}
+
 export type KeshinInstance = {
   /** モデルの根（位置・回転・拡大縮小は外側の holder で行う） */
   root: THREE.Object3D;
@@ -170,6 +181,7 @@ export function createKeshinInstance(
   nearFade: [number, number] | null,
   hideFx = false,
   mask: MaskBinding | null = null,
+  dissolve: DissolveUniforms | null = null,
 ): KeshinInstance {
   const root = loaded.fallback ? loaded.template.clone(true) : cloneSkinned(loaded.template);
   const names = nodeNames(root, loaded.spec);
@@ -183,7 +195,7 @@ export function createKeshinInstance(
   // 深度だけ書く複製のマテリアル（インスタンスで 1 つ。スキン・モーフはオブジェクト側の属性で自動）
   const depthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false });
   depthMaterial.clippingPlanes = [plane];
-  if (nearUniforms || mask) addKeshinShader(depthMaterial, nearUniforms, mask, "depth");
+  if (nearUniforms || mask || dissolve) addKeshinShader(depthMaterial, nearUniforms, mask, "depth", dissolve);
 
   type Mat = THREE.Material & { opacity: number; emissive?: THREE.Color };
   /** own = 発光・演出（体の目標値を掛けず、元の値 × 演出だけ） */
@@ -211,7 +223,7 @@ export function createKeshinInstance(
       m.transparent = true;
       m.depthWrite = false;
       m.clippingPlanes = [plane];
-      if (nearUniforms || mask) addKeshinShader(m, nearUniforms, mask, "color");
+      if (nearUniforms || mask || dissolve) addKeshinShader(m, nearUniforms, mask, "color", dissolve);
       materials.push({ m, base, own: fxBlend || emissive });
       return m;
     });
@@ -309,6 +321,7 @@ function addKeshinShader(
   near: { uKeshinEye: { value: THREE.Vector3 }; uKeshinNear: { value: THREE.Vector2 } } | null,
   mask: MaskBinding | null,
   kind: "color" | "depth",
+  dissolve: DissolveUniforms | null = null,
 ) {
   material.onBeforeCompile = (shader) => {
     const heads: string[] = ["varying vec3 vKeshinWorld;"];
@@ -330,6 +343,27 @@ function addKeshinShader(
         "}",
       );
     }
+    if (dissolve) {
+      // 段階 3 の C: 腰の切断面から上 uDissolveM の範囲を、下へ行くほど画素ごとに捨てる（切り口を作らず光に溶ける）。
+      // 高さの境目は横方向のゆっくりしたノイズで揺らめかせる。深度の前描画も同じ条件で捨てる（同じ画素は同じノイズ）
+      Object.assign(shader.uniforms, dissolve);
+      heads.push(
+        "uniform vec4 uDissolvePlane;",
+        "uniform float uDissolveM;",
+        "uniform float uDissolveTime;",
+        "float kdHash(float n) { return fract(sin(n) * 43758.5453123); }",
+        "float kdNoise(float x) { float i = floor(x); float f = fract(x); float u = f * f * (3.0 - 2.0 * f); return mix(kdHash(i), kdHash(i + 1.0), u); }",
+      );
+      bodies.push(
+        "{",
+        "  float dh = dot(uDissolvePlane.xyz, vKeshinWorld) + uDissolvePlane.w;",
+        "  float wob = (kdNoise(vKeshinWorld.x * 3.1 + vKeshinWorld.z * 2.3 + uDissolveTime * 0.8) + kdNoise(vKeshinWorld.y * 5.0 - uDissolveTime * 1.3) - 1.0) * 0.3 * uDissolveM;",
+        "  float dk = uDissolveM > 0.0 ? smoothstep(0.0, uDissolveM, dh + wob) : 1.0;",
+        "  float dn = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));",
+        "  if (dk * dk <= dn) discard;",
+        "}",
+      );
+    }
     if (mask) {
       Object.assign(shader.uniforms, mask.shared, mask.owner);
       heads.push(MASK_HEAD_GLSL);
@@ -339,7 +373,7 @@ function addKeshinShader(
       .replace("#include <common>", ["#include <common>", ...heads].join("\n"))
       .replace("#include <clipping_planes_fragment>", ["#include <clipping_planes_fragment>", ...bodies].join("\n"));
   };
-  material.customProgramCacheKey = () => `keshin-${near ? "near" : ""}-${mask ? "mask" : ""}-${kind}`;
+  material.customProgramCacheKey = () => `keshin-${near ? "near" : ""}-${mask ? "mask" : ""}-${dissolve ? "dissolve" : ""}-${kind}`;
   material.needsUpdate = true;
 }
 

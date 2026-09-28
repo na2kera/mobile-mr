@@ -266,10 +266,21 @@ export function fakeMirrorPoints(p: FakeMirrorPerson): { cam: V3[]; hip: V3 } {
  * y 下・z はカメラから遠ざかる向きが + の実寸）。?fakeperson=1 とテストで使う
  */
 export function fakeMirrorPose(people: readonly FakeMirrorPerson[], m: ViewMapping): { landmarks: BodyLandmark[][]; worldLandmarks: BodyLandmark[][] } {
+  return poseFromCamPoints(
+    people.map((p) => fakeMirrorPoints(p).cam),
+    m,
+  );
+}
+
+/**
+ * カメラ座標系の 33 点（人ごと）→ MediaPipe の PoseLandmarker と同じ形の結果（landmarks = 画像の正規化座標、worldLandmarks = 腰の中点が原点・
+ * カメラの軸に沿った y 下・z 奥の実寸）。カメラの後ろに回った点は visibility 0
+ */
+export function poseFromCamPoints(people: readonly (readonly V3[])[], m: ViewMapping): { landmarks: BodyLandmark[][]; worldLandmarks: BodyLandmark[][] } {
   const landmarks: BodyLandmark[][] = [];
   const worldLandmarks: BodyLandmark[][] = [];
-  for (const p of people) {
-    const { cam, hip } = fakeMirrorPoints(p);
+  for (const cam of people) {
+    const hip: V3 = [(cam[23][0] + cam[24][0]) / 2, (cam[23][1] + cam[24][1]) / 2, (cam[23][2] + cam[24][2]) / 2];
     const world: BodyLandmark[] = cam.map((c) => ({ x: c[0] - hip[0], y: -(c[1] - hip[1]), z: -(c[2] - hip[2]), visibility: 1 }));
     const img: BodyLandmark[] = cam.map((c, i) => {
       const proj = projectToImage({ x: c[0], y: c[1], z: c[2] }, m);

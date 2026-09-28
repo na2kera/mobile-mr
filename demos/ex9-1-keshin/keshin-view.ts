@@ -6,6 +6,11 @@
 import * as THREE from "three";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
 import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack } from "./keshin-math";
+import { AURA_SUSTAIN } from "../../src/shared/keshin-timeline";
+import { createDissolveUniforms } from "./keshin-assets";
+import type { DissolveUniforms } from "./keshin-assets";
+import { BackStream } from "./keshin-stream";
+import type { KeshinLook } from "./keshin-look";
 import type { KeshinFrameInput, V3 } from "./keshin-math";
 import { createKeshinInstance, fallbackKeshin } from "./keshin-assets";
 import type { KeshinInstance, KeshinSpec, LoadedKeshin } from "./keshin-assets";
@@ -35,6 +40,8 @@ export type KeshinViewOptions = {
   nearFade: [number, number] | null;
   /** カメラに写った人の形で隠す（他人用をスマホに描くとき。段階 2）。null = 隠さない（自分用・俯瞰画面） */
   mask?: MaskUniforms | null;
+  /** 段階 3 の C: 他人用の「背中からビヨーンと出る」見え方（腰を頭より上・溶ける下端・背中からの光の流れ）。null = 段階 2 までの見え方 */
+  look?: KeshinLook | null;
 };
 
 export type KeshinUpdate = {
@@ -61,6 +68,9 @@ const tmpPoint = new THREE.Vector3();
 const tmpNormal = new THREE.Vector3();
 const tmpMat = new THREE.Matrix4();
 const tmpNormalMat = new THREE.Matrix3();
+const tmpBackDir = new THREE.Vector3();
+const tmpBack = new THREE.Vector3();
+const tmpWaist = new THREE.Vector3();
 
 export class KeshinView {
   readonly group = new THREE.Group();
@@ -82,12 +92,19 @@ export class KeshinView {
 
   /** 人の形で隠すときの uniform（全員で共有するマスク + この化身の持ち主の頭）。隠さないなら null */
   private readonly maskBinding: MaskBinding | null;
+  /** 段階 3 の C（他人用だけ）: 見え方の設定・腰を溶かす uniform・背中からの光の流れ */
+  private readonly look: KeshinLook | null;
+  private readonly dissolve: DissolveUniforms | null;
+  readonly stream: BackStream | null;
 
   constructor(spec: KeshinSpec, opts: KeshinViewOptions, loaded: LoadedKeshin | null = null) {
     this.spec = spec;
     this.maskBinding = opts.mask ? { shared: opts.mask, owner: createOwnerUniforms() } : null;
     // 主観の見え方（前傾・前後）は確認用に後から変えられるよう、自分の写しを持つ
     this.opts = { ...opts };
+    this.look = opts.mode === "other" ? (opts.look ?? null) : null;
+    this.dissolve = this.look && this.look.dissolveM > 0 ? createDissolveUniforms(this.look.dissolveM) : null;
+    this.stream = this.look && this.look.streamK > 0 ? new BackStream(spec.auraColors, this.look.streamN, this.maskBinding) : null;
     this.loaded = loaded ?? fallbackKeshin(spec);
     this.instance = this.createInstance(this.loaded);
     this.holder.matrixAutoUpdate = false;
@@ -102,12 +119,18 @@ export class KeshinView {
       this.aura.uniforms.uColumnMaxH.value = opts.eyeH - 0.3;
     }
     this.group.add(this.holder, this.aura.points);
+    if (this.stream) {
+      this.stream.uniforms.uR0.value = this.look!.streamR0;
+      this.stream.uniforms.uR1.value = this.look!.streamR1;
+      this.group.add(this.stream.group);
+      if (this.maskBinding) attachEyeViewport(this.stream.group, this.maskBinding.shared);
+    }
     this.holder.visible = false;
     this.aura.points.visible = false;
   }
 
   private createInstance(loaded: LoadedKeshin): KeshinInstance {
-    const inst = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx, this.maskBinding);
+    const inst = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx, this.maskBinding, this.dissolve);
     // 人の形で隠すときは、眼ごとのビューポートを描く直前に uniform へ入れる（深度の前描画の複製も含めて）
     if (this.maskBinding) attachEyeViewport(inst.root, this.maskBinding.shared);
     return inst;
@@ -119,8 +142,8 @@ export class KeshinView {
   }
 
   /** 確認用: モデルかオーラだけを一時的に隠す（fn の間だけ） */
-  withHidden<T>(part: "model" | "aura", fn: () => T): T {
-    const o = part === "model" ? this.holder : this.aura.points;
+  withHidden<T>(part: "model" | "aura" | "stream", fn: () => T): T {
+    const o = part === "model" ? this.holder : part === "aura" ? this.aura.points : (this.stream?.group ?? new THREE.Group());
     const was = o.visible;
     o.visible = false;
     try {
@@ -177,16 +200,19 @@ export class KeshinView {
     const wasHolder = this.holder.visible;
     const wasGroup = this.group.visible;
     const wasAura = this.aura.points.visible;
+    const wasStream = this.stream?.group.visible ?? false;
     try {
       this.holder.visible = true;
       this.group.visible = true;
       this.aura.points.visible = true;
+      if (this.stream) this.stream.group.visible = true;
       this.instance.setOpacity(0.5, 0.5);
       return fn();
     } finally {
       this.holder.visible = wasHolder;
       this.group.visible = wasGroup;
       this.aura.points.visible = wasAura;
+      if (this.stream) this.stream.group.visible = wasStream;
       this.instance.setOpacity(this.lastOpacity, this.lastOwn);
     }
   }
@@ -225,6 +251,15 @@ export class KeshinView {
     return { origin: [o.x, o.y, o.z], front: [z.x / len, z.z / len] };
   }
 
+  /** 腰の切断面（ワールド。確認用）。化身を描いていなければ null */
+  cutPlaneWorld(): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
+    if (!this.modelVisible || !this.lastFrame) return null;
+    // 切断面の中心（化身の腰の真ん中）。plane.coplanarPoint は原点に一番近い点なので使わない
+    const c = keshinCutPlane(this.lastFrame).point;
+    this.group.updateWorldMatrix(true, false);
+    return { point: new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(this.group.matrixWorld), normal: this.instance.plane.normal.clone() };
+  }
+
   /** 化身の原点を頭の真下からどれだけ後ろに置くか [m]（主観は前傾の自動値） */
   back(): number {
     const scale = keshinScale(this.opts.heightM);
@@ -232,7 +267,7 @@ export class KeshinView {
       if (this.opts.selfBackOverride !== null) return this.opts.selfBackOverride;
       return selfAutoBack(this.loaded.head, this.loaded.spec.cutY, scale, this.opts.leanDeg, this.opts.faceAheadM);
     }
-    return this.opts.backOverride ?? autoBack(this.loaded.frontZ, scale);
+    return this.opts.backOverride ?? autoBack(this.loaded.frontZ, scale, this.look ? this.look.backClearM : undefined);
   }
 
   update(u: KeshinUpdate) {
@@ -248,7 +283,9 @@ export class KeshinView {
       scale,
       riseM: visual.riseM,
       leanDeg: this.opts.mode === "self" ? this.opts.leanDeg : 0,
+      waistAboveHead: this.look ? this.look.waistAboveHeadM : undefined,
     };
+    const eyeH = u.eyeH ?? this.opts.eyeH;
     this.lastFrame = frame;
     // 人の形の前後の判定に使う持ち主の頭（ワールド。親がシーンでもアンカーでも）
     if (this.maskBinding) {
@@ -266,17 +303,38 @@ export class KeshinView {
       au.uAuraK.value = visual.auraK * auraFade;
       au.uPillarK.value = visual.pillarK;
       au.uBurstK.value = visual.burstK;
-      const cutW = this.loaded.spec.cutY * scale;
-      au.uColumnH.value = cutW;
+      // 腰の高さ（床から）。段階 3 の C では頭より waistAboveHeadM 上。柱は床から背中まで（控えめ）
+      const cutH = this.look ? eyeH + this.look.waistAboveHeadM : this.loaded.spec.cutY * scale;
+      au.uColumnH.value = this.look ? Math.max(0.3, eyeH - 0.35) : cutH;
+      au.uColumnK.value = this.look ? this.look.footAuraK : 1;
       au.uColumnR.value = 0.45;
-      au.uSwirlC.value.set(0, cutW, -back);
+      au.uSwirlC.value.set(0, cutH, -back);
       au.uSwirlR.value = 0.55 * scale * 1.6;
       au.uViewportH.value = u.viewportH;
       if (u.eyeWorld) au.uEye.value.copy(u.eyeWorld);
-      const floor: V3 = [u.head[0], u.head[1] - (u.eyeH ?? this.opts.eyeH), u.head[2]];
+      const floor: V3 = [u.head[0], u.head[1] - eyeH, u.head[2]];
       this.aura.points.matrix.makeRotationY(u.yaw).setPosition(floor[0], floor[1], floor[2]);
       this.aura.points.matrixWorldNeedsUpdate = true;
     }
+    // 段階 3 の C: 背中（頭の 0.35m 下・少し後ろ）から化身の腰へ立ち上る光の流れ。出現の最初に伸び、その先で化身がせり上がる
+    if (this.stream) {
+      const k = visual.hidden || !u.aura ? 0 : Math.min(1, visual.auraK / AURA_SUSTAIN) * auraFade * this.look!.streamK;
+      this.stream.group.visible = k > 0.002;
+      if (this.stream.group.visible) {
+        const su = this.stream.uniforms;
+        su.uK.value = k;
+        const g = Math.min(1, Math.max(0, visual.u / 0.45));
+        su.uGrow.value = g * g * (3 - 2 * g);
+        su.uTime.value = u.timeSec;
+        su.uViewportH.value = u.viewportH;
+        tmpBackDir.set(-Math.sin(u.yaw), 0, -Math.cos(u.yaw));
+        tmpBack.set(u.head[0], u.head[1] - 0.35, u.head[2]).addScaledVector(tmpBackDir, 0.12);
+        const cut = keshinCutPlane(frame);
+        tmpWaist.set(cut.point[0], cut.point[1], cut.point[2]);
+        this.stream.setCurve(tmpBack, tmpWaist, tmpBackDir);
+      }
+    }
+    if (this.dissolve) this.dissolve.uDissolveTime.value = u.timeSec;
     // モデル
     const body = this.opts.opacity * visual.opacityK * u.fade;
     const own = visual.opacityK * u.fade;
@@ -296,6 +354,7 @@ export class KeshinView {
     tmpPoint.set(...cut.point).applyMatrix4(tmpMat);
     tmpNormal.set(...cut.normal).applyMatrix3(tmpNormalMat.getNormalMatrix(tmpMat)).normalize();
     this.instance.plane.setFromNormalAndCoplanarPoint(tmpNormal, tmpPoint);
+    if (this.dissolve) this.dissolve.uDissolvePlane.value.set(this.instance.plane.normal.x, this.instance.plane.normal.y, this.instance.plane.normal.z, this.instance.plane.constant);
     if (this.instance.nearUniforms && u.eyeWorld) this.instance.nearUniforms.uKeshinEye.value.copy(u.eyeWorld);
   }
 
@@ -307,6 +366,7 @@ export class KeshinView {
   hide() {
     this.holder.visible = false;
     this.aura.points.visible = false;
+    if (this.stream) this.stream.group.visible = false;
     this.modelVisible = false;
   }
 
@@ -315,6 +375,7 @@ export class KeshinView {
     this.instance.dispose();
     this.disposeFallback();
     this.aura.dispose();
+    this.stream?.dispose();
   }
 
   /**

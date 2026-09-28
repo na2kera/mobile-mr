@@ -45,6 +45,10 @@ import { coverUvTransform, pickBackUltraWide } from "../src/shared/passthrough-c
 import * as THREE from "three";
 import { assignMirror, assignMirrorTracked, mirrorVisibility, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose } from "../demos/ex9-1-keshin/mirror-math.ts";
 import { projectToImage } from "../src/shared/fake-hands.ts";
+import { decideMaskSource, maskStats, skeletonPersonShape } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
+import { angleFromEyeDeg, blendDistance, correctionAt, detectionToWorld, hybridHead, matchRemotes, planRemote, pruneCorr, robustMeanV3 } from "../demos/ex9-1-keshin/keshin-hybrid.ts";
+import { poseFromCamPoints, fakeMirrorPoints } from "../demos/ex9-1-keshin/mirror-math.ts";
+import { worldToMarker } from "../demos/ex9-1-keshin/keshin-math.ts";
 import { MaskHzGovernor, PersonMask, createMaskUniforms, decideMaskHzLevel, maskHzLevels } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
 
 const results = [];
@@ -343,6 +347,264 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("マスク: 裾の切り方は変えられる（?maskEdge=。0.1〜0.9 で 0.5 → 128 前後）", Math.abs(pm.pixels[0] - 128) <= 1);
   pm.setFromFloat([new Float32Array(8 * 2).fill(1)], 8, 2);
   check("マスク: 大きさが変わったらテクスチャを作り直す", pm.size[0] === 8 && pm.size[1] === 2 && u.uMaskTex.value.image.width === 8);
+}
+
+// ================= 2d'. 段階 3 の A: マスクの中身の診断・骨格から描く人の形・source の切り替え =================
+{
+  const zeros = new Float32Array(100);
+  const st0 = maskStats([zeros]);
+  check("マスクの診断: 全部 0（実機の poses=1 masks=1 person=0 の状態）→ mmax 0・mfrac 0", st0.max === 0 && st0.frac === 0 && st0.scale === 1 && st0.nan === 0);
+  const nanM = new Float32Array(100).fill(NaN);
+  const stN = maskStats([nanM]);
+  check("マスクの診断: NaN は mnan に数える（setFromFloat では NaN は人にならない）", stN.nan === 1 && stN.max === 0);
+  const half = new Float32Array(100);
+  for (let i = 0; i < 30; i++) half[i] = 0.9;
+  const stH = maskStats([half]);
+  check("マスクの診断: 3 割が 0.9 → mmax 0.9・mfrac 0.3・mmean 0.27", near(stH.max, 0.9, 1e-6) && near(stH.frac, 0.3) && near(stH.mean, 0.27, 1e-6));
+  const b255 = new Float32Array(100);
+  for (let i = 0; i < 40; i++) b255[i] = 230;
+  const stB = maskStats([b255]);
+  check("マスクの診断: 0..255 の float で来ていたら scale = 1/255（mfrac 0.4）", near(stB.scale, 1 / 255) && near(stB.frac, 0.4));
+  {
+    const u = createMaskUniforms(3, 0.15);
+    const pm = new PersonMask(u, [0.3, 0.7]);
+    pm.setFromFloat([b255], 10, 10, stB.scale);
+    check("setFromFloat: 0..255 の値も scale を掛ければ人になる（40 画素が 255）", pm.hasPerson && pm.pixels.filter((v) => v === 255).length === 40);
+    pm.setFromFloat([b255], 10, 10);
+    check("setFromFloat: 0..1 の想定で 0..255 を入れても人にはなる（裾を切って 1 に張り付く。実機の person=0 の原因ではない）", pm.hasPerson);
+  }
+  const st = (source, run = 0) => ({ source, run });
+  // 修正 9: 1 回の結果では切り替えない（5 回続いたら）
+  let ms = st("seg");
+  const seq = [];
+  for (let i = 0; i < 5; i++) {
+    ms = decideMaskSource(ms, "auto", 1, 0, 0.1);
+    seq.push(ms.source);
+  }
+  check("source: auto で人がいてマスクが空（mmax < 0.1）が 5 回続いたら skel（4 回までは seg のまま）", seq.join(",") === "seg,seg,seg,seg,skel", seq.join(","));
+  let ms2 = st("skel");
+  const seq2 = [];
+  for (const v of [0.8, 0.8, 0.05, 0.8, 0.8, 0.8, 0.8, 0.8]) {
+    ms2 = decideMaskSource(ms2, "auto", 1, v, 0.1);
+    seq2.push(ms2.source);
+  }
+  check("source: seg に値が出るのが 5 回続いたら seg に戻す（途中で空が 1 回出たら数え直し。0.1 付近でばたつかない）", seq2.join(",") === "skel,skel,skel,skel,skel,skel,skel,seg", seq2.join(","));
+  check("source: 人がいない結果では変えない・数も進めない", JSON.stringify(decideMaskSource(st("skel", 3), "auto", 0, 0, 0.1)) === JSON.stringify(st("skel", 3)) && decideMaskSource(st("seg", 2), "auto", 0, 0, 0.1).source === "seg");
+  check("source: ?maskSource=seg / skel は強制（すぐ）", decideMaskSource(st("skel"), "seg", 1, 0, 0.1).source === "seg" && decideMaskSource(st("seg"), "skel", 1, 0.9, 0.1).source === "skel");
+  // 修正 8: 0..255 で来て最大 5（0..1 に直すと 0.02）のときは空とみなす（生の値 5 で判定しない）
+  const b5 = new Float32Array(100);
+  b5[0] = 5;
+  const st5 = maskStats([b5]);
+  let ms5 = st("seg");
+  for (let i = 0; i < 5; i++) ms5 = decideMaskSource(ms5, "auto", 1, st5.max * st5.scale, 0.1);
+  check("source: 0..255 で最大 5 → 0..1 に直すと 0.02 なので skel（値の範囲の判定と source の判定を揃える）", near(st5.scale, 1 / 255) && ms5.source === "skel", `${(st5.max * st5.scale).toFixed(3)}`);
+  // 骨格から描く人の形: カメラの方を向いた合成の人（2.5m）を 512×384 のマスクの座標で
+  const m = { tanHalfFov: Math.tan(34 * DEG) * 0.75, eyeAspect: 4 / 3, repeatX: 1, repeatY: 1 };
+  const r = fakeMirrorPose([{ head: [0, 0.2, -2.5], fwd: [0, 1] }], m);
+  const lm = r.landmarks[0];
+  const W = 512;
+  const H = 384;
+  const sh = skeletonPersonShape(lm, W, H);
+  const sw = Math.hypot((lm[11].x - lm[12].x) * W, (lm[11].y - lm[12].y) * H);
+  const earMid = [((lm[7].x + lm[8].x) / 2) * W, ((lm[7].y + lm[8].y) / 2) * H];
+  check("骨格の人の形: 頭 = 両耳の中点の円（半径は両耳の間隔 × 0.55 か肩幅 × 0.3 の大きい方）", sh && near(sh.head.x, earMid[0], 1e-6) && near(sh.head.y, earMid[1], 1e-6) && sh.head.r >= 0.3 * sw - 1e-9, JSON.stringify(sh?.head));
+  check("骨格の人の形: 胴 = 両肩・両腰の四角形（画像の座標 = 正規化座標 × マスクの大きさ）", sh && near(sh.torso[0][0], lm[11].x * W, 1e-6) && near(sh.torso[0][1], lm[11].y * H, 1e-6) && near(sh.torso[2][0], lm[24].x * W, 1e-6));
+  const arm = sh?.limbs.find((l) => near(l.a[0], lm[11].x * W, 1e-6) && near(l.b[0], lm[13].x * W, 1e-6));
+  const leg = sh?.limbs.find((l) => near(l.a[0], lm[23].x * W, 1e-6) && near(l.b[0], lm[25].x * W, 1e-6));
+  check("骨格の人の形: 腕・脚はカプセル（太さは肩幅 × 0.32 / 0.42）・首もつなぐ", arm && leg && near(arm.w, 0.32 * sw, 1e-6) && near(leg.w, 0.42 * sw, 1e-6) && sh.limbs.length === 9, `sw=${sw.toFixed(1)}`);
+  const far = skeletonPersonShape(fakeMirrorPose([{ head: [0, 0.2, -5], fwd: [0, 1] }], m).landmarks[0], W, H);
+  check("骨格の人の形: 遠い人は小さく（太さも肩幅に比例して半分）", far && near(far.limbs[1].w / sh.limbs[1].w, (Math.hypot((fakeMirrorPose([{ head: [0, 0.2, -5], fwd: [0, 1] }], m).landmarks[0][11].x - fakeMirrorPose([{ head: [0, 0.2, -5], fwd: [0, 1] }], m).landmarks[0][12].x) * W, 0)) / sw, 1e-6) && far.limbs[1].w < sh.limbs[1].w * 0.6);
+  check("骨格の人の形: 肩が見えなければ描かない", skeletonPersonShape(lm.map((l, i) => (i === 11 ? { ...l, visibility: 0.1 } : l)), W, H) === null);
+  const noHip = skeletonPersonShape(lm.map((l, i) => (i === 23 || i === 24 ? { ...l, visibility: 0 } : l)), W, H);
+  check("骨格の人の形: 腰が見えなければ肩から肩幅 × 1.3 下までを胴にする（上半身だけ写っているとき）", noHip && near(noHip.torso[3][1] - noHip.torso[0][1], 1.3 * sw, 1e-6));
+}
+
+// ================= 2g. 段階 3 の B: カメラで見た人で相手の化身の位置を決める（ハイブリッド）=================
+{
+  const m = { tanHalfFov: Math.tan(34 * DEG) * 0.75, eyeAspect: 4 / 3, repeatX: 1, repeatY: 1 };
+  const opts = { bodyScale: 1, minVisibility: 0.5, maxDepthM: 8 };
+  // カメラ（自分の目）をワールドの (1, 1.6, 2) に置き、右へ 30° 向ける（ヨー）。相手はカメラ座標で正面 2.5m・カメラの方を向く
+  const yaw = 30 * DEG;
+  const cam = new THREE.Matrix4().makeRotationY(yaw).setPosition(1, 1.6, 2);
+  const camPts = fakeMirrorPoints({ head: [0, 0.1, -2.5], fwd: [0, 1] }).cam;
+  const r = poseFromCamPoints([camPts], m);
+  const det = detectionToWorld(r.landmarks[0], r.worldLandmarks[0], m, cam.elements, opts);
+  const expHead = new THREE.Vector3(0, 0.1, -2.5).applyMatrix4(cam);
+  check("段階 3・3D 化: カメラ座標の頭 → ジャイロの回転 + カメラの位置で自分のワールドへ（差 < 1cm・距離 2.5m）", det && Math.hypot(det.head[0] - expHead.x, det.head[1] - expHead.y, det.head[2] - expHead.z) < 0.01 && near(det.camDist, Math.hypot(0.1, 2.5), 0.01), JSON.stringify(det));
+  // カメラの方（カメラ座標 +Z）を向いた人の前は、ワールドではカメラの向きを 180° 回した向き
+  const expFwd = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  check("段階 3・3D 化: 体の向きはワールドの水平面で（カメラが右へ 30° 向いていても、相手はカメラの方）", det && Math.hypot(det.fwd[0] - expFwd.x, det.fwd[1] - expFwd.z) < 0.01 && det.fwdSource === "shoulders", JSON.stringify(det?.fwd));
+  // 対応づけ
+  const eye = [0, 1.6, 0];
+  const dets = [{ head: [-0.5, 1.6, -2] }, { head: [0.8, 1.6, -3] }];
+  const m1 = matchRemotes(dets, [{ id: "B", declared: [0.9, 1.6, -3.2], fresh: true, last: null }, { id: "C", declared: [-0.6, 1.6, -2.3], fresh: true, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 申告の方向が一番近い人と 1 対 1（B → 右奥、C → 左手前・declared-dir）", m1.get("B")?.index === 1 && m1.get("C")?.index === 0 && m1.get("B")?.reason === "declared-dir");
+  const m2 = matchRemotes(dets, [{ id: "B", declared: [0.9, 1.6, -3.2], fresh: true, last: null }, { id: "C", declared: [1.0, 1.6, -3.4], fresh: true, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 2 人が同じ人を指しても 1 対 1（近い方だけ）", [...m2.values()].filter((v) => v.index === 1).length === 1);
+  const m3 = matchRemotes(dets, [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: [0.7, 1.6, -2.9] }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 申告が古い（方向が合わない）ときは前の結果の人と位置で（tracked）", m3.get("B")?.index === 1 && m3.get("B")?.reason === "tracked");
+  const m4 = matchRemotes([{ head: [0.2, 1.6, -2] }], [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 相手 1 人・検出 1 人なら、申告がずれていてもそのまま結ぶ（only-one）", m4.get("B")?.reason === "only-one");
+  const m5 = matchRemotes(dets, [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 相手 1 人でも検出が 2 人で手掛かりが無ければ結ばない", !m5.has("B"));
+  const m6 = matchRemotes(dets, [{ id: "B", declared: [0.85, 1.6, -3.1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ（修正 4）: 古い申告の方向だけでは結ばない（前回の位置が無い複数人は結ばないまま）", !m6.has("B"));
+  // 修正 3: 貪欲だと成り立つ 2 組のうち 1 組を失う例（A=0°・B=10°、検出 4°・−5°、しきい値 8°）→ 全探索で 2 組
+  const dirAt = (deg) => [Math.sin(deg * DEG) * 3, 1.6, -Math.cos(deg * DEG) * 3];
+  const m7 = matchRemotes([{ head: dirAt(4) }, { head: dirAt(-5) }], [{ id: "A", declared: dirAt(0), fresh: true, last: null }, { id: "B", declared: dirAt(10), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 8, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ（修正 3）: 組の数が最大になるように選ぶ（A → −5°、B → 4° の 2 組。貪欲だと A → 4° の 1 組だけ）", m7.get("A")?.index === 1 && m7.get("B")?.index === 0, JSON.stringify([...m7]));
+  const m7b = matchRemotes([{ head: dirAt(2) }, { head: dirAt(9) }], [{ id: "A", declared: dirAt(0), fresh: true, last: null }, { id: "B", declared: dirAt(10), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 組の数が同じなら角度の合計が最小（A → 2°、B → 9°）", m7b.get("A")?.index === 0 && m7b.get("B")?.index === 1);
+  // 2 人が並び、アンカーの誤差で申告の方向が隣の人の方にずれて見える: 前回の位置（tracked）と申告の方向（declared-dir）を 1 回の全探索で
+  const m9 = matchRemotes([{ head: dirAt(-20) }, { head: dirAt(10) }], [{ id: "P", declared: dirAt(5), fresh: true, last: dirAt(-20) }, { id: "Q", declared: dirAt(24), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 30, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 前回の位置と申告の方向を 1 回の全探索で（P は前回の人 −20° に tracked、Q は申告の方向で 10° に。段ごとだと P が 10° を取って Q が結べない）", m9.get("P")?.index === 0 && m9.get("P")?.reason === "tracked" && m9.get("Q")?.index === 1 && m9.get("Q")?.reason === "declared-dir", JSON.stringify([...m9]));
+  // 修正 5: 相手 1 人・検出 1 人でも、新しい申告と方向が大きく外れた人（プレイヤーでない人）には付けない
+  const m8 = matchRemotes([{ head: dirAt(70) }], [{ id: "B", declared: dirAt(0), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  const m8b = matchRemotes([{ head: dirAt(30) }], [{ id: "B", declared: dirAt(0), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  const m8c = matchRemotes([{ head: dirAt(70) }], [{ id: "B", declared: dirAt(0), fresh: false, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ（修正 5）: only-one は新しい申告と 45° 以内のときだけ（70° は結ばない・30° は結ぶ・申告が古ければ結ぶ）", !m8.has("B") && m8b.get("B")?.reason === "only-one" && m8c.get("B")?.reason === "only-one");
+  check("段階 3・対応づけ: 方向の角度（目から見て）", near(angleFromEyeDeg([0, 0, 0], [1, 0, 0], [0, 0, -1]), 90, 1e-9));
+  // 距離の混ぜ方
+  check("段階 3・距離: 申告が新しければ 申告 × 0.7 + カメラ × 0.3", near(blendDistance(3, 2, true, 0.7), 2.3));
+  check("段階 3・距離: 申告が古い・無いならカメラの推定", blendDistance(3, 2, false, 0.7) === 3 && blendDistance(3, null, true, 0.7) === 3);
+  const hh = hybridHead([0, 1.6, 0], [0, 1.6, -3], [1, 1.6, -2], true, 0.7);
+  check("段階 3・位置: 方向はカメラの値（真っすぐ前）・距離は混ぜた値（申告までの √5 × 0.7 + 3 × 0.3）", near(hh[0], 0) && near(hh[1], 1.6) && near(-hh[2], Math.sqrt(5) * 0.7 + 0.9, 1e-9), JSON.stringify(hh));
+  // 補正の窓の平均と外れ値
+  const base = [0.5, 0, -0.3];
+  const samples = [];
+  for (let i = 0; i < 20; i++) samples.push({ t: 1000 + i * 100, c: [base[0] + (i % 3 - 1) * 0.01, base[1] + (i % 2) * 0.01, base[2] - (i % 4) * 0.005] });
+  const clean = robustMeanV3(samples.map((x) => x.c));
+  const withJump = [...samples.slice(0, 10), { t: 2050, c: [2.5, 0, 1.5] }, ...samples.slice(10)];
+  const jumped = robustMeanV3(withJump.map((x) => x.c));
+  check("段階 3・補正: 跳びが 1 回入っても平均が動かない（外れ値を除く。差 < 5mm・使った件数 20）", Math.hypot(jumped.mean[0] - clean.mean[0], jumped.mean[1] - clean.mean[1], jumped.mean[2] - clean.mean[2]) < 0.005 && jumped.used === 20, JSON.stringify({ clean: clean.mean, jumped: jumped.mean, used: jumped.used }));
+  const pr = pruneCorr([{ t: -500, c: [9, 9, 9] }, ...samples], 3);
+  check("段階 3・補正: 窓（最後の観測から 3 秒）より古い観測は捨てる", pr.length === 20 && pr[0].t === 1000);
+  const lastT = samples[samples.length - 1].t;
+  const c0 = correctionAt(samples, lastT, 3, 10);
+  const c5 = correctionAt(samples, lastT + 5000, 3, 10);
+  const c10 = correctionAt(samples, lastT + 10000, 3, 10);
+  check("段階 3・補正の弱まり: 見えなくなった直後は 1 倍、5 秒で 0.5 倍、10 秒で 0（線形）", near(c0.k, 1) && near(c5.k, 0.5) && c10.k === 0 && near(c5.c[0], c0.c[0] * 0.5, 1e-9) && c10.c[0] === 0 && c5.n === 20);
+  check("段階 3・補正: 観測が無ければ 0", correctionAt([], 0, 3, 10).k === 0 && correctionAt([], 0, 3, 10).n === 0);
+  // 画面の端での出入り: 見えている間の位置（ハイブリッド）と、見えなくなった瞬間の位置（申告 + 補正）が同じ → 表示が飛ばない
+  {
+    const q = [0, Math.sin(0.2), 0, Math.cos(0.2)];
+    const aPos = [0.3, 1.4, 3.6];
+    const declMarker = [1.2, 0.1, 2.0];
+    const eye2 = [0.2, 1.5, 0.3];
+    const camHeadWorld = [-0.4, 1.55, -1.8];
+    const declWorld = markerToWorld(aPos, q, declMarker);
+    const corrS = [];
+    let visHead = null;
+    for (let i = 0; i < 15; i++) {
+      // カメラの推定は ±2cm ぶれる
+      const noisy = [camHeadWorld[0] + ((i * 7) % 5 - 2) * 0.01, camHeadWorld[1], camHeadWorld[2] + ((i * 3) % 5 - 2) * 0.01];
+      visHead = hybridHead(eye2, noisy, declWorld, false, 0.7);
+      const hm = worldToMarker(aPos, q, visHead);
+      corrS.push({ t: i * 100, c: [hm[0] - declMarker[0], hm[1] - declMarker[1], hm[2] - declMarker[2]] });
+    }
+    const cc = correctionAt(corrS, 1400, 3, 10);
+    const hidden = markerToWorld(aPos, q, [declMarker[0] + cc.c[0], declMarker[1] + cc.c[1], declMarker[2] + cc.c[2]]);
+    const jump = Math.hypot(hidden[0] - visHead[0], hidden[1] - visHead[1], hidden[2] - visHead[2]);
+    const declJump = Math.hypot(declWorld[0] - visHead[0], declWorld[1] - visHead[1], declWorld[2] - visHead[2]);
+    check("段階 3・画面の端: 見えなくなった瞬間の位置（申告 + 補正）と見えていた位置の差は 3cm 以内（補正なしなら申告まで跳ぶ）", jump < 0.03 && declJump > 1, `jump=${jump.toFixed(3)}m 補正なし=${declJump.toFixed(2)}m`);
+  }
+}
+
+// ================= 2h. 段階 3 の B（修正 1・2・6・7・11）: RemoteKeshins.plan の中身（planRemote）を時刻を進めて通す =================
+{
+  // 自分のアンカーは単位（マーカー座標系 = ワールド）。目 E、相手の本当の頭 T、申告 D（1m ずれ）
+  const anchorI = { pos: [0, 0, 0], quat: [0, 0, 0, 1] };
+  const E = [0, 1.6, 3];
+  const D = [0.5, 1.6, 1];
+  const dispOpts = { noPoseMs: 1000, lostMs: 5000, staleMs: 3000, staleHideMs: 8000 };
+  const planOpts = { distW: 0.7, corrWindowSec: 3, corrDecaySec: 10, corrRecentSec: 0.5, cameraFadeMs: 200, ...dispOpts };
+  /**
+   * 60fps で時刻を進める。visible(t) = その時刻の Pose の結果（10Hz）に写っているか、trueHead(t) = 本当の頭。
+   * declared = 申告（track と ageMs。100ms ごとに届く）。表示は smoothToward（0.25s・3m）で寄せる（RemoteKeshins.update と同じ）
+   */
+  const simulate = ({ mode = "hybrid", durMs, visible, trueHead, declared, selfFresh = true, opts = {} }) => {
+    const frames = [];
+    let shown = null;
+    let corr = [];
+    let lastResult = -Infinity;
+    let cam = null;
+    let camAt = -Infinity;
+    let lastSeen = -Infinity;
+    let lastHead = null;
+    let frozen = null;
+    for (let t = 0; t <= durMs; t += 1000 / 60) {
+      const pose = { track: declared.track, ageMs: declared.ageMs, pos: D, fwd: [0, 1] };
+      const since = t % 100;
+      const disp = remoteDisplay(true, pose, since, dispOpts);
+      const fresh = selfFresh && (declared.track === "marker" || declared.ageMs < 3000);
+      if (disp.draw && (!disp.freeze || !frozen)) frozen = D;
+      // Pose の結果（10Hz）
+      if (Math.floor(t / 100) !== Math.floor((t - 1000 / 60) / 100) || t === 0) {
+        lastResult = t;
+        if (visible(t)) {
+          const h = trueHead(t);
+          cam = { head: h, fwd: [0, 1], fwdSource: "shoulders", camDist: Math.hypot(h[0] - E[0], h[1] - E[1], h[2] - E[2]) };
+          camAt = t;
+          lastSeen = t;
+          lastHead = h;
+          const hy = hybridHead(E, h, D, fresh, 0.7);
+          corr.push({ t, c: [hy[0] - D[0], hy[1] - D[1], hy[2] - D[2]] });
+          corr = pruneCorr(corr, 3);
+        } else cam = null;
+      }
+      const seen = cam !== null && camAt === lastResult;
+      const plan = planRemote({
+        mode, now: t, disp, anchor: anchorI, declMarker: D, declMarkerFrozen: frozen, declYaw: 0, fresh, seen, cam,
+        lastCamSeenMs: lastSeen, lastCamHead: lastHead, lastCamFwd: [0, 1], corr, eye: E, opts: { ...planOpts, ...opts },
+        display: (q) => remoteDisplay(true, q, 0, dispOpts), markerToWorld,
+      });
+      if (!plan.target) {
+        shown = null;
+        frames.push({ t, drawn: false, reason: plan.reason, source: plan.source });
+        continue;
+      }
+      const prev = shown;
+      shown = smoothToward(shown, plan.target, 1 / 60, 0.25, 3).pos;
+      frames.push({ t, drawn: true, pos: shown, step: prev ? Math.hypot(shown[0] - prev[0], shown[1] - prev[1], shown[2] - prev[2]) : 0, fade: plan.fade, source: plan.source, reason: plan.reason, target: plan.target });
+    }
+    return frames;
+  };
+  const at = (frames, ms) => frames.reduce((b, f) => (Math.abs(f.t - ms) < Math.abs(b.t - ms) ? f : b));
+  const T0 = [-0.5, 1.6, 1];
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const maxStep = (frames, from, to) => frames.filter((f) => f.drawn && f.t > from && f.t <= to).reduce((m, f) => Math.max(m, f.step), 0);
+
+  // 修正 1: 申告が古い相手（gyro で最後にマーカーを見てから 30 秒）。見える 0〜3s → 見えない。補正付きで残り、弱まり、最後に見えてから staleHideMs で消える
+  const stale = simulate({ durMs: 15000, visible: (t) => t < 3000, trueHead: () => T0, declared: { track: "gyro", ageMs: 30000 } });
+  const s31 = at(stale, 3300);
+  check("段階 3・plan（修正 1）: 申告が古い相手も、見えなくなった直後は消えずに補正付きで見えていた位置に残る（src=declared+corr・T から 5cm 以内）", s31.drawn && s31.source === "declared+corr" && dist(s31.pos, T0) < 0.05, JSON.stringify({ drawn: s31.drawn, src: s31.source, d: s31.pos && dist(s31.pos, T0).toFixed(3) }));
+  const s8 = at(stale, 8000);
+  check("段階 3・plan（修正 1）: 見えなくなって 5 秒後は補正が半分に弱まり、T と申告の間（半分だけ申告へ）・薄く", s8.drawn && Math.abs(dist(s8.pos, T0) - 0.5) < 0.06 && s8.fade < 0.6, JSON.stringify({ dT: s8.pos && dist(s8.pos, T0).toFixed(3), fade: s8.fade?.toFixed(2) }));
+  const s13 = at(stale, 13000);
+  check("段階 3・plan（修正 1）: 申告が古い相手は、最後に見えてから staleHideMs（8s）+ フェードで消える", !s13.drawn && s13.reason !== "ok", JSON.stringify(s13));
+  check("段階 3・plan: 申告が古い相手が見え → 見えない → 消えるまで、表示は 1 フレームで 3cm 以上動かない", maxStep(stale, 100, 13000) < 0.03, maxStep(stale, 100, 13000).toFixed(4));
+  // 修正 2: 申告が新しい相手（marker）。見えなくなって 12 秒経っても消えない・跳ばない
+  const fresh = simulate({ durMs: 15000, visible: (t) => t < 3000, trueHead: () => T0, declared: { track: "marker", ageMs: 0 } });
+  const drawnAll = fresh.filter((f) => f.t >= 3000).every((f) => f.drawn);
+  check("段階 3・plan（修正 2）: 申告が新しい相手は、見えなくなって 12 秒経っても消えない（以前は 8.5 秒で消えていた）", drawnAll, JSON.stringify(fresh.find((f) => f.t >= 3000 && !f.drawn) ?? null));
+  check("段階 3・plan（修正 2）: 補正が弱まり切る 13 秒の前後でも表示は跳ばない（1 フレーム 3cm 未満）・最後は申告位置", maxStep(fresh, 100, 15000) < 0.03 && dist(at(fresh, 15000).pos, D) < 0.02, `${maxStep(fresh, 100, 15000).toFixed(4)} end=${dist(at(fresh, 15000).pos, D).toFixed(3)}`);
+  check("段階 3・plan（修正 2）: 見えている間の申告が新しいので薄さは 1 のまま（max(申告側, 見えてから側)）", at(fresh, 12000).fade === 1, String(at(fresh, 12000).fade));
+  // 修正 7・画面の端: 申告が止まっている相手が 0.5 m/s で歩き、0.3 秒ごとに見え隠れする。見えなくなるたびに歩いた分だけ戻らない
+  const walkHead = (t) => [-0.5 + 0.5 * (t / 1000), 1.6, 1];
+  const edge = simulate({ durMs: 6000, visible: (t) => Math.floor(t / 300) % 2 === 0, trueHead: walkHead, declared: { track: "gyro", ageMs: 30000 } });
+  const lagOf = (fr) => fr.filter((f) => f.drawn && f.t > 1000).reduce((m, f) => Math.max(m, dist(f.pos, walkHead(f.t))), 0);
+  const lag = lagOf(edge);
+  // 比較: 窓全体（3 秒）の平均を補正に使うと、見えなくなるたびに約 1.5 秒前の位置へ戻る
+  const lagWin = lagOf(simulate({ durMs: 6000, visible: (t) => Math.floor(t / 300) % 2 === 0, trueHead: walkHead, declared: { track: "gyro", ageMs: 30000 }, opts: { corrRecentSec: 3 } }));
+  check("段階 3・plan（修正 7）: 画面の端で見え隠れしながら 0.5m/s で歩いても、表示は途切れず・1 フレーム 3cm 未満・本当の位置から 35cm 以内（表示のなめらかさ 0.25s の遅れ込み。窓全体の平均なら遅れがもっと大きい）", edge.filter((f) => f.t > 300).every((f) => f.drawn) && lag < 0.35 && lag < lagWin && maxStep(edge, 100, 6000) < 0.03, `直近 0.5s: ${lag.toFixed(3)}m / 窓全体: ${lagWin.toFixed(3)}m step=${maxStep(edge, 100, 6000).toFixed(4)}`);
+  // 修正 6: camera モードは、最新の結果で見えなくなったら 0.2 秒で消す
+  const camOnly = simulate({ mode: "camera", durMs: 4000, visible: (t) => t < 2000, trueHead: () => T0, declared: { track: "marker", ageMs: 0 } });
+  // 最後に見えた結果は 1900ms（2000ms の結果から見えない）
+  const c21 = at(camOnly, 2000);
+  const c23 = at(camOnly, 2150);
+  check("段階 3・plan（修正 6）: camera モードは見えなくなってから 0.2 秒で消す（以前は最大 1 秒）", c21.drawn && c21.fade < 1 && !c23.drawn, JSON.stringify({ c21: { drawn: c21.drawn, fade: c21.fade }, c23: { drawn: c23.drawn, reason: c23.reason } }));
+  const dcl = simulate({ mode: "declared", durMs: 3000, visible: () => true, trueHead: () => T0, declared: { track: "marker", ageMs: 0 } });
+  check("段階 3・plan: declared モードは見えていても申告位置（段階 2 と同じ）", dist(at(dcl, 3000).pos, D) < 0.01 && at(dcl, 3000).source === "declared");
 }
 
 // ================= 2e. 遅い端末では人の形の検出の回数を自動で下げる（stage2-fix2 の 4）=================

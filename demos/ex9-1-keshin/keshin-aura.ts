@@ -73,6 +73,8 @@ export type WorldAuraUniforms = {
   uSwirlK: { value: number };
   /** 柱の粒を出す高さの上限（床から [m]。主観は肩の高さで止めて、正面を見たとき視界の中心に粒が来ないように） */
   uColumnMaxH: { value: number };
+  /** 柱の強さの倍率（段階 3 の C: 他人用は背中からの光の流れに置き換えるので控えめ） */
+  uColumnK: { value: number };
   uSize: { value: number };
   uViewportH: { value: number };
   uEye: { value: THREE.Vector3 };
@@ -103,6 +105,7 @@ export class WorldAura {
       uSwirlR: { value: 0.5 },
       uSwirlK: { value: 1 },
       uColumnMaxH: { value: 1e4 },
+      uColumnK: { value: 1 },
       uSize: { value: 0.07 },
       uViewportH: { value: 800 },
       uEye: { value: new THREE.Vector3(0, -1000, 0) },
@@ -116,7 +119,7 @@ export class WorldAura {
       vertexShader: /* glsl */ `
         attribute vec4 aSeed;
         attribute float aKind;
-        uniform float uTime, uAuraK, uPillarK, uBurstK, uColumnR, uColumnH, uSwirlR, uSwirlK, uColumnMaxH, uSize, uViewportH;
+        uniform float uTime, uAuraK, uPillarK, uBurstK, uColumnR, uColumnH, uSwirlR, uSwirlK, uColumnMaxH, uColumnK, uSize, uViewportH;
         uniform vec3 uSwirlC, uColA, uColB, uEye;
         uniform vec2 uNear;
         varying float vAlpha;
@@ -139,7 +142,7 @@ export class WorldAura {
             p = vec3(cos(ang) * r, h, sin(ang) * r);
             // 柱がまだ伸びきっていない高さの粒は出さない
             float reach = step(h, uPillarK * uColumnH * (1.0 + 0.35 * uBurstK) + 0.001);
-            alpha = sin(3.1416 * life) * reach * (1.0 - smoothstep(uColumnMaxH - 0.2, uColumnMaxH, h));
+            alpha = sin(3.1416 * life) * reach * (1.0 - smoothstep(uColumnMaxH - 0.2, uColumnMaxH, h)) * uColumnK;
             mixK = life;
           } else {
             // 腰の渦: 切断面のまわりを回りながら少しずつ立ち上り、上で消える

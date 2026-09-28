@@ -29,6 +29,12 @@ import { connectKeshin } from "./keshin-client";
 import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshin-occlusion";
 import type { PersonShape } from "./keshin-occlusion";
 import { RemoteKeshins } from "./remote-keshins";
+import type { PosMode } from "./remote-keshins";
+import { detectionToWorld } from "./keshin-hybrid";
+import type { CamDetection } from "./keshin-hybrid";
+import { fakeMirrorPoints, poseFromCamPoints } from "./mirror-math";
+import type { BodyLandmarkLike } from "./keshin-occlusion";
+import { describeLook, lookFromParams } from "./keshin-look";
 import type { KeshinClient } from "./keshin-client";
 
 // ex9-1: 化身（番外編。09-person-id を後で土台にするので 9 番台の ex）。
@@ -100,6 +106,31 @@ const SNAP_M = numParam("snapM", 3, { min: 0.1, max: 100 });
 const STALE_MS = numParam("staleMs", 3000, { min: 100, max: 60000 });
 /** pose がこれだけ届かなければ marker でも gyro 扱い [ms]（俯瞰画面と同じ） */
 /** gyro の ageMs がこれを超えたら相手の化身をフェードで消す [ms]（マーカーを見直したらまた出す） */
+// 段階 3 の B: カメラで見た人で相手の化身の位置を決める（ハイブリッド）
+/** 位置の決め方: declared = 段階 2（申告位置だけ）、camera = 見えている間はカメラだけ、hybrid（既定）= 方向はカメラ・距離は申告と混ぜる・見えない間は申告 + 補正 */
+const POS_MODE: PosMode = (() => {
+  const v = (params.get("posMode") ?? "hybrid").toLowerCase();
+  return v === "declared" || v === "camera" ? v : "hybrid";
+})();
+/** 申告位置の方向と検出の方向がこれ以内なら同じ人 [deg] */
+const MATCH_DEG = numParam("matchDeg", 15, { min: 1, max: 90 });
+/** 相手 1 人・検出 1 人で結ぶとき、新しい申告があれば方向の差がこれ以内のときだけ [deg]（プレイヤーでない人に付けないように） */
+const ONLY_ONE_MAX_DEG = numParam("onlyOneMaxDeg", 45, { min: 1, max: 180 });
+/** 見えなくなった瞬間の補正に使う直近の観測 [s]（窓全体の平均より遅れない） */
+const CORR_RECENT_SEC = numParam("corrRecentSec", 0.5, { min: 0.05, max: 60 });
+/** 前の結果の人と頭がこれ以内なら同じ人 [m] */
+const MATCH_M = numParam("matchM", 0.5, { min: 0.05, max: 5 });
+/** 距離の混ぜ方: 申告までの距離の重み（残りはカメラの推定）。申告が古ければカメラだけ */
+const DIST_W = numParam("distW", 0.7, { min: 0, max: 1 });
+/** 補正（カメラで見た位置 − 申告位置）を平均する窓 [s] と、見えなくなってから 0 へ弱める時間 [s] */
+const CORR_WINDOW_SEC = numParam("corrWindowSec", 3, { min: 0.2, max: 60 });
+const CORR_DECAY_SEC = numParam("corrDecaySec", 10, { min: 0, max: 600 });
+/** 人の 3D 化（09 と同じ） */
+const BODY_SCALE = numParam("bodyScale", 1, { min: 0.3, max: 3 });
+const MIN_VIS = numParam("minVis", 0.5, { min: 0, max: 1 });
+const MAX_DEPTH_M = numParam("maxDepth", 8, { min: 0.5, max: 30 });
+/** 段階 3 の C: 相手の化身の見え方（腰を頭より上・溶ける下端・背中からの光の流れ）。?look=0 で段階 2 まで */
+const LOOK = lookFromParams();
 const STALE_HIDE_MS = numParam("staleHideMs", 8000, { min: 100, max: 600000 });
 const NO_POSE_MS = numParam("noPoseMs", 1000, { min: 100, max: 60000 });
 /** pose がこれだけ届かなければ通信切れとして相手の化身を描かない [ms] */
@@ -124,6 +155,13 @@ const MASK_DET_W = numParam("maskDetW", 512, { min: 64, max: 1280 });
 const MASK_HZ_AUTO = params.get("maskHzAuto") !== "0";
 /** ?maskDebug=1: 相手がいなくても人の形の検出を回し、Pose に渡した入力と最新のマスクを画面の隅に小さく出す */
 const MASK_DEBUG = params.get("maskDebug") === "1";
+/** 人の形の出どころ: seg = MediaPipe の segmentation mask、skel = Pose の骨格から描く、auto（既定）= seg の中身が空なら skel */
+const MASK_SOURCE: "seg" | "skel" | "auto" = (() => {
+  const v = (params.get("maskSource") ?? "auto").toLowerCase();
+  return v === "seg" || v === "skel" ? v : "auto";
+})();
+/** auto で seg の中身が空とみなすマスクの最大値 */
+const MASK_MIN_MAX = numParam("maskMinMax", 0.1, { min: 0, max: 1 });
 /** delegate = auto で GPU の人数が 0 のままこれだけ続いたら CPU でも回して比べる [ms] */
 const MASK_PROBE_AFTER_MS = numParam("maskProbeAfterMs", 10000, { min: 1000, max: 600000 });
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
@@ -283,17 +321,49 @@ function fakeStream(): MediaStream {
   );
 }
 
-/** 相手（pose があるプレイヤー）の合成の体を、いまのフェイクカメラの画像に投影した形（?fakeperson=1） */
+/**
+ * 合成の人（?fakeperson=1）の立つ位置（マーカー座標系の頭と体の向き）。既定は相手の申告位置。確認用の setFakeBodies で
+ * 「本当の位置」を申告位置と別にできる（段階 3 の B: 申告が古い・ずれている相手をカメラで見た位置に出す確認）
+ */
+let fakeBodiesOverride: { head: V3; fwd: [number, number] }[] | null = null;
+function fakeBodies(): { head: V3; fwd: [number, number] }[] {
+  if (fakeBodiesOverride) return fakeBodiesOverride;
+  const out: { head: V3; fwd: [number, number] }[] = [];
+  for (const [id, p] of players) {
+    if (id === selfId || !p.info.pose?.pos || !p.info.pose.fwd) continue;
+    out.push({ head: [p.info.pose.pos[0], p.info.pose.pos[1], p.info.pose.pos[2]], fwd: [p.info.pose.fwd[0], p.info.pose.fwd[1]] });
+  }
+  return out;
+}
+
+/** 合成の人を、いまのフェイクカメラの画像に投影した形（?fakeperson=1） */
 function fakePersonShapes(): PersonShape[] {
   const camToField = fakeCamToFieldNow();
   if (!camToField) return [];
   const out: PersonShape[] = [];
-  for (const [id, p] of players) {
-    if (id === selfId || !p.info.pose?.pos || !p.info.pose.fwd) continue;
-    const s = projectFakePerson({ head: p.info.pose.pos, fwd: p.info.pose.fwd }, camToField, FAKE_FOCAL_PX, FAKE_CAM_W, FAKE_CAM_H);
+  for (const b of fakeBodies()) {
+    const s = projectFakePerson(b, camToField, FAKE_FOCAL_PX, FAKE_CAM_W, FAKE_CAM_H);
     if (s) out.push(s);
   }
   return out;
+}
+
+/** 合成の人の骨格（MediaPipe の PoseLandmarker と同じ形。Pose の代わりに段階 3 の B とマスクの skel に使う） */
+function fakePoseResult(): { landmarks: BodyLandmarkLike[][]; worldLandmarks: BodyLandmarkLike[][] } {
+  const camToField = fakeCamToFieldNow();
+  const m = passthrough?.metricViewMapping();
+  if (!camToField || !m) return { landmarks: [], worldLandmarks: [] };
+  const fieldToCam = invertRigid(camToField);
+  const people: V3[][] = [];
+  for (const b of fakeBodies()) {
+    const cam = fakeMirrorPoints(b).cam.map((p) => transformPoint(fieldToCam, p) as V3);
+    // カメラの後ろに回る・画面に入らない人は写らない
+    if (cam.some((c) => -c[2] < 0.1)) continue;
+    const r = poseFromCamPoints([cam], m);
+    if (!r.landmarks[0].some((l) => l.x > 0 && l.x < 1 && l.y > 0 && l.y < 1)) continue;
+    people.push(cam);
+  }
+  return poseFromCamPoints(people, m);
 }
 
 /** フェイクの人の形のマスク（MediaPipe の代わり。マスクの大きさは本物と同じく長辺 ?maskDetW=） */
@@ -418,7 +488,8 @@ let peripheral: PeripheralAura | null = null;
 // ---- 段階 2: 相手の化身（remote-keshins.ts）と、人の形で隠す処理（keshin-occlusion.ts）----
 const occlusion = new OcclusionController(
   {
-    enabled: OCCLUDE,
+    // 段階 3 の B: 隠す処理を止めても（?occlude=0）、カメラで見た位置に使うので Pose は回す（?posMode=declared なら回さない）
+    enabled: OCCLUDE || POS_MODE !== "declared",
     fake: FAKE_PERSON,
     maskHz: MASK_HZ,
     maskHzAuto: MASK_HZ_AUTO,
@@ -429,7 +500,11 @@ const occlusion = new OcclusionController(
     staleOffMs: 1000,
     debug: MASK_DEBUG && OCCLUDE,
     probeAfterMs: MASK_PROBE_AFTER_MS,
+    maskSource: MASK_SOURCE,
+    maskMinMax: MASK_MIN_MAX,
     log: logEvent,
+    onPoses: (landmarks, world, now) => onPoses(landmarks, world, now),
+    fakePoses: FAKE_PERSON ? () => fakePoseResult() : undefined,
   },
   MASK_DILATE_PX,
   MASK_DEPTH_MARGIN,
@@ -468,6 +543,17 @@ const remotes = new RemoteKeshins(
     staleHideMs: STALE_HIDE_MS,
     noPoseMs: NO_POSE_MS,
     lostMs: PEER_LOST_MS,
+    look: LOOK,
+    posMode: POS_MODE,
+    matchDeg: MATCH_DEG,
+    onlyOneMaxDeg: ONLY_ONE_MAX_DEG,
+    corrRecentSec: CORR_RECENT_SEC,
+    cameraFadeMs: 200,
+    matchM: MATCH_M,
+    distW: DIST_W,
+    corrWindowSec: CORR_WINDOW_SEC,
+    corrDecaySec: CORR_DECAY_SEC,
+    camStaleMs: 1000,
   },
   OCCLUDE ? occlusion.uniforms : null,
   (index) => models.get(index as KeshinIndex)?.loaded ?? null,
@@ -481,7 +567,30 @@ function updateRemotes(now: number) {
   lastRemoteMs = now;
   camera.getWorldPosition(camWorldPos);
   renderer.getDrawingBufferSize(drawingSize);
-  remotes.update(now, dt, players, { anchor: markerAnchor?.everDetected ? anchor : null, camWorldPos, viewportH: drawingSize.y });
+  remotes.update(now, dt, players, { anchor: markerAnchor?.everDetected ? anchor : null, camWorldPos, viewportH: drawingSize.y, selfAnchorFresh: selfAnchorFresh(now) });
+}
+
+/** 自分のアンカーが新しいか（マーカーを見ている、または見失ってから staleMs 未満） */
+function selfAnchorFresh(now: number): boolean {
+  const t = trackOf(now);
+  return t.track === "marker" || (t.track === "gyro" && (t.ageMs ?? Infinity) < STALE_MS);
+}
+
+/** 段階 3 の B: Pose の結果（人の形のマスクと同じ推論）→ 自分のワールドの人 → 相手と結ぶ・補正を学ぶ */
+let lastDetections: CamDetection[] = [];
+function onPoses(landmarks: BodyLandmarkLike[][], world: BodyLandmarkLike[][], now: number) {
+  const m = passthrough?.metricViewMapping();
+  if (!m || POS_MODE === "declared") return;
+  camera.updateMatrixWorld();
+  const cm = camera.matrixWorld.elements;
+  const dets: CamDetection[] = [];
+  for (let i = 0; i < landmarks.length; i++) {
+    const d = detectionToWorld(landmarks[i], world[i] ?? [], m, cm, { bodyScale: BODY_SCALE, minVisibility: MIN_VIS, maxDepthM: MAX_DEPTH_M });
+    if (d) dets.push(d);
+  }
+  lastDetections = dets;
+  camera.getWorldPosition(camWorldPos);
+  remotes.observe(now, dets, players, { anchor: markerAnchor?.everDetected ? anchor : null, eye: [camWorldPos.x, camWorldPos.y, camWorldPos.z], selfAnchorFresh: selfAnchorFresh(now) });
 }
 
 /** 人の形の検出（相手の化身が視野に入っていそうな間だけ。マーカー検出と同じフレームでは回さない） */
@@ -489,7 +598,8 @@ function updateOcclusion(now: number, markerRan: boolean) {
   occlusion.syncBackground(passthrough?.texture ?? null);
   const need = remotes.anyVisibleInView(camera);
   const others = [...players.keys()].filter((id) => id !== selfId).length;
-  occlusion.update(now, need, passthrough?.video ?? null, markerRan, others, FAKE_PERSON ? fakeMaskImage : null);
+  // 段階 3 の B: 相手が 1 人でも入室していれば回す（化身が出ていなくても、割り当てと補正の学習のため）
+  occlusion.update(now, need && OCCLUDE, passthrough?.video ?? null, markerRan, others, FAKE_PERSON ? fakeMaskImage : null, others > 0 && POS_MODE !== "declared");
 }
 
 function setupSelfKeshin(index: KeshinIndex) {
@@ -935,8 +1045,8 @@ nameForm.addEventListener("submit", (event) => {
   const name = readPlayerName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} mode=${touch ? "gyro" : "orbit"}`;
-  logEvent("start", `name=${name} room=${ROOM} ${hudState.base}`);
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} posMode=${POS_MODE} matchDeg=${MATCH_DEG} onlyOneMaxDeg=${ONLY_ONE_MAX_DEG} matchM=${MATCH_M} distW=${DIST_W} corr=${CORR_WINDOW_SEC}s/${CORR_DECAY_SEC}s/${CORR_RECENT_SEC}s mode=${touch ? "gyro" : "orbit"}`;
+  logEvent("start", `name=${name} room=${ROOM} ${hudState.base} ${describeLook(LOOK)}`);
   connect(name);
   runStartFlow(touch, {
     onSensor: (state) => {
@@ -1049,9 +1159,50 @@ if (FAKE_CAM) {
       return lastMessageText;
     },
     /** 相手の化身の状態（段階 2） */
+    /** 段階 3 の B: 位置の決め方を変える / 合成の人の本当の位置（マーカー座標系。null で申告位置） */
+    setPosMode(mode: PosMode) {
+      remotes.setPosMode(mode);
+    },
+    /** 相手の化身の見え方を段階 2 まで（false）/ URL の見え方（true）に切り替える（人の形で隠す確認用。ビューを作り直す） */
+    /** 人の形で隠す前後の判定の余裕 [m] を変える（確認用。5 なら前後によらず人の形の上は全部隠す） */
+    setMaskDepthMargin(m: number) {
+      occlusion.uniforms.uMaskDepthMargin.value = m;
+    },
+    setRemoteLook(on: boolean) {
+      remotes.setLook(on ? LOOK : null, players, selfId);
+    },
+    setFakeBodies(list: { head: V3; fwd: [number, number] }[] | null) {
+      fakeBodiesOverride = list;
+    },
+    detections() {
+      return lastDetections;
+    },
+    /** 合成の人の「本当の位置」（マーカー座標系 = フェイクカメラの field）を自分のワールドに直した点（アンカーの推定の誤差を含まない） */
+    fakeTrueWorld(p: V3) {
+      const camToField = fakeCamToFieldNow();
+      if (!camToField) return null;
+      camera.updateMatrixWorld();
+      const c = transformPoint(invertRigid(camToField), p);
+      return new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(camera.matrixWorld).toArray();
+    },
+    eyeWorld() {
+      camera.getWorldPosition(camWorldPos);
+      return camWorldPos.toArray();
+    },
     remoteState() {
       return [...remotes.views.values()].map((e) => ({
         id: e.id,
+        source: e.source,
+        matchReason: e.matchReason,
+        camDist: e.camDist,
+        declDist: e.declDist,
+        dirDeg: e.dirDeg,
+        corrN: e.corr.length,
+        headMarker: (() => {
+          if (!e.shownHead || !markerAnchor?.everDetected) return null;
+          anchor.updateWorldMatrix(true, false);
+          return new THREE.Vector3(...e.shownHead).applyMatrix4(anchorInv.copy(anchor.matrixWorld).invert()).toArray();
+        })(),
         keshin: e.view.spec.index,
         drawn: e.drawn,
         reason: e.reason,
@@ -1080,7 +1231,10 @@ if (FAKE_CAM) {
       return { status: occlusion.status, detail: occlusion.detail, on: occlusion.uniforms.uMaskOn.value, hz: occlusion.hz, poseMs: occlusion.poseMs, ageMs: occlusion.ageMs, person: occlusion.mask.hasPerson, everMasked: occlusion.everMasked, lastPoses: occlusion.lastPoses, lastMasks: occlusion.lastMasks, lastInput: occlusion.lastInput, lastLuma: occlusion.lastLuma, delegate: occlusion.delegate, maskHz: occlusion.governor.hz, maskHzLevels: occlusion.governor.levels, runs: occlusion.runs, runsWithPerson: occlusion.runsWithPerson, probe: occlusion.probe, text: occlusion.describe() };
     },
     /** 隠す処理を一時的に止める / 戻す（確認用） */
-    setOcclusionDisabled(off: boolean) {
+    setMaskSource(mode: "seg" | "skel" | "auto") {
+    occlusion.setMaskSource(mode);
+  },
+  setOcclusionDisabled(off: boolean) {
       occlusion.disabled = off;
       occlusion.uniforms.uMaskOn.value = off ? 0 : occlusion.uniforms.uMaskOn.value;
     },

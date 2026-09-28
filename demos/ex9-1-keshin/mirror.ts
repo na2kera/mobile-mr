@@ -18,6 +18,8 @@ import { connectKeshin } from "./keshin-client";
 import type { KeshinClient } from "./keshin-client";
 import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshin-occlusion";
 import type { BodyLandmarkLike, PersonShape } from "./keshin-occlusion";
+import { describeLook, lookFromParams } from "./keshin-look";
+import { probeDissolve, probeStream } from "./keshin-probe";
 import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility } from "./mirror-math";
 import type { FakeMirrorPerson, MirrorPerson } from "./mirror-math";
 
@@ -45,6 +47,8 @@ const KESHIN_H = numParam("keshinH", 3, { min: 0.5, max: 20 });
 const EYE_H = numParam("eyeH", 1.5, { min: 0.3, max: 3 });
 const KESHIN_BACK: number | null = params.has("keshinBack") ? numParam("keshinBack", 0.5, { min: -5, max: 10 }) : null;
 const OTHER_OPACITY = numParam("otherOpacity", 0.85, { min: 0, max: 1 });
+/** 段階 3 の C: 化身の見え方（腰を頭より上・溶ける下端・背中からの光の流れ）。?look=0 で段階 2 まで */
+const LOOK = lookFromParams();
 const AURA_N = Math.round(numParam("auraN", 400, { min: 0, max: 20000 }));
 /** 表示の位置・向きを検出した人へ寄せる時定数 [s] */
 const MIRROR_SMOOTH_SEC = numParam("mirrorSmoothSec", 0.15, { min: 0, max: 5 });
@@ -74,6 +78,13 @@ const MASK_EDGE: [number, number] = (() => {
 })();
 const MASK_DET_W = numParam("maskDetW", 512, { min: 64, max: 1280 });
 const MASK_DEBUG = params.get("maskDebug") === "1";
+/** 人の形の出どころ: seg = MediaPipe の segmentation mask、skel = Pose の骨格から描く、auto（既定）= seg の中身が空なら skel */
+const MASK_SOURCE: "seg" | "skel" | "auto" = (() => {
+  const v = (params.get("maskSource") ?? "auto").toLowerCase();
+  return v === "seg" || v === "skel" ? v : "auto";
+})();
+/** auto で seg の中身が空とみなすマスクの最大値 */
+const MASK_MIN_MAX = numParam("maskMinMax", 0.1, { min: 0, max: 1 });
 const MASK_PROBE_AFTER_MS = numParam("maskProbeAfterMs", 10000, { min: 1000, max: 600000 });
 const delegateRaw = (params.get("delegate") ?? "auto").toLowerCase();
 const DELEGATE: "GPU" | "CPU" | "auto" = delegateRaw === "gpu" ? "GPU" : delegateRaw === "cpu" ? "CPU" : "auto";
@@ -296,6 +307,8 @@ const occlusion = new OcclusionController(
     staleOffMs: 1000,
     debug: MASK_DEBUG,
     probeAfterMs: MASK_PROBE_AFTER_MS,
+    maskSource: MASK_SOURCE,
+    maskMinMax: MASK_MIN_MAX,
     log: logEvent,
     onPoses,
     fakePoses: FAKE_PERSON
@@ -373,6 +386,7 @@ function ensureEntry(p: PlayerState): MirrorEntry {
       auraN: AURA_N,
       nearFade: null,
       mask: OCCLUDE ? occlusion.uniforms : null,
+      look: LOOK,
     },
     models.get(p.info.keshin)?.loaded ?? null,
   );
@@ -665,7 +679,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
-  logEvent("start", `room=${ROOM} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} delegate=${DELEGATE} fake=${FAKE_PERSON ? "person" : FAKE_CAM ? "cam" : 0}`);
+  logEvent("start", `room=${ROOM} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE} fake=${FAKE_PERSON ? "person" : FAKE_CAM ? "cam" : 0} ${describeLook(LOOK)}`);
   connect();
   if (touch) keepScreenAwake((s) => logEvent("wakelock", s));
   startCamera((step) => {
@@ -754,6 +768,9 @@ startButton.addEventListener("click", () => {
     for (let i = 0; i < a.length; i += 4) sum += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
     return sum;
   },
+  setMaskSource(mode: "seg" | "skel" | "auto") {
+    occlusion.setMaskSource(mode);
+  },
   setOcclusionDisabled(off: boolean) {
     occlusion.disabled = off;
     if (off) occlusion.uniforms.uMaskOn.value = 0;
@@ -793,16 +810,37 @@ startButton.addEventListener("click", () => {
     let changed = 0;
     let inside = 0;
     let outside = 0;
+    /** 化身の画素のいちばん上（画面の上から [px]。0 なら画面の上で切れている）と、人の画素のいちばん上 */
+    let topY = h;
+    let personTopY = h;
+    for (let i = 0; i < bg.length; i += 4) {
+      if (Math.abs(bg[i] - 0x5a) + Math.abs(bg[i + 1] - 0x6b) + Math.abs(bg[i + 2] - 0x86) <= 30) personTopY = Math.min(personTopY, h - 1 - Math.floor(i / 4 / w));
+    }
     for (let i = 0; i < a.length; i += 4) {
       if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) <= 24) continue;
       changed++;
       const px = (i / 4) % w;
       const py = Math.floor(i / 4 / w);
+      topY = Math.min(topY, h - 1 - py);
       const s = [isPerson(px, py), isPerson(px + r, py), isPerson(px - r, py), isPerson(px, py + r), isPerson(px, py - r)];
       if (s.every(Boolean)) inside++;
       else if (s.every((x) => !x)) outside++;
     }
-    return { changed, inside, outside, total: w * h };
+    return { changed, inside, outside, total: w * h, topY, personTopY, height: h };
+  },
+  /** 段階 3 の C の見え方を画素で調べる（切り口が無いか・背中からの光の流れがつながっているか。人の形で隠す処理は切って） */
+  lookProbe(id: string) {
+    const e = entries.get(id);
+    if (!e) return null;
+    const gl = renderer.getContext();
+    const wasOn = occlusion.uniforms.uMaskOn.value;
+    occlusion.uniforms.uMaskOn.value = 0;
+    const render = () => renderer.render(scene, camera);
+    try {
+      return { dissolve: LOOK ? probeDissolve(gl, render, e.view, camera, LOOK.dissolveM) : null, stream: probeStream(gl, render, e.view, camera) };
+    } finally {
+      occlusion.uniforms.uMaskOn.value = wasOn;
+    }
   },
   /** 画面の見え方（CSS の反転）: canvas は scaleX(-1)、HUD と案内は反転しない */
   transforms() {
