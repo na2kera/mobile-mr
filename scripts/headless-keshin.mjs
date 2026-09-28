@@ -1097,7 +1097,7 @@ try {
   console.log(`stage3 fresh: ${JSON.stringify(h1 && { source: h1.source, match: h1.matchReason, head: h1.head, camDist: h1.camDist, declDist: h1.declDist, dirDeg: h1.dirDeg })}`);
   check("段階 3・申告が新しい相手: 方向はカメラで見た人（本当の位置との方向の差 < 1.5°）・距離は申告 0.7 + カメラ 0.3 の混ぜた値 ±5cm（src=hybrid）", h1 && h1.source === "hybrid" && angTo(h1.head, Tw) < 1.5 && Math.abs(dist(h1.head, eye3) - blendD) < 0.05, `方向の差=${angTo(h1?.head, Tw).toFixed(2)}° 距離=${dist(h1?.head, eye3).toFixed(3)} 混ぜた値=${blendD.toFixed(3)} match=${h1?.matchReason}`);
   const hudA3 = await pA3.eval("document.querySelector('#hud')?.textContent ?? ''");
-  check("段階 3: HUD に相手ごとの出どころ・カメラの推定距離・申告距離・補正・方向のずれ・結び方・結ばなかった理由・体の向きの差・補正からの距離", /src=hybrid camD=[\d.]+ decD=[\d.]+ corr=[\d.]+m×[\d.]+ n=\d+ dAng=\d+deg match=(declared-dir|tracked|only-one) why=- fDeg=\d+ corrM=\S+/.test(hudA3), (hudA3.match(/src=.*/) ?? [""])[0]);
+  check("段階 3: HUD に相手ごとの出どころ・カメラの推定距離・申告距離・補正・方向のずれ・結び方・結ばなかった理由・体の向きの差・補正からの距離", /src=hybrid camD=[\d.]+ decD=[\d.]+ corr=[\d.]+m×[\d.]+ n=\d+ dAng=\d+deg match=(declared-dir|tracked|only-one) why=- fDeg=\d+ corrM=\S+/.test(hudA3), (hudA3.match(/src=(hybrid|camera|declared\S*) .*/) ?? ["相手の行が無い"])[0]);
   await pA3.eval("window.__keshin.setPosMode('camera')");
   await sleep(1500);
   const h2 = await st3();
