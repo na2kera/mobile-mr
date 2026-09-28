@@ -934,7 +934,7 @@ try {
   const dupSt = await pD2.eval("window.__keshinMirror?.state() ?? null");
   const keys = await pD2.eval("Object.keys(sessionStorage).filter((k) => k.startsWith('keshin-session-')).sort().join(',')");
   check("鏡: 俯瞰画面のタブを複製して鏡を開いても、互いに切断しない（鍵は keshin-session-mirror で別）", dupM?.ok && /ws=open/.test(ovStatus) && dupSt?.ws === "open" && keys === "keshin-session-mirror,keshin-session-overview", `overview=${ovStatus.split("\n")[0]} mirror=${dupSt?.ws} keys=${keys} copied=${ss}`);
-  check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人・割り当てが出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 mmax=\S+ mmean=\S+ mfrac=\S+ msrc=fake in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)/.test(hudM) && /→person/.test(hudM));
+  check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人（画像の上の頭）・割り当て（付け方と画像の上の距離）が出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 mmax=\S+ mmean=\S+ mfrac=\S+ msrc=fake in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)\/floor\S+\/img[\d.]+,[\d.]+/.test(hudM) && /→person\d+\((tracked|new) dImg=\S+ dImg2=\S+ gate=\S+ d3=\S+\)/.test(hudM), (hudM.match(/→person.*?\)/) ?? [""])[0]);
   // ================= 段階 3 の B: カメラで見た人で相手の化身の位置を決める（ハイブリッド）=================
   {
   // A3（スマホ、?fakeperson=1）の前に合成の人を「本当の位置」T に立たせ、仮想のプレイヤー V3 の申告位置 D は 1m 横にずらす。
@@ -1033,7 +1033,7 @@ try {
   console.log(`stage3 fresh: ${JSON.stringify(h1 && { source: h1.source, match: h1.matchReason, head: h1.head, camDist: h1.camDist, declDist: h1.declDist, dirDeg: h1.dirDeg })}`);
   check("段階 3・申告が新しい相手: 方向はカメラで見た人（本当の位置との方向の差 < 1.5°）・距離は申告 0.7 + カメラ 0.3 の混ぜた値 ±5cm（src=hybrid）", h1 && h1.source === "hybrid" && angTo(h1.head, Tw) < 1.5 && Math.abs(dist(h1.head, eye3) - blendD) < 0.05, `方向の差=${angTo(h1?.head, Tw).toFixed(2)}° 距離=${dist(h1?.head, eye3).toFixed(3)} 混ぜた値=${blendD.toFixed(3)} match=${h1?.matchReason}`);
   const hudA3 = await pA3.eval("document.querySelector('#hud')?.textContent ?? ''");
-  check("段階 3: HUD に相手ごとの出どころ・カメラの推定距離・申告距離・補正・方向のずれ・結び方", /src=hybrid camD=[\d.]+ decD=[\d.]+ corr=[\d.]+m×[\d.]+ n=\d+ dAng=\d+deg match=(declared-dir|tracked|only-one)/.test(hudA3), (hudA3.match(/src=.*/) ?? [""])[0]);
+  check("段階 3: HUD に相手ごとの出どころ・カメラの推定距離・申告距離・補正・方向のずれ・結び方・結ばなかった理由・体の向きの差・補正からの距離", /src=hybrid camD=[\d.]+ decD=[\d.]+ corr=[\d.]+m×[\d.]+ n=\d+ dAng=\d+deg match=(declared-dir|tracked|only-one) why=- fDeg=\d+ corrM=\S+/.test(hudA3), (hudA3.match(/src=.*/) ?? [""])[0]);
   await pA3.eval("window.__keshin.setPosMode('camera')");
   await sleep(1500);
   const h2 = await st3();
@@ -1102,8 +1102,10 @@ try {
   console.log(`stage3 two: ${JSON.stringify(two && { a: two.a && { match: two.a.matchReason, ang: angTo(two.a.head, Tw).toFixed(2) }, b: two.b && { match: two.b.matchReason, ang: angTo(two.b.head, T4w).toFixed(2) } })}`);
   check("段階 3・2 人が並ぶ: それぞれ自分の体の方向に 1 対 1 で出る（方向の差 < 1.5°）", two?.ok, JSON.stringify(two && { a: two.a && { match: two.a.matchReason, src: two.a.source }, b: two.b && { match: two.b.matchReason, src: two.b.source } }));
   await pA3.shot("stage3-two.png");
-  const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && l.includes(v3Id)) ?? "";
-  check("段階 3: 結び方の理由がログに出る（event=remote-match）", /only-one|declared-dir|tracked/.test(matchLog), matchLog);
+  const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:(only-one|declared-dir|tracked)`).test(l)) ?? "";
+  // 結ばなかったときも理由が出る（V3 の最初の pose が届く前は申告の体の向きが無いので only-one で結ばない = no-facing）
+  const rejectLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:-\\(`).test(l)) ?? "";
+  check("段階 3: 結び方と、結ばなかった理由・判断に使った値（fDeg / corrM）がログに出る（event=remote-match）", matchLog !== "" && /fDeg=\S+ corrM=\S+/.test(matchLog) && /:-\((no-facing|facing|corr-gate|dir|no-candidate)\)/.test(rejectLog), `${matchLog} | ${rejectLog}`);
   await ov3.eval("window.__keshinOverview.setView([3.6, 2.6, 5.4], [0.2, -0.3, 1.8])");
   await sleep(400);
   await ov3.shot("stage3-overview.png");
