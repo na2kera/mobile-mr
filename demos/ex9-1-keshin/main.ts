@@ -1204,6 +1204,7 @@ if (FAKE_CAM) {
         source: e.source,
         matchReason: e.matchReason,
         matchInfo: e.matchInfo,
+        corrState: remotes.corrState(e.id, performance.now()),
         camDist: e.camDist,
         declDist: e.declDist,
         dirDeg: e.dirDeg,

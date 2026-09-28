@@ -358,6 +358,8 @@ type MirrorEntry = {
   /** 割り当てた人の最新の値と、最後に見えた時刻（Pose の結果の時刻） */
   target: MirrorPerson | null;
   lastSeenMs: number;
+  /** 確認用: 見え方（drawn / fade / reason）を最後に決めたフレームの時刻 */
+  lastVisMs: number;
   personIndex: number | null;
   /** 直近の割り当ての結果と判断に使った値（画像の上の距離など。HUD とログ用） */
   assign: MirrorAssignInfo | null;
@@ -399,7 +401,7 @@ function ensureEntry(p: PlayerState): MirrorEntry {
   );
   scene.add(view.group);
   requestModel(p.info.keshin);
-  e = { id: p.info.id, view, shownHead: null, shownYaw: null, shownEyeH: null, target: null, lastSeenMs: -Infinity, personIndex: null, assign: null, drawn: false, reason: "-", fade: 0, visual: null };
+  e = { id: p.info.id, view, shownHead: null, shownYaw: null, shownEyeH: null, target: null, lastSeenMs: -Infinity, lastVisMs: -Infinity, personIndex: null, assign: null, drawn: false, reason: "-", fade: 0, visual: null };
   entries.set(p.info.id, e);
   return e;
 }
@@ -470,6 +472,7 @@ function updateEntries(now: number) {
     if (!e) continue;
     const visual = keshinTimeline((now - p.startLocalMs) / 1000, p.info.on ? "appear" : "vanish");
     e.visual = visual;
+    e.lastVisMs = now;
     // 濃さは常に「いま − 最後にその人を見た時刻」で決める（Pose が止まっても保持 → フェード → 消える）
     const hf = mirrorVisibility(now, e.lastSeenMs, personsAtMs, { holdMs: HOLD_MS, fadeMs: FADE_MS, staleResultMs: POSE_STALL_MS });
     if (!act.has(id) || !e.target || !hf.draw) {
@@ -738,6 +741,7 @@ startButton.addEventListener("click", () => {
         on: players.get(e.id)?.info.on ?? false,
         personIndex: e.personIndex,
         assign: e.assign,
+        sinceSeenMs: now - e.lastSeenMs,
         drawn: e.drawn,
         reason: e.reason,
         fade: e.fade,
@@ -755,6 +759,26 @@ startButton.addEventListener("click", () => {
   /** 合成の人を入れ替える（見失い → 保持 → フェード → 見つけ直しの確認用。[] で誰もいない） */
   setFakePeople(list: { head: V3; yawDeg: number }[]) {
     fakePeople = list.map((p) => ({ head: p.head, fwd: [Math.sin(THREE.MathUtils.degToRad(p.yawDeg)), Math.cos(THREE.MathUtils.degToRad(p.yawDeg))] as [number, number] }));
+  },
+  /**
+   * 合成の人を消して、そこから ms の間、毎フレーム（ページの中で）その化身の見え方を記録する（見失い → 保持 → フェードの確認用。
+   * 確認側からの 1 回ごとの問い合わせの遅れ（重い環境で数百 ms）に左右されない）
+   */
+  recordAfterRemove(id: string, ms: number) {
+    fakePeople = [];
+    const t0 = performance.now();
+    const out: { t: number; sinceSeenMs: number; drawn: boolean; fade: number; reason: string }[] = [];
+    return new Promise((resolve) => {
+      const tick = () => {
+        const now = performance.now();
+        const e = entries.get(id);
+        // 経過は見え方を決めたフレームの時刻から（rAF の順番で 1 フレーム前の値を読んでも、経過と見え方が食い違わない）
+        if (e) out.push({ t: now - t0, sinceSeenMs: e.lastVisMs - e.lastSeenMs, drawn: e.drawn, fade: e.fade, reason: e.reason });
+        if (now - t0 >= ms) resolve(out);
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
   },
   /** Pose を回すのを止める / 再開する（Pose が止まったときの確認用） */
   setPoseStopped(stop: boolean) {

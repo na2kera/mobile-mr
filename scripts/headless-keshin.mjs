@@ -45,6 +45,25 @@ function check(name, cond, detail = "") {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 別の check:keshin（同じ固定のポート）が動いていると、ページや仮想のプレイヤーが相手の実行のサーバーにつながって結果が混ざる。先に確かめて止める
+{
+  const { connect } = await import("node:net");
+  const busy = (port) =>
+    new Promise((resolve) => {
+      const sock = connect({ port, host: "127.0.0.1" });
+      sock.once("connect", () => {
+        sock.destroy();
+        resolve(true);
+      });
+      sock.once("error", () => resolve(false));
+    });
+  const used = [];
+  for (const port of [PORT, CDP_PORT]) if (await busy(port)) used.push(port);
+  if (used.length) {
+    console.log(`FAIL: ポート ${used.join(", ")} が使われています。別の check:keshin が動いていないか確かめてください（同時に回すと結果が混ざる）`);
+    process.exit(1);
+  }
+}
 const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
 let portInUse = false;
 server.stderr.on("data", (d) => {
@@ -822,14 +841,21 @@ try {
   await browser.send("Target.closeTarget", { targetId: pML.targetId });
   pages.splice(pages.indexOf(pML), 1);
   // 見失う → 0.5 秒保持 → 0.5 秒で消える → 見つけ直したらすぐ出す
-  await pM.eval("window.__keshinMirror.setFakePeople([])");
-  await sleep(350);
-  const hold = (await mirrorState())?.entries.find((x) => x.id === pId);
+  // 毎フレームの見え方をページの中で記録する（確認側からの問い合わせの遅れは重い環境で数百 ms になり、0.35 秒後に 1 回読むだけだと
+  // 保持の間を読めないことがあった）。濃さは「最後に見えてからの時間」だけで決まるので、その時間で分けて確かめる
+  const rec = await pM.eval(`window.__keshinMirror.recordAfterRemove(${JSON.stringify(pId)}, 1800)`);
+  const inHold = rec.filter((x) => x.sinceSeenMs <= 480);
+  const inFade = rec.filter((x) => x.sinceSeenMs >= 520 && x.sinceSeenMs <= 980);
+  const afterAll = rec.filter((x) => x.sinceSeenMs >= 1020);
   const gone = await waitUntil(async () => {
     const e = (await mirrorState())?.entries.find((x) => x.id === pId);
     return { ok: e && !e.drawn && e.reason === "lost", e };
   }, 4000, 100);
-  check("鏡: 見失っても 0.5 秒は保持し（濃さ 1）、その後フェードで消える（reason=lost）", hold && hold.drawn && hold.fade === 1 && gone?.ok, JSON.stringify({ hold: hold && { drawn: hold.drawn, fade: hold.fade, reason: hold.reason }, gone: gone?.e && { drawn: gone.e.drawn, reason: gone.e.reason } }));
+  check(
+    "鏡: 見失っても 0.5 秒は保持し（濃さ 1）、その後フェードで消える（reason=lost）",
+    inHold.length > 0 && inHold.every((x) => x.drawn && x.fade === 1) && inFade.every((x) => x.fade < 1 && x.fade > 0) && afterAll.length > 0 && afterAll.every((x) => !x.drawn && x.reason === "lost") && gone?.ok,
+    JSON.stringify({ frames: rec.length, hold: inHold.length, holdFade: [...new Set(inHold.map((x) => x.fade))], fade: inFade.map((x) => x.fade.toFixed(2)).filter((_, i) => i % 5 === 0), after: afterAll.length, afterReasons: [...new Set(afterAll.map((x) => x.reason))] }),
+  );
   await pM.eval("window.__keshinMirror.setFakePeople([{ head: [0.3, 0.25, -3.0], yawDeg: 0 }])");
   const back = await waitUntil(async () => {
     const e = (await mirrorState())?.entries.find((x) => x.id === pId);
@@ -1009,12 +1035,24 @@ try {
   await pA3.eval("window.__keshin.setFakeBodies([])");
   await sleep(1000);
   const q1 = await st3();
+  const q1Anchor = q1?.corrState;
   await sleep(4000);
   const q5 = await st3();
   await sleep(4800);
   const q10 = await st3();
   console.log(`stage3 stale-hidden: +1s ${JSON.stringify(q1 && { src: q1.source, drawn: q1.drawn, fade: q1.fade })} +5s ${JSON.stringify(q5 && { src: q5.source, drawn: q5.drawn, fade: q5.fade })} +9.8s ${JSON.stringify(q10 && { drawn: q10.drawn, reason: q10.reason })}`);
-  check("段階 3・申告が古い相手が見えなくなって 1 秒: 消えずに補正付きで見えていた位置の近くに残る（15cm 以内・src=declared+corr・補正の弱まりは既定 10s）", q1 && q1.drawn && q1.source === "declared+corr" && dist(q1.head, hVis.head) < 0.15, `d=${dist(q1?.head, hVis?.head).toFixed(3)} src=${q1?.source}`);
+  // 補正は最後に見えてから 10 秒で 0 へ線形に弱まる（1m の補正なら 10cm/秒）。重い環境では「1 秒後」の読み取りが遅れるので、固定の 15cm ではなく
+  // 読んだ時点の弱まり k で確かめる: 位置 ≒ 申告 + 補正 × k（マーカー座標系で 6cm 以内。表示のなめらかさの遅れ込み）、見えていた位置からは 6cm + 補正 × (1 − k) 以内
+  const cs = q1Anchor;
+  const expM = cs ? [D3[0] + cs.raw[0] * cs.k, D3[1] + cs.raw[1] * cs.k, D3[2] + cs.raw[2] * cs.k] : null;
+  const rawLen = cs ? Math.hypot(...cs.raw) : NaN;
+  const allowVis = 0.06 + rawLen * (1 - (cs?.k ?? 0));
+  const declJump = dist(hVis?.headMarker, D3);
+  check(
+    "段階 3・申告が古い相手が見えなくなって約 1 秒: 消えずに補正付きで見えていた位置の近くに残る（位置 = 申告 + 補正 × 弱まり ±6cm・見えていた位置から 6cm + 弱まった分以内・src=declared+corr）",
+    q1 && q1.drawn && q1.source === "declared+corr" && cs && cs.sinceSeenMs > 500 && dist(q1.headMarker, expM) < 0.06 && dist(q1.head, hVis.head) < allowVis && declJump > 0.5,
+    `d=${dist(q1?.head, hVis?.head).toFixed(3)} 許容=${allowVis.toFixed(3)} 式との差=${dist(q1?.headMarker, expM).toFixed(3)} k=${cs?.k?.toFixed(3)} since=${cs?.sinceSeenMs?.toFixed(0)}ms 補正=${rawLen.toFixed(2)}m src=${q1?.source}`,
+  );
   check("段階 3・5 秒: まだ出ていて薄くなっている（最後に見えてから数える）", q5 && q5.drawn && q5.fade < 0.7 && q5.fade > 0.3, `fade=${q5?.fade?.toFixed(2)}`);
   check("段階 3・9.8 秒: 最後に見えてから staleHideMs + フェードで消える（申告が古いので）", q10 && !q10.drawn, JSON.stringify(q10 && { drawn: q10.drawn, reason: q10.reason }));
   // 見つけ直したら、また本当の位置に出る
@@ -1024,6 +1062,32 @@ try {
     return { ok: r && r.drawn && dist(r.head, Tw) < 0.05, r };
   }, 5000);
   check("段階 3・見つけ直したら、また本当の位置に出る", back3?.ok, JSON.stringify(back3?.r && { head: back3.r.head, src: back3.r.source, match: back3.r.matchReason }));
+  // 化身を出していない人（体の向きが V3 の申告と 90° 違う）だけが同じ所に映る: 見失ってから（続けて追いかけていない）なので関門が掛かり、結ばない（why=facing）
+  await pA3.eval("window.__keshin.setFakeBodies([])");
+  await sleep(500);
+  const fSide = [f3[1], -f3[0]];
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(fSide)} }])`);
+  const rej = await waitUntil(async () => {
+    const r = await st3();
+    const det = await pA3.eval("window.__keshin.detections().length");
+    return { ok: r && det === 1 && r.matchReason === "-" && r.matchInfo?.reject === "facing", r, det };
+  }, 5000, 100);
+  await sleep(400);
+  const rejStill = await st3();
+  const hudRej = await pA3.eval("document.querySelector('#hud')?.textContent ?? ''");
+  const rejLog = pA3.logs.find((l) => /event=remote-match/.test(l) && l.includes(`${v3Id}:-(facing)`)) ?? "";
+  check(
+    "段階 3・体の向きが 90° 違う人だけが映る: 結ばない（why=facing）・化身はその人に付かない・HUD とログに理由と向きの差（fDeg）",
+    rej?.ok && rejStill.matchReason === "-" && !(rejStill.drawn && rejStill.source === "camera") && /match=- why=facing fDeg=\d+/.test(hudRej) && /-\(facing\) persons=1 \S+\[fDeg=\d+ corrM=\S+\]/.test(rejLog),
+    JSON.stringify({ reject: rej?.r?.matchInfo, det: rej?.det, drawn: rejStill?.drawn, src: rejStill?.source, hud: (hudRej.match(/match=\S+ why=\S+ fDeg=\S+ corrM=\S+/) ?? [""])[0], log: rejLog.slice(0, 160) }),
+  );
+  // 本人（向きが合う）に戻すと、また結ぶ
+  await pA3.eval(`window.__keshin.setFakeBodies([{ head: ${JSON.stringify(T3)}, fwd: ${JSON.stringify(f3)} }])`);
+  const reb = await waitUntil(async () => {
+    const r = await st3();
+    return { ok: r && r.drawn && r.matchReason !== "-" && dist(r.head, Tw) < 0.05, r };
+  }, 5000);
+  check("段階 3・向きの合う本人に戻すと、また結ぶ（本当の位置に出る）", reb?.ok, JSON.stringify(reb?.r && { match: reb.r.matchReason, why: reb.r.matchInfo?.reject }));
   // 申告が新しい場合（V3 がマーカーを見ている。申告は 0.3m ずれ）: 方向はカメラ、距離は申告 0.7 + カメラ 0.3
   const D3b = [T3[0] + 0.3, 0, T3[2]];
   v3.pose = { pos: D3b, quat: [0, 1, 0, 0], fwd: f3, track: "marker", ageMs: 0 };
@@ -1102,10 +1166,9 @@ try {
   console.log(`stage3 two: ${JSON.stringify(two && { a: two.a && { match: two.a.matchReason, ang: angTo(two.a.head, Tw).toFixed(2) }, b: two.b && { match: two.b.matchReason, ang: angTo(two.b.head, T4w).toFixed(2) } })}`);
   check("段階 3・2 人が並ぶ: それぞれ自分の体の方向に 1 対 1 で出る（方向の差 < 1.5°）", two?.ok, JSON.stringify(two && { a: two.a && { match: two.a.matchReason, src: two.a.source }, b: two.b && { match: two.b.matchReason, src: two.b.source } }));
   await pA3.shot("stage3-two.png");
-  const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:(only-one|declared-dir|tracked)`).test(l)) ?? "";
-  // 結ばなかったときも理由が出る（V3 の最初の pose が届く前は申告の体の向きが無いので only-one で結ばない = no-facing）
-  const rejectLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:-\\(`).test(l)) ?? "";
-  check("段階 3: 結び方と、結ばなかった理由・判断に使った値（fDeg / corrM）がログに出る（event=remote-match）", matchLog !== "" && /fDeg=\S+ corrM=\S+/.test(matchLog) && /:-\((no-facing|facing|corr-gate|dir|no-candidate)\)/.test(rejectLog), `${matchLog} | ${rejectLog}`);
+  // 結ばなかったときの理由は上の「体の向きが 90° 違う人」の確認で見ている（最初の pose が届く前の no-facing は届く順番次第なので確かめない）
+  const matchLog = pA3.logs.find((l) => /event=remote-match/.test(l) && new RegExp(`${v3Id}:(only-one|declared-dir|tracked) `).test(l)) ?? "";
+  check("段階 3: 結び方と判断に使った値（fDeg / corrM）がログに出る（event=remote-match）", /persons=\d+ \S+\[fDeg=\S+ corrM=\S+\]/.test(matchLog), matchLog);
   await ov3.eval("window.__keshinOverview.setView([3.6, 2.6, 5.4], [0.2, -0.3, 1.8])");
   await sleep(400);
   await ov3.shot("stage3-overview.png");

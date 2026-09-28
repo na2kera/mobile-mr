@@ -480,6 +480,14 @@ export class RemoteKeshins {
     return [...this.views.values()].filter((e) => e.drawn && e.shownHead && e.shownYaw !== null).map((e) => ({ id: e.id, head: e.shownHead!, yaw: e.shownYaw! }));
   }
 
+  /** 確認用: いまの補正（弱める前 raw・弱まり k）と、最後にカメラで見えてからの時間 */
+  corrState(id: string, now: number): { raw: V3; k: number; n: number; sinceSeenMs: number } | null {
+    const e = this.views.get(id);
+    if (!e) return null;
+    const c = correctionAt(e.corr, now, this.opts.corrWindowSec, this.opts.corrDecaySec, this.opts.corrRecentSec, e.lastCamSeenMs);
+    return { raw: c.raw, k: c.k, n: c.n, sinceSeenMs: now - e.lastCamSeenMs };
+  }
+
   /** HUD の相手ごとの 1 行 */
   describe(players: ReadonlyMap<string, RemotePlayerInput>): string[] {
     return [...this.views.values()].map((e) => {
