@@ -43,7 +43,7 @@ import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from 
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
 import { coverUvTransform, pickBackUltraWide } from "../src/shared/passthrough-camera.ts";
 import * as THREE from "three";
-import { assignMirror, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose } from "../demos/ex9-1-keshin/mirror-math.ts";
+import { assignMirror, assignMirrorTracked, mirrorVisibility, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose } from "../demos/ex9-1-keshin/mirror-math.ts";
 import { projectToImage } from "../src/shared/fake-hands.ts";
 import { MaskHzGovernor, PersonMask, createMaskUniforms, decideMaskHzLevel, maskHzLevels } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
 
@@ -440,6 +440,45 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("見失い: 0.5 秒までは最後の位置で保持（濃さ 1）", (() => { const r = mirrorHoldFade(480, 500, 500); return r.draw && r.fade === 1 && r.phase === "hold"; })());
   check("見失い: その後 0.5 秒でフェード（0.75 秒で 0.5）", (() => { const r = mirrorHoldFade(750, 500, 500); return r.draw && near(r.fade, 0.5) && r.phase === "fading"; })());
   check("見失い: 1 秒で消える・見つけ直したらすぐ出す（経過 0 で濃さ 1）", !mirrorHoldFade(1000, 500, 500).draw && mirrorHoldFade(-Infinity, 500, 500).fade === 1 && !mirrorHoldFade(Infinity, 500, 500).draw);
+  // Pose が止まったとき（修正 1）: 濃さは「いま − 最後に見た時刻」で決まる。結果が来なくなっても保持 → フェード → 消える
+  {
+    const o = { holdMs: 500, fadeMs: 500, staleResultMs: 1000 };
+    const lastSeen = 10000; // 最後の結果（人が写っていた）= 最後に見た時刻。以後、結果が来ない
+    const at = (t) => mirrorVisibility(lastSeen + t, lastSeen, lastSeen, o);
+    check("Pose が止まる: 最後の結果の直後は見えている（seen・濃さ 1）", at(0).phase === "seen" && at(60).phase === "seen" && at(60).fade === 1);
+    check("Pose が止まる: 結果が来なくても 0.5 秒までは濃さ 1（結果と結果の間と同じ）", at(450).draw && at(450).fade === 1);
+    check("Pose が止まる: 0.75 秒で濃さ 0.5（フェード）・1 秒で消える（最後の位置に残り続けない）", near(at(750).fade, 0.5) && at(750).phase === "fading" && !at(1000).draw && !at(60000).draw);
+    check("Pose が動いている: 新しい結果に写っていれば seen（lastSeen = 最新の結果の時刻）", mirrorVisibility(20000, 20000, 20000, o).phase === "seen");
+    check("Pose が動いている: 新しい結果に写っていなければ最後に見た時刻からの経過（0.3 秒で hold）", mirrorVisibility(20300, 20000, 20250, o).phase === "hold");
+  }
+  // 人数が減ったとき（修正 2）: 1 人の人には化身を 1 体だけ。前の結果の人と位置で対応づけて入れ替わりにくく
+  {
+    const A = { head: [-0.6, 0.25, -2.8], depth: 2.8 };
+    const B = { head: [0.6, 0.25, -3.4], depth: 3.4 };
+    const r1 = assignMirrorTracked([A, B], [{ id: "p1", last: null }, { id: "p2", last: null }], 0.5);
+    check("割り当て（対応づけ）: 初めは近い順 × 参加順（p1 → A、p2 → B）", r1.assign.get("p1") === 0 && r1.assign.get("p2") === 1);
+    // A が画面から消えた: B は p2 のまま（p1 に付け替えない）
+    const r2 = assignMirrorTracked([B], [{ id: "p1", last: A.head }, { id: "p2", last: B.head }], 0.5);
+    check("割り当て（対応づけ）: 2 人 → 1 人（A が消えた）で B は p2 のまま・p1 はどの人にも付かない", r2.assign.get("p2") === 0 && !r2.assign.has("p1") && r2.displaced.size === 0);
+    // 描かれる化身の数を数える（p1 は A の位置で保持 → フェード、p2 は B）。B の所（0.5m 以内）に描かれる化身は常に 1 体、1 秒後には全体で 1 体
+    const o = { holdMs: 500, fadeMs: 500, staleResultMs: 1000 };
+    const drawnAt = (t) => {
+      const lastSeen = { p1: 0, p2: t };
+      const target = { p1: A.head, p2: B.head };
+      return ["p1", "p2"].filter((id) => mirrorVisibility(t, lastSeen[id], t, o).draw).map((id) => target[id]);
+    };
+    const nearB = (t) => drawnAt(t).filter((h) => Math.hypot(h[0] - B.head[0], h[1] - B.head[1], h[2] - B.head[2]) <= 0.5).length;
+    check("2 人 → 1 人: B の所に描かれる化身はいつも 1 体・1 秒後に描かれる化身は全体で 1 体", [100, 400, 700, 999].every((t) => nearB(t) === 1) && drawnAt(1000).length === 1);
+    // 対応づけ無しの旧方式（近い順 × 参加順）だと、p1 が B に付け替わる（= B に 2 体重なっていた原因）
+    check("（旧方式の確認）対応づけ無しだと 2 人 → 1 人で p1 が B に付け替わる", assignMirror([B.depth], ["p1", "p2"]).get("p1") === 0);
+    // 2 人が近くにいて、前の人を取られた化身: 保持せずにすぐフェード（displaced）
+    const r3 = assignMirrorTracked([{ head: [0.1, 0.25, -3], depth: 3 }], [{ id: "p1", last: [0.35, 0.25, -3] }, { id: "p2", last: [0.05, 0.25, -3] }], 0.5);
+    check("割り当て（対応づけ）: 1 人を 2 体が指していたら近い方だけ付け、もう一方は displaced（すぐフェード）", r3.assign.get("p2") === 0 && !r3.assign.has("p1") && r3.displaced.has("p1"));
+    const r4 = assignMirrorTracked([{ head: [1.8, 0.25, -3], depth: 3 }], [{ id: "p1", last: [-0.5, 0.25, -3] }], 0.5);
+    check("割り当て（対応づけ）: 1 体・1 人で、人が遠くへ移った（見失い中に別の人）なら付け替える", r4.assign.get("p1") === 0);
+    const r5 = assignMirrorTracked([{ head: [0, 0.25, -3.1], depth: 3.1 }, { head: [0.1, 0.25, -2.2], depth: 2.2 }], [{ id: "p1", last: [0.05, 0.25, -3.05] }], 0.5);
+    check("割り当て（対応づけ）: 前の人がいれば、より近い（手前の）人が現れても付け替えない", r5.assign.get("p1") === 0);
+  }
   // 反転: 背景と 3D をまとめて左右反転しても、化身は人の背後・同じ向きに見える
   {
     const p = person([0.3, 0.25, -3], 60);

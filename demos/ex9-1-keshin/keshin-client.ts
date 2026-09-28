@@ -21,21 +21,25 @@ const RECONNECT_DELAY_MS = 2000;
  * サーバーは同じ役割・同じ鍵の古い接続を切って化身の番号・on・色を引き継ぐ。sessionStorage が使えなければこのページの間だけの鍵。
  * タブを複製すると sessionStorage も複製されて同じ鍵になるが、置き換えられた側は REPLACED を受けて再接続をやめる
  */
-const memorySession = new Map<ClientRole, string>();
-function sessionKey(role: ClientRole): string {
-  const storageKey = `keshin-session-${role}`;
+const memorySession = new Map<string, string>();
+/**
+ * kind は鍵の種類（既定は役割名）。鏡モードは俯瞰画面と同じ overview 役で入るが、鍵は "mirror" で分ける
+ * （同じ鍵だと、俯瞰画面のタブを複製して鏡を開いたときに、サーバーが同じ人の再接続とみなして俯瞰画面を切る）
+ */
+function sessionKey(kind: string): string {
+  const storageKey = `keshin-session-${kind}`;
   try {
     const v = sessionStorage.getItem(storageKey);
     if (v && SESSION_PATTERN.test(v)) return v;
   } catch {
     // プライベートブラウズ等で使えない
   }
-  let v = memorySession.get(role);
+  let v = memorySession.get(kind);
   if (!v) {
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     v = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-    memorySession.set(role, v);
+    memorySession.set(kind, v);
   }
   try {
     sessionStorage.setItem(storageKey, v);
@@ -72,6 +76,8 @@ export function connectKeshin(
   config: KeshinRoomConfig,
   events: KeshinClientEvents,
   role: ClientRole = "player",
+  /** 再接続の鍵の種類（sessionStorage のキー。既定は役割名。鏡モードは "mirror"） */
+  sessionKind: string = role,
 ): KeshinClient {
   const query = new URLSearchParams({
     room,
@@ -79,7 +85,7 @@ export function connectKeshin(
     v: String(KESHIN_PROTOCOL_VERSION),
     markerId: String(config.markerId),
     markerMm: String(config.markerMm),
-    session: sessionKey(role),
+    session: sessionKey(sessionKind),
   });
   if (name) query.set("name", name);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${KESHIN_PATH}?${query}`;

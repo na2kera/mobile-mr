@@ -255,13 +255,15 @@ export class KeshinView {
       this.group.updateWorldMatrix(true, false);
       this.maskBinding.owner.uOwnerHead.value.set(u.head[0], u.head[1], u.head[2]).applyMatrix4(this.group.matrixWorld);
     }
-    // オーラ（柱 + 渦）: 本人の足元・体の向きの枠
-    const auraOn = u.aura && !visual.hidden && visual.auraK > 0.001;
+    // オーラ（柱 + 渦）: 本人の足元・体の向きの枠。他人用は受信側の薄さ（信用度・鏡の見失い）をオーラにも掛ける
+    // （自分用の fade は見上げフェード = 化身を見せるかどうかなので、足元のオーラには掛けない）
+    const auraFade = this.opts.mode === "other" ? Math.max(0, u.fade) : 1;
+    const auraOn = u.aura && !visual.hidden && visual.auraK * auraFade > 0.001;
     this.aura.points.visible = auraOn;
     if (auraOn) {
       const au = this.aura.uniforms;
       au.uTime.value = u.timeSec;
-      au.uAuraK.value = visual.auraK;
+      au.uAuraK.value = visual.auraK * auraFade;
       au.uPillarK.value = visual.pillarK;
       au.uBurstK.value = visual.burstK;
       const cutW = this.loaded.spec.cutY * scale;

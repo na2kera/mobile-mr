@@ -158,6 +158,75 @@ export function mirrorHoldFade(
   return { draw: true, fade: 1 - t, phase: "fading" };
 }
 
+/**
+ * 毎フレームの見せ方: 濃さ（保持・フェード）は常に「いま − 最後にその人を見た時刻」で決める（Pose が止まって新しい結果が来なくなっても
+ * 保持 → フェード → 消える）。phase が "seen" になるのは、最新の結果がまだ新しく（staleResultMs 以内）、その結果にその人が写っていたときだけ
+ */
+export function mirrorVisibility(
+  nowMs: number,
+  lastSeenMs: number,
+  lastResultMs: number,
+  opts: { holdMs: number; fadeMs: number; staleResultMs: number },
+): { draw: boolean; fade: number; phase: "seen" | "hold" | "fading" | "lost" } {
+  const hf = mirrorHoldFade(nowMs - lastSeenMs, opts.holdMs, opts.fadeMs);
+  const fresh = Number.isFinite(lastSeenMs) && lastSeenMs === lastResultMs && nowMs - lastResultMs <= opts.staleResultMs;
+  if (fresh && (hf.phase === "seen" || hf.phase === "hold")) return { ...hf, phase: "seen" };
+  if (hf.phase === "seen") return { ...hf, phase: "hold" };
+  return hf;
+}
+
+/**
+ * 割り当て（前の結果との対応づけ付き）: 1 人の人には化身を 1 体だけ付ける。
+ *   1. 前回その化身を付けていた人の頭の位置（last。見失って消えるまでの間だけ持つ）と、今回の人の頭が matchM 以内なら同じ人とみなす
+ *      （近い組から順に。1 人の人・1 体の化身は 1 回だけ）
+ *   2. 残った化身（参加順）に、残った人を近い順（深度の小さい順）に割り当てる（初めて付ける・見失った人が遠くへ移った）
+ *   3. 付かなかった化身のうち、前の位置のすぐ近く（matchM 以内）に今回の人がいる（= その人は別の化身に付いた）ものは displaced:
+ *      保持せずにすぐフェードに入れる（同じ人の所に 2 体重ならないように）
+ * 持つ状態は化身ごとの「前回の人の位置」だけ（教訓 4）
+ */
+export function assignMirrorTracked(
+  persons: readonly { head: V3; depth: number }[],
+  players: readonly { id: string; last: V3 | null }[],
+  matchM: number,
+): { assign: Map<string, number>; displaced: Set<string> } {
+  const assign = new Map<string, number>();
+  const used = new Set<number>();
+  const dist = (a: V3, b: V3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const pairs: [number, string, number][] = [];
+  for (const pl of players) {
+    if (!pl.last) continue;
+    persons.forEach((p, i) => {
+      const d = dist(pl.last!, p.head);
+      if (d <= matchM) pairs.push([d, pl.id, i]);
+    });
+  }
+  pairs.sort((a, b) => a[0] - b[0]);
+  for (const [, id, i] of pairs) {
+    if (assign.has(id) || used.has(i)) continue;
+    assign.set(id, i);
+    used.add(i);
+  }
+  const freePersons = persons
+    .map((p, i) => [p.depth, i] as const)
+    .filter(([, i]) => !used.has(i))
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .map(([, i]) => i);
+  for (const pl of players) {
+    if (assign.has(pl.id) || freePersons.length === 0) continue;
+    // 前の位置の近くに今回の人がいる（その人は別の化身に付いた）なら、ここでは付け替えない（displaced でフェード）
+    if (pl.last && persons.some((p) => dist(pl.last!, p.head) <= matchM)) continue;
+    const i = freePersons.shift()!;
+    assign.set(pl.id, i);
+    used.add(i);
+  }
+  const displaced = new Set<string>();
+  for (const pl of players) {
+    if (assign.has(pl.id) || !pl.last) continue;
+    if (persons.some((p) => dist(pl.last!, p.head) <= matchM)) displaced.add(pl.id);
+  }
+  return { assign, displaced };
+}
+
 /** 鏡の反転（画像の横の正規化座標）。背景と 3D をまとめて左右反転するので、画面上の x はこれになる */
 export function mirrorImageX(x: number): number {
   return 1 - x;

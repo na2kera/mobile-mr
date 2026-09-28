@@ -18,7 +18,7 @@ import { connectKeshin } from "./keshin-client";
 import type { KeshinClient } from "./keshin-client";
 import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshin-occlusion";
 import type { BodyLandmarkLike, PersonShape } from "./keshin-occlusion";
-import { assignMirror, fakeMirrorPose, mirrorHoldFade, mirrorPersonFromPose } from "./mirror-math";
+import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility } from "./mirror-math";
 import type { FakeMirrorPerson, MirrorPerson } from "./mirror-math";
 
 // ex9-1 鏡モード（mirror.html）: iPad を前面カメラで自分を映す鏡にして、化身を確かめる。
@@ -53,6 +53,10 @@ const MIRROR_SNAP_M = numParam("mirrorSnapM", 1.5, { min: 0.1, max: 100 });
 /** 見失ってから最後の位置で保持する時間 [ms] と、その後に消す時間 [ms] */
 const HOLD_MS = numParam("mirrorHoldMs", 500, { min: 0, max: 60000 });
 const FADE_MS = numParam("mirrorFadeMs", 500, { min: 1, max: 60000 });
+/** 前の結果の人と同じ人とみなす頭の距離 [m]（割り当てが入れ替わりにくくする） */
+const MATCH_M = numParam("mirrorMatchM", 0.5, { min: 0.05, max: 5 });
+/** Pose の結果がこれだけ来なければ「止まった」とみなす [ms]（HUD とログに出す。化身は保持 → フェードで消える） */
+const POSE_STALL_MS = numParam("poseStallMs", 1000, { min: 200, max: 60000 });
 /** 人の 3D 化（09 と同じ）: worldLandmarks の実寸補正・可視とみなす visibility・これより遠い人は無視 [m] */
 const BODY_SCALE = numParam("bodyScale", 1, { min: 0.3, max: 3 });
 const MIN_VIS = numParam("minVis", 0.5, { min: 0, max: 1 });
@@ -387,25 +391,39 @@ function removeEntry(id: string) {
 }
 
 let lastAssignKey = "";
-/** Pose の結果が届くたびに、見えている人を化身の出ているプレイヤーへ割り当てる */
+/**
+ * Pose の結果が届くたびに、見えている人を化身の出ているプレイヤーへ割り当てる（mirror-math.ts の assignMirrorTracked）。
+ * 1 人の人には化身を 1 体だけ。前の結果で付けていた人（頭が ?mirrorMatchM= 以内）には同じ化身を付け続ける
+ */
 function assignNow(now: number) {
   const act = activePlayers(now);
-  const map = assignMirror(
-    persons.map((p) => p.depth),
-    act.map((p) => p.info.id),
+  const res = assignMirrorTracked(
+    persons,
+    act.map((p) => {
+      const e = entries.get(p.info.id);
+      // 前回の人の位置は、見失って消えるまでの間だけ使う
+      const alive = e && e.target && now - e.lastSeenMs <= HOLD_MS + FADE_MS;
+      return { id: p.info.id, last: alive ? e.target!.head : null };
+    }),
+    MATCH_M,
   );
   for (const p of act) {
     const e = ensureEntry(p);
-    const idx = map.get(p.info.id);
+    const idx = res.assign.get(p.info.id);
     if (idx === undefined) {
       e.personIndex = null;
+      // 付いていた人が別の化身に付いた: 保持せずにすぐフェードに入れる（同じ人の所に 2 体重ならないように）
+      if (res.displaced.has(p.info.id) && now - e.lastSeenMs < HOLD_MS) {
+        e.lastSeenMs = now - HOLD_MS;
+        logEvent("reassign-fade", `${p.info.id} (its person went to another keshin)`);
+      }
       continue;
     }
     e.personIndex = idx;
     e.target = persons[idx];
     e.lastSeenMs = now;
   }
-  const key = act.map((p) => `${p.info.id}→${map.has(p.info.id) ? map.get(p.info.id) : "-"}`).join(",");
+  const key = act.map((p) => `${p.info.id}→${res.assign.has(p.info.id) ? res.assign.get(p.info.id) : "-"}`).join(",");
   if (key !== lastAssignKey) {
     logEvent("assign", `${key || "-"} persons=${persons.length}`);
     lastAssignKey = key;
@@ -422,8 +440,8 @@ function updateEntries(now: number) {
     if (!e) continue;
     const visual = keshinTimeline((now - p.startLocalMs) / 1000, p.info.on ? "appear" : "vanish");
     e.visual = visual;
-    // 直近の Pose の結果に写っていれば「見えている」（結果と結果の間も）。写っていなければ最後に見えてからの経過で保持・フェード
-    const hf = mirrorHoldFade(e.lastSeenMs === personsAtMs ? 0 : now - e.lastSeenMs, HOLD_MS, FADE_MS);
+    // 濃さは常に「いま − 最後にその人を見た時刻」で決める（Pose が止まっても保持 → フェード → 消える）
+    const hf = mirrorVisibility(now, e.lastSeenMs, personsAtMs, { holdMs: HOLD_MS, fadeMs: FADE_MS, staleResultMs: POSE_STALL_MS });
     if (!act.has(id) || !e.target || !hf.draw) {
       const reason = !act.has(id) ? "off" : e.lastSeenMs === -Infinity ? "no-person" : "lost";
       setDrawn(e, false, reason);
@@ -550,7 +568,25 @@ function connect() {
       },
     },
     "overview",
+    // 鍵は俯瞰画面（overview）と分ける（タブを複製して鏡を開いても俯瞰画面を切らない）
+    "mirror",
   );
+}
+
+// ---- Pose が止まったか（結果が POSE_STALL_MS 来ない）----
+let poseStalled = false;
+/** 確認用: Pose を回すのを止める（カメラの停止・推論の失敗の代わり） */
+let debugPoseStopped = false;
+function watchPoseStall(now: number) {
+  const ready = FAKE_PERSON || occlusion.status === "ready";
+  const stalled = ready && Number.isFinite(personsAtMs) && now - personsAtMs > POSE_STALL_MS;
+  if (stalled === poseStalled) return;
+  poseStalled = stalled;
+  logEvent(stalled ? "pose-stalled" : "pose-resumed", `lastResult=${((now - personsAtMs) / 1000).toFixed(1)}s ago status=${occlusion.status}`);
+}
+function poseStateText(now: number): string {
+  if (!Number.isFinite(personsAtMs)) return `pose=${FAKE_PERSON ? "fake" : occlusion.status}(no result yet)`;
+  return `pose=${poseStalled ? "STALLED" : "ok"} last=${((now - personsAtMs) / 1000).toFixed(1)}s`;
 }
 
 // ---- 画面の下の案内・HUD ----
@@ -560,6 +596,7 @@ function updateMessage(now: number) {
   if (!document.body.classList.contains("started")) text = "";
   else if (cameraError) text = `カメラを開けません: ${cameraError.slice(0, 60)}`;
   else if (activePlayers(now).length === 0) text = "ゴーグルの人が化身ボタンを押すと出ます";
+  else if (poseStalled) text = "人の検出が止まっています（カメラ・Pose を確認）";
   else if (persons.length === 0 && now - personsAtMs < 3000 + 1000 / Math.max(1, occlusion.governor.hz)) text = "カメラに人が写っていません（2〜3m 離れて、腰から上が入るように）";
   else if (persons.length === 0 && occlusion.status !== "ready" && !FAKE_PERSON) text = `人の検出を準備中（${occlusion.status}）`;
   if (messageEl.textContent !== text) messageEl.textContent = text;
@@ -590,6 +627,7 @@ function diagSummary(): string {
     `fps=${fps.toFixed(0)} render=${renderMsEma.toFixed(1)}ms`,
     `cam=${cameraInfo || cameraError || "-"}`,
     occlusion.describe(),
+    poseStateText(performance.now()),
     `persons=${persons.length} [${describePersons()}]`,
     `keshin=[${describeEntries()}]`,
     `ws=${netStatus} me=${selfId || "-"} players=${players.size}`,
@@ -602,7 +640,7 @@ function renderHud() {
     `cam=${cameraInfo || cameraError || "requesting"}`,
     `fps=${fps.toFixed(0)} render=${renderMsEma.toFixed(1)}ms tris=${renderer.info.render.triangles} calls=${renderer.info.render.calls} warmup=${warmupInfo}`,
     occlusion.describe(),
-    `persons=${persons.length} ${describePersons()}`,
+    `${poseStateText(performance.now())} persons=${persons.length} ${describePersons()}`,
     `keshin ${describeEntries()}`,
     `models ${[...models.entries()].map(([i, m]) => `#${i}:${m.status === "missing" ? "モデル未配置（npm run fetch:keshin）→ 代わりの人型" : `${m.status} ${m.detail}`}`).join(" ") || "-"}`,
   ].join("\n");
@@ -650,6 +688,8 @@ startButton.addEventListener("click", () => {
     return {
       started: document.body.classList.contains("started"),
       me: selfId,
+      ws: netStatus,
+      poseStalled,
       cam: cameraInfo,
       fov: camera.fov,
       persons: persons.map((p) => ({ head: p.head, fwd: p.fwd, source: p.fwdSource, depth: p.depth, floorY: p.floorY })),
@@ -679,6 +719,40 @@ startButton.addEventListener("click", () => {
   /** 合成の人を入れ替える（見失い → 保持 → フェード → 見つけ直しの確認用。[] で誰もいない） */
   setFakePeople(list: { head: V3; yawDeg: number }[]) {
     fakePeople = list.map((p) => ({ head: p.head, fwd: [Math.sin(THREE.MathUtils.degToRad(p.yawDeg)), Math.cos(THREE.MathUtils.degToRad(p.yawDeg))] as [number, number] }));
+  },
+  /** Pose を回すのを止める / 再開する（Pose が止まったときの確認用） */
+  setPoseStopped(stop: boolean) {
+    debugPoseStopped = stop;
+  },
+  poseStalled() {
+    return poseStalled;
+  },
+  /** その化身の足元・腰のオーラだけを、濃さ fade で描いたときの画素の明るさの差の合計（オーラにも fade が掛かることの確認用） */
+  auraIntensity(id: string, fade: number) {
+    const e = entries.get(id);
+    if (!e || !e.shownHead || e.shownYaw === null || !e.visual) return null;
+    const gl = renderer.getContext();
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    const read = () => {
+      const buf = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      return buf;
+    };
+    const u = { head: e.shownHead, yaw: e.shownYaw, visual: e.visual, aura: true, timeSec: 12.345, viewportH: renderer.domElement.height, eyeH: e.shownEyeH ?? EYE_H };
+    e.view.update({ ...u, fade });
+    const a = e.view.withHidden("model", () => {
+      renderer.render(scene, camera);
+      return read();
+    });
+    const was = e.view.group.visible;
+    e.view.group.visible = false;
+    renderer.render(scene, camera);
+    const b = read();
+    e.view.group.visible = was;
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 4) sum += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    return sum;
   },
   setOcclusionDisabled(off: boolean) {
     occlusion.disabled = off;
@@ -754,7 +828,8 @@ renderer.setAnimationLoop(() => {
   camera.updateMatrixWorld();
   occlusion.syncBackground(passthrough?.texture ?? null);
   // Pose は人の位置を出すのにも使うので常に回す（隠す処理そのものは化身を描いているときだけ効く）
-  if (passthrough) occlusion.update(now, true, passthrough.video, false, 1, FAKE_PERSON ? fakeMaskImage : null);
+  if (passthrough && !debugPoseStopped) occlusion.update(now, true, passthrough.video, false, 1, FAKE_PERSON ? fakeMaskImage : null);
+  watchPoseStall(now);
   updateEntries(now);
   updateMessage(now);
   warmUpPending();

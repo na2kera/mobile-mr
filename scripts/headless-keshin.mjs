@@ -775,6 +775,11 @@ try {
   check("鏡: 人の形の上にも化身が描かれる配置（確認の前提）", mOff && mOff.inside > 300, `inside=${mOff?.inside}`);
   check("鏡: 人の頭・体の上の化身は隠れる（隠さないときの 5% 未満）", mOn && mOff && mOn.inside < mOff.inside * 0.05, `on=${mOn?.inside} off=${mOff?.inside}`);
   check("鏡: 人のいない所の化身は残る（90% 以上）", mOn && mOff && mOn.outside > 1000 && mOn.outside >= mOff.outside * 0.9, `on=${mOn?.outside} off=${mOff?.outside}`);
+  // 足元・腰のオーラにも濃さ（fade）が掛かる（見失ったときにオーラだけ突然消えない。スマホ・俯瞰画面の他人用も同じ）
+  const aura1 = await pM.eval(`window.__keshinMirror.auraIntensity(${JSON.stringify(pId)}, 1)`);
+  const aura05 = await pM.eval(`window.__keshinMirror.auraIntensity(${JSON.stringify(pId)}, 0.5)`);
+  const aura01 = await pM.eval(`window.__keshinMirror.auraIntensity(${JSON.stringify(pId)}, 0.1)`);
+  check("鏡: オーラの画素も濃さに合わせて薄くなる（fade 1 > 0.5 > 0.1。0.5 で 7 割未満）", aura1 > 10000 && aura05 < aura1 * 0.7 && aura01 < aura05 * 0.5, `fade1=${aura1} fade0.5=${aura05} fade0.1=${aura01}`);
   await pM.shot("mirror-2-keshin.png");
   await pM.eval("window.__keshinMirror.setOcclusionDisabled(true)");
   await sleep(300);
@@ -795,6 +800,65 @@ try {
     return { ok: e && e.drawn && e.fade === 1, e };
   }, 3000, 100);
   check("鏡: 見つけ直したらすぐ出す（新しい位置へ即座に・濃さ 1）", back?.ok && Math.abs(back.e.head[0] - 0.3) < 0.05, JSON.stringify(back?.e && { head: back.e.head, fade: back.e.fade }));
+  // Pose が止まる（カメラの停止・推論の失敗）: 新しい結果が来なくても、保持 → フェード → 消える（最後の位置に残り続けない）
+  await sleep(400);
+  await pM.eval("window.__keshinMirror.setPoseStopped(true)");
+  await sleep(300);
+  const st0 = (await mirrorState())?.entries.find((x) => x.id === pId);
+  const stGone = await waitUntil(async () => {
+    const st = await mirrorState();
+    const e = st?.entries.find((x) => x.id === pId);
+    return { ok: e && !e.drawn && e.reason === "lost" && st.poseStalled, e, st };
+  }, 4000, 100);
+  const stallLog = pM.logs.find((l) => /event=pose-stalled/.test(l)) ?? "";
+  const hudStall = await pM.eval("document.querySelector('#hud')?.textContent ?? ''");
+  check("鏡: Pose が止まっても化身は保持 → フェードで消える（reason=lost）・HUD とログに Pose が止まったこと", st0?.drawn && stGone?.ok && stallLog !== "" && /pose=STALLED/.test(hudStall) && stGone.st.message.startsWith("人の検出が止まっています"), JSON.stringify({ before: st0 && { drawn: st0.drawn, fade: st0.fade }, after: stGone?.e && { drawn: stGone.e.drawn, reason: stGone.e.reason }, stalled: stGone?.st?.poseStalled, message: stGone?.st?.message, stallLog }));
+  await pM.eval("window.__keshinMirror.setPoseStopped(false)");
+  const stBack = await waitUntil(async () => {
+    const st = await mirrorState();
+    const e = st?.entries.find((x) => x.id === pId);
+    return { ok: e && e.drawn && !st.poseStalled, e };
+  }, 4000, 100);
+  check("鏡: Pose が戻ると化身もすぐ出る（ログに pose-resumed）", stBack?.ok && pM.logs.some((l) => /event=pose-resumed/.test(l)), JSON.stringify(stBack?.e && { drawn: stBack.e.drawn }));
+  // 2 人 → 1 人（修正 2）: 2 台目のスマホも化身を出し、2 人に割り当ててから手前の人（A）だけ画面から消す。B に化身が 2 体重ならない
+  const pP2 = await newWindow("M-phone2", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&occlude=0&room=${ROOMM}&remoteLog=0&name=Q`);
+  const sQ = await waitUntil(async () => {
+    const st = await phoneState(pP2);
+    return { ok: st && st.me, st };
+  }, 40000);
+  const qId = sQ?.st?.me;
+  await pM.eval("window.__keshinMirror.setFakePeople([{ head: [-0.7, 0.25, -2.8], yawDeg: 0 }, { head: [0.7, 0.25, -3.6], yawDeg: 0 }])");
+  await pP2.eval("document.querySelector('#keshin-button').click()");
+  const two = await waitUntil(async () => {
+    const st = await mirrorState();
+    const a = st?.entries.find((x) => x.id === pId);
+    const b = st?.entries.find((x) => x.id === qId);
+    return { ok: a?.drawn && b?.drawn && a.personIndex !== null && b.personIndex !== null, a, b };
+  }, 15000);
+  await sleep(1500);
+  const twoSt = await mirrorState();
+  const aE = twoSt.entries.find((x) => x.id === pId);
+  const bE = twoSt.entries.find((x) => x.id === qId);
+  check("鏡: 2 人・化身 2 体（参加順 P → 手前の A、Q → 奥の B）", two?.ok && aE.head[0] < -0.5 && bE.head[0] > 0.5, JSON.stringify({ a: aE?.head, b: bE?.head }));
+  await pM.shot("mirror-4-two.png");
+  await pM.eval("window.__keshinMirror.setFakePeople([{ head: [0.7, 0.25, -3.6], yawDeg: 0 }])");
+  const samples = [];
+  for (let i = 0; i < 12; i++) {
+    const st = await mirrorState();
+    const drawn = st.entries.filter((x) => x.drawn && x.head);
+    const atB = drawn.filter((x) => Math.hypot(x.head[0] - 0.7, x.head[1] - 0.25, x.head[2] + 3.6) <= 0.5);
+    // q: Q の化身が B（0.5m 以内）に描かれているか（personIndex は結果の中の順番なので、人数が変わると番号は変わる）
+    const qe = st.entries.find((x) => x.id === qId);
+    samples.push({ t: i, drawn: drawn.length, atB: atB.length, q: !!(qe?.drawn && qe.head && Math.hypot(qe.head[0] - 0.7, qe.head[1] - 0.25, qe.head[2] + 3.6) <= 0.5) });
+    await sleep(120);
+  }
+  await sleep(600);
+  const after = await mirrorState();
+  const drawnAfter = after.entries.filter((x) => x.drawn);
+  console.log(`mirror 2→1: ${JSON.stringify(samples)} after=${JSON.stringify(drawnAfter.map((x) => ({ id: x.id, head: x.head })))}`);
+  check("鏡: 2 人 → 1 人で B の所の化身はいつも 1 体（Q のまま）・消えた A の化身は保持 → フェードで消え、最後は 1 体", samples.every((x) => x.atB === 1 && x.q) && drawnAfter.length === 1 && drawnAfter[0].id === qId, JSON.stringify(samples.map((x) => `${x.drawn}/${x.atB}`)));
+  await pP2.eval("document.querySelector('#keshin-button').click()");
+  await pM.eval("window.__keshinMirror.setFakePeople([{ head: [0.3, 0.25, -3.0], yawDeg: 0 }])");
   // 化身を消すと消える
   await pP.eval("document.querySelector('#keshin-button').click()");
   const m2 = await waitUntil(async () => {
@@ -808,6 +872,24 @@ try {
   check("鏡: 出来事のログ（カメラ・人を見つけた・割り当て・化身の on / off・表示 / 非表示）", ["camera", "person-found", "assign", "keshin-on", "keshin-shown", "keshin-hidden", "keshin-off"].every((k) => mLogs.some((l) => l.includes(`event=${k}`))), mLogs.length + " 件");
   const hudM = await pM.eval("document.querySelector('#hud')?.textContent ?? ''");
   console.log(`mirror HUD:\n${hudM}`);
+  // 俯瞰画面のタブを複製して鏡を開いても（sessionStorage が同じ）、俯瞰画面を切らない（修正 4。鍵は keshin-session-mirror で分ける）
+  const ROOMD = `${ROOM}d`;
+  const pO = await newWindow("dup-overview", `${BASE}overview.html?room=${ROOMD}&remoteLog=0`);
+  await waitUntil(async () => ({ ok: /ws=open/.test((await pO.eval("document.querySelector('#status')?.textContent ?? ''")) ?? "") }), 15000);
+  const ss = await pO.eval("JSON.stringify(Object.fromEntries(Object.keys(sessionStorage).map((k) => [k, sessionStorage.getItem(k)])))");
+  const pD2 = await newWindow("dup-mirror", `https://localhost:${PORT}/`);
+  await sleep(800);
+  await pD2.eval(`(() => { const s = ${ss}; for (const k of Object.keys(s)) sessionStorage.setItem(k, s[k]); return Object.keys(s); })()`);
+  await pD2.send("Page.navigate", { url: `${BASE}mirror.html?room=${ROOMD}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0` });
+  const dupM = await waitUntil(async () => {
+    const st = await pD2.eval("window.__keshinMirror?.state() ?? null");
+    return { ok: st && st.ws === "open" && st.me, st };
+  }, 20000);
+  await sleep(2500);
+  const ovStatus = await pO.eval("document.querySelector('#status')?.textContent ?? ''");
+  const dupSt = await pD2.eval("window.__keshinMirror?.state() ?? null");
+  const keys = await pD2.eval("Object.keys(sessionStorage).filter((k) => k.startsWith('keshin-session-')).sort().join(',')");
+  check("鏡: 俯瞰画面のタブを複製して鏡を開いても、互いに切断しない（鍵は keshin-session-mirror で別）", dupM?.ok && /ws=open/.test(ovStatus) && dupSt?.ws === "open" && keys === "keshin-session-mirror,keshin-session-overview", `overview=${ovStatus.split("\n")[0]} mirror=${dupSt?.ws} keys=${keys} copied=${ss}`);
   check("鏡: HUD にカメラ（facing・画角）・Pose の診断・人・割り当てが出る", /cam=\d+x\d+ .*facing=fake fov=68\(fake\)/.test(hudM) && /occlude=fake .* poses=1 masks=1 in=\d+x\d+ lum=\d+ dg=fake/.test(hudM) && /persons=1 #0:d[\d.]+\/yaw-?\d+\(shoulders\)/.test(hudM) && /→person/.test(hudM));
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
