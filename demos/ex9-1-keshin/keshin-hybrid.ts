@@ -6,7 +6,10 @@
 import { bodyHeadPoint, placeBodyLandmarks, scaleBody, solveBodyPlacement, BODY_LANDMARK_COUNT } from "../../src/shared/body-math.ts";
 import type { BodyLandmark } from "../../src/shared/body-math.ts";
 import type { ViewMapping } from "../../src/shared/hand-math.ts";
-import { mirrorBodyFacing } from "./mirror-math.ts";
+import { assignMaxMin, mirrorBodyFacing } from "./mirror-math.ts";
+
+// 1 対 1 の全探索は鏡と共有（mirror-math.ts）。テストと既存の import のためにここからも出す
+export { assignMaxMin };
 import type { V3 } from "./keshin-math.ts";
 
 /** 自分のカメラで見た相手 1 人（自分のワールド座標） */
@@ -16,6 +19,8 @@ export type CamDetection = {
   /** 体の前（水平 [x, z]。肩の線から。ゴーグルで顔が隠れるので鼻は前後の向きの補助だけ） */
   fwd: [number, number];
   fwdSource: "shoulders" | "nose" | "default";
+  /** 体の前後が決まっているか（鼻が肩の中点より前に出ていた）。false なら肩の線の向きだけが確か（前後は ±180° 区別しない） */
+  fwdFrontKnown: boolean;
   /** 目（カメラ）から頭までの距離 [m]（カメラの推定） */
   camDist: number;
 };
@@ -49,7 +54,7 @@ export function detectionToWorld(
     return { x: w[0], y: w[1], z: w[2] };
   });
   const facing = mirrorBodyFacing(placedWorld, landmarks, opts.minVisibility);
-  return { head, fwd: facing.fwd, fwdSource: facing.source, camDist: Math.hypot(headCam.x, headCam.y, headCam.z) };
+  return { head, fwd: facing.fwd, fwdSource: facing.source, fwdFrontKnown: facing.frontKnown, camDist: Math.hypot(headCam.x, headCam.y, headCam.z) };
 }
 
 const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -75,84 +80,139 @@ export type MatchRemote = {
   fresh: boolean;
   /** 前回この相手に結んだ人の頭（自分のワールド。しばらく見ていなければ null） */
   last: V3 | null;
+  /**
+   * 前回の Pose の結果でもこの相手を結んでいたか（続けて追いかけている）。続けて追いかけている tracked には体の向き・補正の関門を掛けない
+   * （振り向く途中や、相手のアンカーが跳んで申告が動いた瞬間に、見えている本人を手放さないように）
+   */
+  continuing?: boolean;
+  /**
+   * 申告された体の向き（相手のジャイロから出したマーカー座標系の体の前を、自分のアンカーで自分のワールドに直した水平 [x, z]）。
+   * 位置が古くても向きは正しい。自分のアンカーが無い・相手の向きが無ければ null
+   */
+  declFwd?: readonly [number, number] | null;
+  /** 補正を学べている相手の予測位置（自分のワールドの「最新の申告位置 + 学んだ補正（弱める前）」）。学べていなければ null */
+  corrPred?: V3 | null;
+  /** 化身を出しているか（自分のアンカーが無いときの only-one-unchecked の条件。省略は出している扱い） */
+  on?: boolean;
 };
 
-export type MatchReason = "declared-dir" | "tracked" | "only-one";
+/** only-one-unchecked = 自分のアンカーが無い（申告の向きを直せない）間に、化身を出している相手 1 人・検出 1 人を向きを確かめずに結んだ */
+export type MatchReason = "declared-dir" | "tracked" | "only-one" | "only-one-unchecked";
+
+/** 結ばなかった理由: facing = 体の向きが合わない / corr-gate = 申告 + 補正から離れている / no-facing = 向きを比べられないので only-one で結ばない / dir = only-one で申告の方向が外れている / no-candidate = 候補が無い */
+export type MatchReject = "facing" | "corr-gate" | "no-facing" | "dir" | "no-candidate";
+
+/** 検出ごとの判断に使った値（HUD とログ。次の実機テストでしきい値を決める材料） */
+export type MatchInfo = {
+  /** 結ばなかった理由（検出があって結ばなかったときだけ。複数あれば + でつなぐ） */
+  reject: string | null;
+  /** 検出ごとの、申告の体の向きとの差 [deg]（比べられなければ null。前後が決まらない検出は線の向きだけで 0〜90） */
+  facingDeg: (number | null)[];
+  /** 検出ごとの、申告 + 補正からの距離 [m]（補正を学べていなければ null） */
+  corrM: (number | null)[];
+};
 
 /**
- * 1 対 1 の割り当てを全探索で選ぶ: 「結ぶ組の数が最大」→「その中でコストの合計が最小」（09 の assignOptimal と同じ考え方）。
- * 貪欲（近い組から順に）だと、成り立つ 2 組のうち 1 組を失うことがある（例: A=0°・B=10° と検出 4°・−5°、しきい値 8° で A→4° だけ）。
- * 相手は高々 8 人・検出は高々 4 人なので全探索で足りる
+ * 体の向きの差 [deg]（水平の単位ベクトル 2 つ）。lineOnly なら線の向きだけで比べる（±180° を区別しない。0〜90）:
+ * ゴーグルで顔が隠れて鼻で前後を決められない検出は、肩の線の向きしか確かでないため
  */
-export function assignMaxMin(
-  remoteIds: readonly string[],
-  detCount: number,
-  cost: (id: string, det: number) => number | null,
-): Map<string, number> {
-  const opts = remoteIds.map((id) => {
-    const list: { det: number; c: number }[] = [];
-    for (let d = 0; d < detCount; d++) {
-      const c = cost(id, d);
-      if (c !== null && Number.isFinite(c)) list.push({ det: d, c });
-    }
-    return list;
-  });
-  let best: { n: number; c: number; pick: (number | null)[] } = { n: 0, c: 0, pick: remoteIds.map(() => null) };
-  const pick: (number | null)[] = remoteIds.map(() => null);
-  const used = new Set<number>();
-  const dfs = (i: number, n: number, c: number) => {
-    if (i === remoteIds.length) {
-      if (n > best.n || (n === best.n && n > 0 && c < best.c)) best = { n, c, pick: [...pick] };
-      return;
-    }
-    // 残りを全部結んでも今の最良の数に届かなければ打ち切る
-    if (n + (remoteIds.length - i) < best.n) return;
-    for (const o of opts[i]) {
-      if (used.has(o.det)) continue;
-      used.add(o.det);
-      pick[i] = o.det;
-      dfs(i + 1, n + 1, c + o.c);
-      used.delete(o.det);
-      pick[i] = null;
-    }
-    dfs(i + 1, n, c);
-  };
-  dfs(0, 0, 0);
-  const out = new Map<string, number>();
-  best.pick.forEach((d, i) => {
-    if (d !== null) out.set(remoteIds[i], d);
-  });
-  return out;
+export function facingDiffDeg(a: readonly [number, number], b: readonly [number, number], lineOnly: boolean): number {
+  const la = Math.hypot(a[0], a[1]);
+  const lb = Math.hypot(b[0], b[1]);
+  if (la < 1e-9 || lb < 1e-9) return 180;
+  const c = Math.min(1, Math.max(-1, (a[0] * b[0] + a[1] * b[1]) / (la * lb)));
+  const d = (Math.acos(c) * 180) / Math.PI;
+  return lineOnly ? Math.min(d, 180 - d) : d;
 }
+
+export type MatchOptions = {
+  matchDeg: number;
+  matchM: number;
+  onlyOneMaxDeg: number;
+  /** 申告の体の向きとこれを超えて違う人には、新しく結ばない（only-one・declared-dir・続けていない tracked）[deg]（?facingMaxDeg=） */
+  facingMaxDeg?: number;
+  /** 補正を学べている相手は、申告 + 補正からこれより離れた人に新しく結ばない [m]（?corrGateM=） */
+  corrGateM?: number;
+  /** 自分のアンカーがあるか（無ければ申告の向きを自分のワールドに直せない。省略は true） */
+  selfAnchor?: boolean;
+};
+
+/** 体の向きの関門の既定 [deg]: 自分のアンカーの向きの誤差（単一マーカーで十数度）+ 肩の線の推定のぶれ + 申告の遅れを見込む */
+export const DEFAULT_FACING_MAX_DEG = 60;
+/** 補正の関門の既定 [m] */
+export const DEFAULT_CORR_GATE_M = 1.5;
 
 /**
  * 検出した人と相手を 1 対 1 で結ぶ。1 回の全探索で「結ぶ組の数が最大 → コストの合計が最小」（段ごとに決めると、先の段が別の相手の
  * 唯一の候補を取ってしまう。例: 申告の方向がアンカーの誤差でずれて隣の人に近く見えると、隣の人の相手が結べなくなる）。組の候補:
  *   declared-dir: 申告と自分のアンカーが新しい相手で、申告位置の方向と検出の方向のなす角が matchDeg 以内（コスト = 角度 [deg]）
  *   tracked: 前回結んだ人の頭と今の検出の頭が matchM 以内（コスト = 距離 / matchM × matchDeg / 2。見失う直前まで見ていた人を優先）
- * どちらも無ければ、相手 1 人・検出 1 人のときだけ結ぶ（only-one）。ただし新しい申告がある相手は、方向の差が onlyOneMaxDeg 以内のときだけ
- * （部屋にいるプレイヤーでない人に付けて、その差を補正として学ばないように）。古い申告の方向だけでは結ばない（別人に付け得る）
+ * どちらも無ければ、相手 1 人・検出 1 人のときだけ結ぶ（only-one）。ただし体の向きを比べられて facingMaxDeg 以内のときだけ（部屋にいる
+ * プレイヤーでない人に付けて、その差を補正として学ばないように）。新しい申告がある相手は、さらに方向の差が onlyOneMaxDeg 以内のときだけ。
+ * 自分のアンカーが無い（opts.selfAnchor = false。申告の向きを直せない）間だけは、化身を出している相手が 1 人・検出 1 人なら向きを確かめずに結ぶ
+ * （only-one-unchecked。別の人に付くことがある）。古い申告の方向だけでは結ばない（別人に付け得る）。
+ * 関門:
+ *   facing: 申告の体の向き（declFwd）と検出の体の向きの差が facingMaxDeg を超える人には結ばない（前後が決まらない検出は線の向きだけで比べる）。
+ *     続けて追いかけている tracked 以外のすべての候補に掛ける
+ *   corr-gate: 補正を学べている相手（corrPred）は、そこから corrGateM を超えて離れた人には結ばない。tracked（直近の頭の位置での再捕捉）には掛けない
+ *     （自分や相手のアンカーが跳んで予測位置がずれたあとに見失っても、本人が同じ所に戻れば結ぶ）
  */
-export function matchRemotes(
-  detections: readonly { head: V3 }[],
+export function matchRemotesDiag(
+  detections: readonly { head: V3; fwd?: readonly [number, number]; fwdFrontKnown?: boolean }[],
   remotes: readonly MatchRemote[],
   eye: V3,
-  opts: { matchDeg: number; matchM: number; onlyOneMaxDeg: number },
-): Map<string, { index: number; reason: MatchReason }> {
+  opts: MatchOptions,
+): { matches: Map<string, { index: number; reason: MatchReason }>; info: Map<string, MatchInfo> } {
+  const facingMax = opts.facingMaxDeg ?? DEFAULT_FACING_MAX_DEG;
+  const corrGate = opts.corrGateM ?? DEFAULT_CORR_GATE_M;
   const out = new Map<string, { index: number; reason: MatchReason }>();
   const byId = new Map(remotes.map((r) => [r.id, r]));
-  const best = (id: string, d: number): { c: number; reason: MatchReason } | null => {
+  const facingOf = (r: MatchRemote, d: number): number | null => {
+    const det = detections[d];
+    if (!r.declFwd || !det.fwd) return null;
+    return facingDiffDeg(r.declFwd, det.fwd, det.fwdFrontKnown !== true);
+  };
+  const corrOf = (r: MatchRemote, d: number): number | null => (r.corrPred ? norm(sub(detections[d].head, r.corrPred)) : null);
+  const facingBad = (r: MatchRemote, d: number): boolean => {
+    const f = facingOf(r, d);
+    return f !== null && f > facingMax;
+  };
+  /** 新しく結ぶときの関門（補正 → 体の向きの順）。通れば null、通らなければ理由 */
+  const gate = (r: MatchRemote, d: number): MatchReject | null => {
+    const c = corrOf(r, d);
+    if (c !== null && c > corrGate) return "corr-gate";
+    if (facingBad(r, d)) return "facing";
+    return null;
+  };
+  const rejects = new Map<string, Set<MatchReject>>();
+  const addReject = (id: string, why: MatchReject) => {
+    let set = rejects.get(id);
+    if (!set) rejects.set(id, (set = new Set()));
+    set.add(why);
+  };
+  const best = (id: string, d: number, record = false): { c: number; reason: MatchReason } | null => {
     const r = byId.get(id)!;
     let pick: { c: number; reason: MatchReason } | null = null;
-    if (r.declared && r.fresh) {
-      const a = angleFromEyeDeg(eye, r.declared, detections[d].head);
-      if (a <= opts.matchDeg) pick = { c: a, reason: "declared-dir" };
-    }
+    let tracked: { c: number; reason: MatchReason } | null = null;
     if (r.last) {
       const m = norm(sub(detections[d].head, r.last));
-      if (m <= opts.matchM) {
-        const c = (m / opts.matchM) * opts.matchDeg * 0.5;
-        if (!pick || c < pick.c) pick = { c, reason: "tracked" };
+      if (m <= opts.matchM) tracked = { c: (m / opts.matchM) * opts.matchDeg * 0.5, reason: "tracked" };
+    }
+    // 続けて追いかけている人は関門なしで結ぶ（見えている間は手放さない）
+    if (tracked && r.continuing) return tracked;
+    // 直近の頭の位置での再捕捉（見失っていた人の近く）: 補正の関門は掛けず、体の向きだけ確かめる
+    if (tracked) {
+      if (facingBad(r, d)) {
+        if (record) addReject(id, "facing");
+      } else pick = tracked;
+    }
+    if (r.declared && r.fresh) {
+      const a = angleFromEyeDeg(eye, r.declared, detections[d].head);
+      if (a <= opts.matchDeg && (!pick || a < pick.c)) {
+        const g = gate(r, d);
+        if (g) {
+          if (record) addReject(id, g);
+        } else pick = { c: a, reason: "declared-dir" };
       }
     }
     return pick;
@@ -163,12 +223,48 @@ export function matchRemotes(
     (id, d) => best(id, d)?.c ?? null,
   );
   for (const [id, d] of m) out.set(id, { index: d, reason: best(id, d)!.reason });
-  if (remotes.length === 1 && detections.length === 1 && !out.has(remotes[0].id)) {
+  // 結ばなかった相手の理由（関門で落ちた候補）
+  for (const r of remotes) if (!out.has(r.id)) for (let d = 0; d < detections.length; d++) best(r.id, d, true);
+  const onRemotes = remotes.filter((r) => r.on !== false);
+  const detFree = detections.length === 1 && ![...out.values()].some((v) => v.index === 0);
+  if (opts.selfAnchor === false && detFree && onRemotes.length === 1 && !out.has(onRemotes[0].id)) {
+    // 自分のアンカーがまだ無い（申告の向きを自分のワールドに直せない）: 化身を出している相手 1 人・検出 1 人なら向きを確かめずに結ぶ
+    const r = onRemotes[0];
+    out.set(r.id, { index: 0, reason: "only-one-unchecked" });
+    rejects.delete(r.id);
+  } else if (remotes.length === 1 && detections.length === 1 && !out.has(remotes[0].id)) {
     const r = remotes[0];
-    const ok = !(r.declared && r.fresh) || angleFromEyeDeg(eye, r.declared, detections[0].head) <= opts.onlyOneMaxDeg;
-    if (ok) out.set(r.id, { index: 0, reason: "only-one" });
+    const f = facingOf(r, 0);
+    const g = gate(r, 0);
+    if (f === null) addReject(r.id, "no-facing");
+    else if (g) addReject(r.id, g);
+    else if (r.declared && r.fresh && angleFromEyeDeg(eye, r.declared, detections[0].head) > opts.onlyOneMaxDeg) addReject(r.id, "dir");
+    else {
+      out.set(r.id, { index: 0, reason: "only-one" });
+      rejects.delete(r.id);
+    }
   }
-  return out;
+  const info = new Map<string, MatchInfo>();
+  for (const r of remotes) {
+    const set = rejects.get(r.id);
+    const reject = out.has(r.id) || detections.length === 0 ? null : set && set.size ? [...set].join("+") : "no-candidate";
+    info.set(r.id, {
+      reject,
+      facingDeg: detections.map((_, d) => facingOf(r, d)),
+      corrM: detections.map((_, d) => corrOf(r, d)),
+    });
+  }
+  return { matches: out, info };
+}
+
+/** matchRemotesDiag の結び方だけ */
+export function matchRemotes(
+  detections: readonly { head: V3; fwd?: readonly [number, number]; fwdFrontKnown?: boolean }[],
+  remotes: readonly MatchRemote[],
+  eye: V3,
+  opts: MatchOptions,
+): Map<string, { index: number; reason: MatchReason }> {
+  return matchRemotesDiag(detections, remotes, eye, opts).matches;
 }
 
 /**

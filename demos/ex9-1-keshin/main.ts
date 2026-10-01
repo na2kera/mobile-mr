@@ -30,7 +30,7 @@ import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshi
 import type { PersonShape } from "./keshin-occlusion";
 import { RemoteKeshins } from "./remote-keshins";
 import type { PosMode } from "./remote-keshins";
-import { detectionToWorld } from "./keshin-hybrid";
+import { DEFAULT_CORR_GATE_M, DEFAULT_FACING_MAX_DEG, detectionToWorld } from "./keshin-hybrid";
 import type { CamDetection } from "./keshin-hybrid";
 import { fakeMirrorPoints, poseFromCamPoints } from "./mirror-math";
 import type { BodyLandmarkLike } from "./keshin-occlusion";
@@ -120,11 +120,20 @@ const ONLY_ONE_MAX_DEG = numParam("onlyOneMaxDeg", 45, { min: 1, max: 180 });
 const CORR_RECENT_SEC = numParam("corrRecentSec", 0.5, { min: 0.05, max: 60 });
 /** 前の結果の人と頭がこれ以内なら同じ人 [m] */
 const MATCH_M = numParam("matchM", 0.5, { min: 0.05, max: 5 });
+/**
+ * 申告の体の向き（相手のジャイロ → 自分のアンカーで自分のワールドへ）と、検出した人の肩の線の向きがこれを超えて違えば新しく結ばない [deg]。
+ * 自分のアンカーの向きの誤差（単一マーカーで十数度）と肩の線のぶれを見込む。前後が決まらない（顔が隠れた）人は線の向きだけで比べる
+ */
+const FACING_MAX_DEG = numParam("facingMaxDeg", DEFAULT_FACING_MAX_DEG, { min: 1, max: 180 });
+/** 補正を学べている相手は、申告 + 補正からこれより離れた人に新しく結ばない [m] */
+const CORR_GATE_M = numParam("corrGateM", DEFAULT_CORR_GATE_M, { min: 0.1, max: 100 });
 /** 距離の混ぜ方: 申告までの距離の重み（残りはカメラの推定）。申告が古ければカメラだけ */
 const DIST_W = numParam("distW", 0.7, { min: 0, max: 1 });
 /** 補正（カメラで見た位置 − 申告位置）を平均する窓 [s] と、見えなくなってから 0 へ弱める時間 [s] */
 const CORR_WINDOW_SEC = numParam("corrWindowSec", 3, { min: 0.2, max: 60 });
 const CORR_DECAY_SEC = numParam("corrDecaySec", 10, { min: 0, max: 600 });
+/** 段階 3: マーカーを見直した補正量 Δ（自分のアンカーの跳び）がこれを超えたら、全員の学んだ補正を捨てる [m] */
+const CORR_RESET_M = numParam("corrResetM", 0.3, { min: 0.01, max: 100 });
 /** 人の 3D 化（09 と同じ） */
 const BODY_SCALE = numParam("bodyScale", 1, { min: 0.3, max: 3 });
 const MIN_VIS = numParam("minVis", 0.5, { min: 0, max: 1 });
@@ -550,6 +559,8 @@ const remotes = new RemoteKeshins(
     corrRecentSec: CORR_RECENT_SEC,
     cameraFadeMs: 200,
     matchM: MATCH_M,
+    facingMaxDeg: FACING_MAX_DEG,
+    corrGateM: CORR_GATE_M,
     distW: DIST_W,
     corrWindowSec: CORR_WINDOW_SEC,
     corrDecaySec: CORR_DECAY_SEC,
@@ -1045,7 +1056,7 @@ nameForm.addEventListener("submit", (event) => {
   const name = readPlayerName();
   if (name === null) return;
   document.body.classList.add("started");
-  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} posMode=${POS_MODE} matchDeg=${MATCH_DEG} onlyOneMaxDeg=${ONLY_ONE_MAX_DEG} matchM=${MATCH_M} distW=${DIST_W} corr=${CORR_WINDOW_SEC}s/${CORR_DECAY_SEC}s/${CORR_RECENT_SEC}s mode=${touch ? "gyro" : "orbit"}`;
+  hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} posMode=${POS_MODE} matchDeg=${MATCH_DEG} onlyOneMaxDeg=${ONLY_ONE_MAX_DEG} matchM=${MATCH_M} facingMaxDeg=${FACING_MAX_DEG} corrGateM=${CORR_GATE_M} corrResetM=${CORR_RESET_M} distW=${DIST_W} corr=${CORR_WINDOW_SEC}s/${CORR_DECAY_SEC}s/${CORR_RECENT_SEC}s mode=${touch ? "gyro" : "orbit"}`;
   logEvent("start", `name=${name} room=${ROOM} ${hudState.base} ${describeLook(LOOK)}`);
   connect(name);
   runStartFlow(touch, {
@@ -1194,6 +1205,8 @@ if (FAKE_CAM) {
         id: e.id,
         source: e.source,
         matchReason: e.matchReason,
+        matchInfo: e.matchInfo,
+        corrState: remotes.corrState(e.id, performance.now()),
         camDist: e.camDist,
         declDist: e.declDist,
         dirDeg: e.dirDeg,
@@ -1366,6 +1379,8 @@ renderer.setAnimationLoop(() => {
   const tMarker = performance.now();
   markerAnchor?.update(now);
   const markerRan = performance.now() - tMarker > 1;
+  // 段階 3: このフレームでマーカーを採用し、自分のアンカーが大きく動いた（Δ > ?corrResetM=）なら、マーカー座標系で持つ補正は捨てる
+  if (markerAnchor && markerAnchor.lastAcceptedMs === now && markerAnchor.correctionM > CORR_RESET_M) remotes.resetCorrections(`Δ=${markerAnchor.correctionM.toFixed(2)}m`);
   if (markerAnchor?.everDetected && !anchor.visible) anchor.visible = true;
   markerFrame.visible = trackOf(now).track === "marker";
   anchor.updateMatrixWorld(true);

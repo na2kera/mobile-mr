@@ -20,15 +20,16 @@ import { OcclusionController, drawPersonShape, projectFakePerson } from "./keshi
 import type { BodyLandmarkLike, PersonShape } from "./keshin-occlusion";
 import { describeLook, lookFromParams } from "./keshin-look";
 import { probeDissolve, probeStream } from "./keshin-probe";
-import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility } from "./mirror-math";
-import type { FakeMirrorPerson, MirrorPerson } from "./mirror-math";
+import { assignMirrorTracked, fakeMirrorPose, mirrorPersonFromPose, mirrorVisibility, withNearImg } from "./mirror-math";
+import type { FakeMirrorPerson, MirrorAssignInfo, MirrorPerson } from "./mirror-math";
 
 // ex9-1 鏡モード（mirror.html）: iPad を前面カメラで自分を映す鏡にして、化身を確かめる。
 //   - 見る専用の参加者として room に入る（役割は俯瞰画面と同じ overview。プロトコルは変えない）。化身の on/off と演出の timeline は全員と同じ経路
 //   - 化身の位置は iPad のカメラで見た人（MediaPipe PoseLandmarker → 09 の body-math.ts で 3D 化）から決める。申告位置・マーカーは使わない
 //   - three のカメラは原点に固定（iPad はスタンドに固定。ジャイロなし）。カメラ座標系 = ワールド。描画の FOV は背景に合わせる（backgroundFovDeg）
 //   - 鏡: canvas を CSS の scaleX(-1) で背景と 3D をまとめて反転する（HUD・文字は反転しない）
-//   - 誰の化身か: 見えている人を近い順に、化身を出しているプレイヤーの参加順に割り当てる（簡易。mirror-math.ts の assignMirror）
+//   - 誰の化身か: 最初は見えている人を近い順に、化身を出しているプレイヤーの参加順に割り当てる。一度付けた人は画像の上の頭の位置で追いかけ、
+//     見えている間は付け替えない（見失って保持の時間が過ぎてから、残った人へ。保持の間は隣の人に届かない範囲でだけ捕まえ直す）。mirror-math.ts の assignMirrorTracked
 //   - 見失ったら ?mirrorHoldMs=500 だけ最後の位置で保持してから ?mirrorFadeMs=500 で消す。見つけ直したらすぐ出す
 //   - 人の形で隠す処理（持ち主の頭より奥だけ）はスマホの段階 2 と同じ（keshin-occlusion.ts。持ち主の頭は Pose で出した頭）
 
@@ -57,8 +58,12 @@ const MIRROR_SNAP_M = numParam("mirrorSnapM", 1.5, { min: 0.1, max: 100 });
 /** 見失ってから最後の位置で保持する時間 [ms] と、その後に消す時間 [ms] */
 const HOLD_MS = numParam("mirrorHoldMs", 500, { min: 0, max: 60000 });
 const FADE_MS = numParam("mirrorFadeMs", 500, { min: 1, max: 60000 });
-/** 前の結果の人と同じ人とみなす頭の距離 [m]（割り当てが入れ替わりにくくする） */
-const MATCH_M = numParam("mirrorMatchM", 0.5, { min: 0.05, max: 5 });
+/**
+ * 前の結果の人と同じ人とみなす、画像の上の頭の距離の上限（正規化座標。画像の幅・高さを 1 とする。最後に見えてからの時間で 0.05 から
+ * ここまで広げる = mirror-math.ts の mirrorImgGate）。3D の頭の距離は Pose の距離の推定が
+ * 数十 cm ぶれて対応が外れる（実機で 2 人の間を行き来した）ので、画像の上の位置を主にする（3D は同じくらいのときの決め手だけ）
+ */
+const MATCH_IMG = numParam("mirrorMatchImg", 0.15, { min: 0.01, max: 1 });
 /** Pose の結果がこれだけ来なければ「止まった」とみなす [ms]（HUD とログに出す。化身は保持 → フェードで消える） */
 const POSE_STALL_MS = numParam("poseStallMs", 1000, { min: 200, max: 60000 });
 /** 人の 3D 化（09 と同じ）: worldLandmarks の実寸補正・可視とみなす visibility・これより遠い人は無視 [m] */
@@ -285,7 +290,8 @@ function onPoses(landmarks: BodyLandmarkLike[][], world: BodyLandmarkLike[][], n
     const p = mirrorPersonFromPose(landmarks[i], world[i] ?? [], m, { bodyScale: BODY_SCALE, minVisibility: MIN_VIS, maxDepthM: MAX_DEPTH_M });
     if (p) found.push(p);
   }
-  persons = found;
+  // 人ごとに、同じ結果の隣の人までの画像の上の距離を付ける（付けた人の値は「前回の人」として残り、見失った間の付け替えを防ぐ）
+  persons = withNearImg(found);
   personsAtMs = now;
   if (found.length !== lastPersonCount) {
     logEvent(found.length > lastPersonCount ? "person-found" : "person-lost", `persons ${lastPersonCount}→${found.length}${found.length ? ` depth=${found.map((p) => p.depth.toFixed(2)).join(",")}` : ""}`);
@@ -353,7 +359,11 @@ type MirrorEntry = {
   /** 割り当てた人の最新の値と、最後に見えた時刻（Pose の結果の時刻） */
   target: MirrorPerson | null;
   lastSeenMs: number;
+  /** 確認用: 見え方（drawn / fade / reason）を最後に決めたフレームの時刻 */
+  lastVisMs: number;
   personIndex: number | null;
+  /** 直近の割り当ての結果と判断に使った値（画像の上の距離など。HUD とログ用） */
+  assign: MirrorAssignInfo | null;
   drawn: boolean;
   reason: string;
   fade: number;
@@ -392,7 +402,7 @@ function ensureEntry(p: PlayerState): MirrorEntry {
   );
   scene.add(view.group);
   requestModel(p.info.keshin);
-  e = { id: p.info.id, view, shownHead: null, shownYaw: null, shownEyeH: null, target: null, lastSeenMs: -Infinity, personIndex: null, drawn: false, reason: "-", fade: 0, visual: null };
+  e = { id: p.info.id, view, shownHead: null, shownYaw: null, shownEyeH: null, target: null, lastSeenMs: -Infinity, lastVisMs: -Infinity, personIndex: null, assign: null, drawn: false, reason: "-", fade: 0, visual: null };
   entries.set(p.info.id, e);
   return e;
 }
@@ -407,7 +417,9 @@ function removeEntry(id: string) {
 let lastAssignKey = "";
 /**
  * Pose の結果が届くたびに、見えている人を化身の出ているプレイヤーへ割り当てる（mirror-math.ts の assignMirrorTracked）。
- * 1 人の人には化身を 1 体だけ。前の結果で付けていた人（頭が ?mirrorMatchM= 以内）には同じ化身を付け続ける
+ * 1 人の人には化身を 1 体だけ。前の結果で付けていた人（画像の上の頭が ?mirrorMatchImg= 以内）には同じ化身を付け続け、
+ * その人を見失っても ?mirrorHoldMs= の間はほかの人へ付け替えない（その間に同じ人とみなす範囲は、前回の位置から隣の人までの距離 × 0.5 以下）。
+ * 持つ状態は化身ごとの「前回の人（target。そのときの隣の人までの距離 nearImg を含む）と最後に見えた時刻」だけ
  */
 function assignNow(now: number) {
   const act = activePlayers(now);
@@ -417,12 +429,13 @@ function assignNow(now: number) {
       const e = entries.get(p.info.id);
       // 前回の人の位置は、見失って消えるまでの間だけ使う
       const alive = e && e.target && now - e.lastSeenMs <= HOLD_MS + FADE_MS;
-      return { id: p.info.id, last: alive ? e.target!.head : null };
+      return { id: p.info.id, last: alive ? { img: e.target!.img, head: e.target!.head, nearImg: e.target!.nearImg ?? null } : null, sinceSeenMs: e ? now - e.lastSeenMs : Infinity };
     }),
-    MATCH_M,
+    { matchImg: MATCH_IMG, holdMs: HOLD_MS },
   );
   for (const p of act) {
     const e = ensureEntry(p);
+    e.assign = res.info.get(p.info.id) ?? null;
     const idx = res.assign.get(p.info.id);
     if (idx === undefined) {
       e.personIndex = null;
@@ -437,9 +450,16 @@ function assignNow(now: number) {
     e.target = persons[idx];
     e.lastSeenMs = now;
   }
-  const key = act.map((p) => `${p.info.id}→${res.assign.has(p.info.id) ? res.assign.get(p.info.id) : "-"}`).join(",");
+  // 人の番号（結果の中の順番）は結果ごとに入れ替わりうるので、ログの鍵は「どの化身が付いているか・付け方」で比べる（番号の入れ替わりでは出さない）
+  const key = act.map((p) => `${p.info.id}:${res.info.get(p.info.id)?.reason ?? "-"}`).join(",");
   if (key !== lastAssignKey) {
-    logEvent("assign", `${key || "-"} persons=${persons.length}`);
+    const detail = act
+      .map((p) => {
+        const i = res.info.get(p.info.id);
+        return `${p.info.id}→${res.assign.has(p.info.id) ? res.assign.get(p.info.id) : "-"}(${i?.reason ?? "-"} ${describeAssignValues(i ?? null)})`;
+      })
+      .join(",");
+    logEvent("assign", `${detail || "-"} persons=${persons.length}`);
     lastAssignKey = key;
   }
 }
@@ -454,6 +474,7 @@ function updateEntries(now: number) {
     if (!e) continue;
     const visual = keshinTimeline((now - p.startLocalMs) / 1000, p.info.on ? "appear" : "vanish");
     e.visual = visual;
+    e.lastVisMs = now;
     // 濃さは常に「いま − 最後にその人を見た時刻」で決める（Pose が止まっても保持 → フェード → 消える）
     const hf = mirrorVisibility(now, e.lastSeenMs, personsAtMs, { holdMs: HOLD_MS, fadeMs: FADE_MS, staleResultMs: POSE_STALL_MS });
     if (!act.has(id) || !e.target || !hf.draw) {
@@ -623,14 +644,19 @@ let fpsFrames = 0;
 let fpsWindowStart = performance.now();
 let renderMsEma = 0;
 function describePersons(): string {
-  return persons.map((p, i) => `#${i}:d${p.depth.toFixed(2)}/yaw${THREE.MathUtils.radToDeg(yawOfForward(p.fwd)).toFixed(0)}(${p.fwdSource})/floor${p.floorY === null ? "-" : p.floorY.toFixed(2)}`).join(" ") || "-";
+  return persons.map((p, i) => `#${i}:d${p.depth.toFixed(2)}/yaw${THREE.MathUtils.radToDeg(yawOfForward(p.fwd)).toFixed(0)}(${p.fwdSource})/floor${p.floorY === null ? "-" : p.floorY.toFixed(2)}/img${p.img[0].toFixed(2)},${p.img[1].toFixed(2)}`).join(" ") || "-";
+}
+/** 割り当ての判断に使った値: 前回の人から付けた人までの画像の上の距離 dImg・2 番目に近い人までの dImg2・その結果のしきい値 gate・3D の距離 d3（しきい値を決める材料） */
+function describeAssignValues(i: MirrorAssignInfo | null): string {
+  const f = (v: number | null | undefined, d: number) => (v === null || v === undefined ? "-" : v.toFixed(d));
+  return `dImg=${f(i?.dImg, 3)} dImg2=${f(i?.dImg2, 3)} gate=${f(i?.gate, 3)} d3=${f(i?.d3, 2)}`;
 }
 function describeEntries(): string {
   return (
     [...entries.values()]
       .map((e) => {
         const p = players.get(e.id);
-        return `${p?.info.name ?? e.id}(${e.id})#${e.view.spec.index}${p?.info.on ? "on" : "off"}→person${e.personIndex ?? "-"} drawn=${e.drawn ? 1 : 0}(${e.reason}) fade=${e.fade.toFixed(2)} u=${e.visual ? e.visual.u.toFixed(2) : "-"}`;
+        return `${p?.info.name ?? e.id}(${e.id})#${e.view.spec.index}${p?.info.on ? "on" : "off"}→person${e.personIndex ?? "-"}(${e.assign?.reason ?? "-"} ${describeAssignValues(e.assign)}) drawn=${e.drawn ? 1 : 0}(${e.reason}) fade=${e.fade.toFixed(2)} u=${e.visual ? e.visual.u.toFixed(2) : "-"}`;
       })
       .join(" | ") || "-"
   );
@@ -650,7 +676,7 @@ function diagSummary(): string {
 }
 function renderHud() {
   const text = [
-    `mirror room=${ROOM ?? "(不正)"} ws=${netStatus} me=${selfId || "-"} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC}s hold=${HOLD_MS}ms fade=${FADE_MS}ms fov now=${camera.fov.toFixed(1)}`,
+    `mirror room=${ROOM ?? "(不正)"} ws=${netStatus} me=${selfId || "-"} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC}s hold=${HOLD_MS}ms fade=${FADE_MS}ms matchImg=${MATCH_IMG} fov now=${camera.fov.toFixed(1)}`,
     `cam=${cameraInfo || cameraError || "requesting"}`,
     `fps=${fps.toFixed(0)} render=${renderMsEma.toFixed(1)}ms tris=${renderer.info.render.triangles} calls=${renderer.info.render.calls} warmup=${warmupInfo}`,
     occlusion.describe(),
@@ -679,7 +705,7 @@ startButton.addEventListener("click", () => {
     return;
   }
   document.body.classList.add("started");
-  logEvent("start", `room=${ROOM} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE} fake=${FAKE_PERSON ? "person" : FAKE_CAM ? "cam" : 0} ${describeLook(LOOK)}`);
+  logEvent("start", `room=${ROOM} keshinH=${KESHIN_H} eyeH=${EYE_H} smooth=${MIRROR_SMOOTH_SEC} matchImg=${MATCH_IMG} hold=${HOLD_MS} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE} fake=${FAKE_PERSON ? "person" : FAKE_CAM ? "cam" : 0} ${describeLook(LOOK)}`);
   connect();
   if (touch) keepScreenAwake((s) => logEvent("wakelock", s));
   startCamera((step) => {
@@ -706,7 +732,7 @@ startButton.addEventListener("click", () => {
       poseStalled,
       cam: cameraInfo,
       fov: camera.fov,
-      persons: persons.map((p) => ({ head: p.head, fwd: p.fwd, source: p.fwdSource, depth: p.depth, floorY: p.floorY })),
+      persons: persons.map((p) => ({ head: p.head, fwd: p.fwd, source: p.fwdSource, depth: p.depth, floorY: p.floorY, img: p.img })),
       personsAgeMs: now - personsAtMs,
       message: messageEl.hidden ? "" : messageEl.textContent,
       programs: renderer.info.programs?.length ?? 0,
@@ -716,6 +742,8 @@ startButton.addEventListener("click", () => {
         keshin: e.view.spec.index,
         on: players.get(e.id)?.info.on ?? false,
         personIndex: e.personIndex,
+        assign: e.assign,
+        sinceSeenMs: now - e.lastSeenMs,
         drawn: e.drawn,
         reason: e.reason,
         fade: e.fade,
@@ -733,6 +761,26 @@ startButton.addEventListener("click", () => {
   /** 合成の人を入れ替える（見失い → 保持 → フェード → 見つけ直しの確認用。[] で誰もいない） */
   setFakePeople(list: { head: V3; yawDeg: number }[]) {
     fakePeople = list.map((p) => ({ head: p.head, fwd: [Math.sin(THREE.MathUtils.degToRad(p.yawDeg)), Math.cos(THREE.MathUtils.degToRad(p.yawDeg))] as [number, number] }));
+  },
+  /**
+   * 合成の人を消して、そこから ms の間、毎フレーム（ページの中で）その化身の見え方を記録する（見失い → 保持 → フェードの確認用。
+   * 確認側からの 1 回ごとの問い合わせの遅れ（重い環境で数百 ms）に左右されない）
+   */
+  recordAfterRemove(id: string, ms: number) {
+    fakePeople = [];
+    const t0 = performance.now();
+    const out: { t: number; sinceSeenMs: number; drawn: boolean; fade: number; reason: string }[] = [];
+    return new Promise((resolve) => {
+      const tick = () => {
+        const now = performance.now();
+        const e = entries.get(id);
+        // 経過は見え方を決めたフレームの時刻から（rAF の順番で 1 フレーム前の値を読んでも、経過と見え方が食い違わない）
+        if (e) out.push({ t: now - t0, sinceSeenMs: e.lastVisMs - e.lastSeenMs, drawn: e.drawn, fade: e.fade, reason: e.reason });
+        if (now - t0 >= ms) resolve(out);
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
   },
   /** Pose を回すのを止める / 再開する（Pose が止まったときの確認用） */
   setPoseStopped(stop: boolean) {

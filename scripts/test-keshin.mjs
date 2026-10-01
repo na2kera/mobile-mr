@@ -43,10 +43,10 @@ import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from 
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
 import { coverUvTransform, pickBackUltraWide } from "../src/shared/passthrough-camera.ts";
 import * as THREE from "three";
-import { assignMirror, assignMirrorTracked, mirrorVisibility, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose } from "../demos/ex9-1-keshin/mirror-math.ts";
+import { assignMirror, assignMirrorTracked, mirrorImgGate, mirrorVisibility, fakeMirrorPose, mirrorBodyFacing, mirrorDir, mirrorHoldFade, mirrorImageX, mirrorPersonFromPose, withNearImg } from "../demos/ex9-1-keshin/mirror-math.ts";
 import { projectToImage } from "../src/shared/fake-hands.ts";
 import { decideMaskSource, maskStats, skeletonPersonShape } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
-import { angleFromEyeDeg, blendDistance, correctionAt, detectionToWorld, hybridHead, matchRemotes, planRemote, pruneCorr, robustMeanV3 } from "../demos/ex9-1-keshin/keshin-hybrid.ts";
+import { angleFromEyeDeg, blendDistance, correctionAt, detectionToWorld, facingDiffDeg, hybridHead, matchRemotes, matchRemotesDiag, planRemote, pruneCorr, robustMeanV3 } from "../demos/ex9-1-keshin/keshin-hybrid.ts";
 import { poseFromCamPoints, fakeMirrorPoints } from "../demos/ex9-1-keshin/mirror-math.ts";
 import { worldToMarker } from "../demos/ex9-1-keshin/keshin-math.ts";
 import { MaskHzGovernor, PersonMask, createMaskUniforms, decideMaskHzLevel, maskHzLevels } from "../demos/ex9-1-keshin/keshin-occlusion.ts";
@@ -443,8 +443,10 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("段階 3・対応づけ: 2 人が同じ人を指しても 1 対 1（近い方だけ）", [...m2.values()].filter((v) => v.index === 1).length === 1);
   const m3 = matchRemotes(dets, [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: [0.7, 1.6, -2.9] }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
   check("段階 3・対応づけ: 申告が古い（方向が合わない）ときは前の結果の人と位置で（tracked）", m3.get("B")?.index === 1 && m3.get("B")?.reason === "tracked");
-  const m4 = matchRemotes([{ head: [0.2, 1.6, -2] }], [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
-  check("段階 3・対応づけ: 相手 1 人・検出 1 人なら、申告がずれていてもそのまま結ぶ（only-one）", m4.get("B")?.reason === "only-one");
+  // 体の向き: 検出はこちら（+Z）を向いている（鼻で前後も決まる）。申告の向きも同じ
+  const FW = { fwd: [0, 1], fwdFrontKnown: true };
+  const m4 = matchRemotes([{ head: [0.2, 1.6, -2], ...FW }], [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: null, declFwd: [0, 1] }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  check("段階 3・対応づけ: 相手 1 人・検出 1 人なら、体の向きが合えば申告がずれていてもそのまま結ぶ（only-one）", m4.get("B")?.reason === "only-one");
   const m5 = matchRemotes(dets, [{ id: "B", declared: [3, 1.6, 1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
   check("段階 3・対応づけ: 相手 1 人でも検出が 2 人で手掛かりが無ければ結ばない", !m5.has("B"));
   const m6 = matchRemotes(dets, [{ id: "B", declared: [0.85, 1.6, -3.1], fresh: false, last: null }], eye, { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
@@ -459,10 +461,110 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   const m9 = matchRemotes([{ head: dirAt(-20) }, { head: dirAt(10) }], [{ id: "P", declared: dirAt(5), fresh: true, last: dirAt(-20) }, { id: "Q", declared: dirAt(24), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 30, matchM: 0.5, onlyOneMaxDeg: 45 });
   check("段階 3・対応づけ: 前回の位置と申告の方向を 1 回の全探索で（P は前回の人 −20° に tracked、Q は申告の方向で 10° に。段ごとだと P が 10° を取って Q が結べない）", m9.get("P")?.index === 0 && m9.get("P")?.reason === "tracked" && m9.get("Q")?.index === 1 && m9.get("Q")?.reason === "declared-dir", JSON.stringify([...m9]));
   // 修正 5: 相手 1 人・検出 1 人でも、新しい申告と方向が大きく外れた人（プレイヤーでない人）には付けない
-  const m8 = matchRemotes([{ head: dirAt(70) }], [{ id: "B", declared: dirAt(0), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
-  const m8b = matchRemotes([{ head: dirAt(30) }], [{ id: "B", declared: dirAt(0), fresh: true, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
-  const m8c = matchRemotes([{ head: dirAt(70) }], [{ id: "B", declared: dirAt(0), fresh: false, last: null }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  const m8 = matchRemotes([{ head: dirAt(70), ...FW }], [{ id: "B", declared: dirAt(0), fresh: true, last: null, declFwd: [0, 1] }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  const m8b = matchRemotes([{ head: dirAt(30), ...FW }], [{ id: "B", declared: dirAt(0), fresh: true, last: null, declFwd: [0, 1] }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
+  const m8c = matchRemotes([{ head: dirAt(70), ...FW }], [{ id: "B", declared: dirAt(0), fresh: false, last: null, declFwd: [0, 1] }], [0, 1.6, 0], { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45 });
   check("段階 3・対応づけ（修正 5）: only-one は新しい申告と 45° 以内のときだけ（70° は結ばない・30° は結ぶ・申告が古ければ結ぶ）", !m8.has("B") && m8b.get("B")?.reason === "only-one" && m8c.get("B")?.reason === "only-one");
+  // ---- 実機の不具合（2026-09-28）: 化身を出していない人 1 人だけが映ると、申告が古いときは only-one でその人に付き、その差を補正として学んでいた ----
+  {
+    const E = [0, 1.6, 0];
+    const O = { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45, facingMaxDeg: 60, corrGateM: 1.5 };
+    const yawV = (deg) => [Math.sin(deg * DEG), Math.cos(deg * DEG)];
+    // 申告は古い（壁を見てから 30 秒）。申告の体の向きは 0°（+Z）。映った人は正面 2.5m
+    const R = (extra = {}) => ({ id: "B", declared: [2, 1.6, 1], fresh: false, last: null, declFwd: yawV(0), ...extra });
+    const det = (fwdDeg, frontKnown = true, head = [0, 1.6, -2.5]) => ({ head, fwd: yawV(fwdDeg), fwdFrontKnown: frontKnown });
+    const d90 = matchRemotesDiag([det(90)], [R()], E, O);
+    check("段階 3・体の向き: 向きが 90° 違う 1 人には only-one で結ばない（理由 facing・値 90°）", !d90.matches.has("B") && d90.info.get("B").reject === "facing" && near(d90.info.get("B").facingDeg[0], 90, 1e-6), JSON.stringify(d90.info.get("B")));
+    const d20 = matchRemotesDiag([det(20)], [R()], E, O);
+    check("段階 3・体の向き: 向きが合う人（20° = アンカーの誤差の範囲）には only-one で結ぶ", d20.matches.get("B")?.reason === "only-one" && d20.info.get("B").reject === null);
+    const d55 = matchRemotesDiag([det(55)], [R()], E, O);
+    const d65 = matchRemotesDiag([det(65)], [R()], E, O);
+    check("段階 3・体の向き: しきい値は ?facingMaxDeg=60（55° は結ぶ・65° は結ばない）", d55.matches.has("B") && !d65.matches.has("B"));
+    // 顔が隠れて前後が決まらない（背中から見た・ゴーグル）: 線の向きだけで比べる（180° 反対でも同じ線 = 0°、90° は 90°）
+    const back = matchRemotesDiag([det(180, false)], [R()], E, O);
+    const side = matchRemotesDiag([det(90, false)], [R()], E, O);
+    const backKnown = matchRemotesDiag([det(180, true)], [R()], E, O);
+    check("段階 3・体の向き: 前後が決まらない人は線の向きだけで比べる（180° 反対は結ぶ・90° は結ばない）。前後が決まる人の 180° 反対は結ばない", back.matches.get("B")?.reason === "only-one" && near(back.info.get("B").facingDeg[0], 0, 1e-6) && !side.matches.has("B") && !backKnown.matches.has("B"));
+    check("段階 3・体の向き: 向きの差の式（線の向きだけなら 0〜90）", near(facingDiffDeg([0, 1], [1, 0], false), 90, 1e-9) && near(facingDiffDeg([0, 1], [0, -1], false), 180, 1e-9) && near(facingDiffDeg([0, 1], [0, -1], true), 0, 1e-9) && near(facingDiffDeg([0, 1], yawV(135), true), 45, 1e-9));
+    const noFwd = matchRemotesDiag([det(0)], [R({ declFwd: null })], E, O);
+    check("段階 3・体の向き: 申告の向きが無い（自分のアンカーが無い）と比べられないので only-one で結ばない（理由 no-facing）", !noFwd.matches.has("B") && noFwd.info.get("B").reject === "no-facing");
+    // 初めての tracked（前回の結果では結んでいない = 見失っていた人の近く）にも関門を掛ける。続けて追いかけている tracked には掛けない
+    const trNew = matchRemotesDiag([det(90)], [R({ last: [0.1, 1.6, -2.5], continuing: false })], E, O);
+    const trCont = matchRemotesDiag([det(90)], [R({ last: [0.1, 1.6, -2.5], continuing: true })], E, O);
+    check("段階 3・体の向き: 初めての tracked は向きが 90° 違えば結ばない・続けて追いかけている tracked は結んだまま（振り向く途中で手放さない）", !trNew.matches.has("B") && trNew.info.get("B").reject === "facing" && trCont.matches.get("B")?.reason === "tracked");
+    // declared-dir にも掛ける
+    const dd = matchRemotesDiag([det(90, true, [0, 1.6, -2.5])], [R({ declared: [0.1, 1.6, -2.4], fresh: true })], E, { ...O, onlyOneMaxDeg: 45 });
+    check("段階 3・体の向き: 申告の方向が合っても（declared-dir）、向きが 90° 違えば結ばない", !dd.matches.has("B") && dd.info.get("B").reject === "facing");
+    // 補正の関門: 補正を学べている相手は、申告 + 補正から 1.5m を超えて離れた人に結ばない
+    const cgFar = matchRemotesDiag([det(0, true, [0, 1.6, -2.5])], [R({ corrPred: [2.2, 1.6, -2.5] })], E, O);
+    const cgNear = matchRemotesDiag([det(0, true, [0, 1.6, -2.5])], [R({ corrPred: [0.8, 1.6, -2.2] })], E, O);
+    check("段階 3・補正の関門: 申告 + 補正から 2.2m 離れた人には結ばない（理由 corr-gate）・0.85m なら結ぶ", !cgFar.matches.has("B") && cgFar.info.get("B").reject === "corr-gate" && near(cgFar.info.get("B").corrM[0], 2.2, 1e-9) && cgNear.matches.get("B")?.reason === "only-one", JSON.stringify(cgFar.info.get("B")));
+    // 2 人: 向きの合う方にだけ結ぶ（declared-dir の候補が両方にあっても）
+    const two = matchRemotesDiag([det(90, true, [-0.2, 1.6, -2.5]), det(10, true, [0.2, 1.6, -2.5])], [R({ declared: [0, 1.6, -2.5], fresh: true })], E, O);
+    check("段階 3・体の向き: 方向で両方が候補でも、向きの合う人に結ぶ", two.matches.get("B")?.index === 1 && two.matches.get("B")?.reason === "declared-dir", JSON.stringify([...two.matches]));
+    check("段階 3・判断に使った値: 検出ごとの向きの差と補正からの距離（無ければ null）", two.info.get("B").facingDeg.length === 2 && near(two.info.get("B").facingDeg[0], 90, 1e-6) && two.info.get("B").corrM.every((v) => v === null));
+  }
+  // ---- Codex の指摘（中）: 自分のアンカーが跳んだ直後に本人を見失うと、補正の関門が本人を断っていた（最大約 10 秒）----
+  {
+    const E = [0, 1.6, 0];
+    const O = { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45, facingMaxDeg: 60, corrGateM: 1.5 };
+    const yawV = (deg) => [Math.sin(deg * DEG), Math.cos(deg * DEG)];
+    const det = (fwdDeg, head) => ({ head, fwd: yawV(fwdDeg), fwdFrontKnown: true });
+    // 本人 B は自分のワールドの T に立つ（カメラで見た位置。アンカーに依らない）。申告 D（マーカー座標系）は 1m ずれていて、見えていた間にその差を補正として学んだ
+    const T = [0, 1.6, -2.5];
+    const qId = [0, 0, 0, 1];
+    const A0 = { pos: [0, 0, 0], quat: qId };
+    const D = [1, 1.6, -2.5];
+    const corr = [];
+    for (let t = 0; t < 3000; t += 100) {
+      const hm = worldToMarker(A0.pos, A0.quat, T);
+      corr.push({ t, c: [hm[0] - D[0], hm[1] - D[1], hm[2] - D[2]] });
+    }
+    // 見失った直後（3.1 秒）に自分のアンカーが 2.2m 跳ぶ（マーカーを見直した。Δ = 2.2m）
+    const A1 = { pos: [2.2, 0, 0], quat: qId };
+    const now = 4000;
+    const c = correctionAt(corr, now, 3, 10, 0.5, 2900);
+    const predOld = markerToWorld(A1.pos, A1.quat, [D[0] + c.raw[0], D[1] + c.raw[1], D[2] + c.raw[2]]);
+    const R = (extra = {}) => ({ id: "B", declared: markerToWorld(A1.pos, A1.quat, D), fresh: false, last: null, declFwd: yawV(0), corrPred: predOld, ...extra });
+    const d = Math.hypot(predOld[0] - T[0], predOld[1] - T[1], predOld[2] - T[2]);
+    // 修正前と同じ条件（前回の頭の位置が無い = 再捕捉が効かない）なら、学んだ補正の予測が 2.2m ずれて本人を corr-gate で断る
+    const before = matchRemotesDiag([det(0, T)], [R()], E, O);
+    check("段階 3・アンカーの跳び（再現）: 古い補正の予測は本人から 2.2m ずれ、関門だけなら本人を断る（corr-gate）", near(d, 2.2, 1e-9) && !before.matches.has("B") && before.info.get("B").reject === "corr-gate", `d=${d.toFixed(3)} ${JSON.stringify(before.info.get("B"))}`);
+    // b: 前回結んだ頭の位置（自分のワールド）から matchM 以内で向きも合う人なら、関門を掛けずに結ぶ（tracked）
+    const lastT = [T[0] + 0.1, T[1], T[2] + 0.05];
+    const re = matchRemotesDiag([det(10, T)], [R({ last: lastT, continuing: false })], E, O);
+    check("段階 3・アンカーの跳びの後に見失い、本人がまた映った: 前回の頭の位置から 0.5m 以内・向きが合えば補正の関門を掛けずにすぐ結ぶ（tracked）", re.matches.get("B")?.reason === "tracked" && re.info.get("B").reject === null, JSON.stringify([...re.matches]));
+    // 別の人は今までどおり断る: 同じ所でも向きが 90° 違う人（facing）・前回の位置から離れた所の人（corr-gate）
+    const other = matchRemotesDiag([det(90, T)], [R({ last: lastT, continuing: false })], E, O);
+    const farOther = matchRemotesDiag([det(0, [-1.2, 1.6, -2.5])], [R({ last: lastT, continuing: false })], E, O);
+    check("段階 3・アンカーの跳びの後: 前回の位置でも向きが 90° 違う人は結ばない（facing）・前回の位置から離れた人は補正の関門で結ばない（corr-gate）", !other.matches.has("B") && other.info.get("B").reject.split("+").includes("facing") && !farOther.matches.has("B") && farOther.info.get("B").reject === "corr-gate", JSON.stringify({ other: other.info.get("B").reject, far: farOther.info.get("B").reject }));
+    // a: 自分のアンカーが跳んだら補正の窓を捨てる（remote-keshins.ts の resetCorrections）→ 予測が無くなり、前回の位置が古くても（3 秒超）only-one で本人に結ぶ
+    const cleared = correctionAt([], now, 3, 10, 0.5, 2900);
+    const reset = matchRemotesDiag([det(0, T)], [R({ corrPred: cleared.n > 0 && cleared.k > 0 ? predOld : null })], E, O);
+    check("段階 3・アンカーの跳び: 補正の窓を捨てれば、前回の位置が無くても本人に結ぶ（only-one）", cleared.n === 0 && reset.matches.get("B")?.reason === "only-one", JSON.stringify([...reset.matches]));
+  }
+  // ---- Codex の指摘（中）: 自分のアンカーが無いうちは、相手 1 人・検出 1 人でも向きを比べられず化身が出なかった（no-facing）----
+  {
+    const E = [0, 1.6, 0];
+    const O = { matchDeg: 15, matchM: 0.5, onlyOneMaxDeg: 45, facingMaxDeg: 60, corrGateM: 1.5 };
+    const yawV = (deg) => [Math.sin(deg * DEG), Math.cos(deg * DEG)];
+    const det = (fwdDeg, head = [0, 1.6, -2.5]) => ({ head, fwd: yawV(fwdDeg), fwdFrontKnown: true });
+    // アンカーが無い: 申告を自分のワールドに直せない（declared / declFwd = null）
+    const noA = (extra = {}) => ({ id: "B", declared: null, fresh: false, last: null, declFwd: null, on: true, ...extra });
+    const u = matchRemotesDiag([det(90)], [noA()], E, { ...O, selfAnchor: false });
+    check("段階 3・アンカーなし: 化身を出している相手 1 人・検出 1 人なら、向きを確かめずに結ぶ（only-one-unchecked）", u.matches.get("B")?.reason === "only-one-unchecked" && u.info.get("B").reject === null, JSON.stringify([...u.matches]));
+    const u2 = matchRemotesDiag([det(0)], [noA(), noA({ id: "C", on: false })], E, { ...O, selfAnchor: false });
+    const u3 = matchRemotesDiag([det(0)], [noA(), noA({ id: "C" })], E, { ...O, selfAnchor: false });
+    const u4 = matchRemotesDiag([det(0), det(0, [1, 1.6, -2.5])], [noA()], E, { ...O, selfAnchor: false });
+    check("段階 3・アンカーなし: 化身を出している相手が 1 人なら（出していない相手がいても）結ぶ・2 人か検出が 2 人なら結ばない", u2.matches.get("B")?.reason === "only-one-unchecked" && !u2.matches.has("C") && u3.matches.size === 0 && u4.matches.size === 0, JSON.stringify({ u2: [...u2.matches], u3: [...u3.matches], u4: [...u4.matches] }));
+    // アンカーができた後は、今の向きの関門に戻る
+    const withA = (extra = {}) => ({ id: "B", declared: [2, 1.6, 1], fresh: false, last: null, declFwd: yawV(0), on: true, ...extra });
+    const a90 = matchRemotesDiag([det(90)], [withA()], E, { ...O, selfAnchor: true });
+    const a10 = matchRemotesDiag([det(10)], [withA()], E, { ...O, selfAnchor: true });
+    check("段階 3・アンカーあり: 向きが 90° 違えば結ばない（facing）・合えば only-one（今の関門）", !a90.matches.has("B") && a90.info.get("B").reject === "facing" && a10.matches.get("B")?.reason === "only-one", JSON.stringify({ a90: a90.info.get("B").reject, a10: [...a10.matches] }));
+    const aNoFwd = matchRemotesDiag([det(0)], [withA({ declFwd: null })], E, { ...O, selfAnchor: true });
+    check("段階 3・アンカーあり: 相手の向きが無ければ今までどおり結ばない（no-facing）", !aNoFwd.matches.has("B") && aNoFwd.info.get("B").reject === "no-facing");
+  }
   check("段階 3・対応づけ: 方向の角度（目から見て）", near(angleFromEyeDeg([0, 0, 0], [1, 0, 0], [0, 0, -1]), 90, 1e-9));
   // 距離の混ぜ方
   check("段階 3・距離: 申告が新しければ 申告 × 0.7 + カメラ × 0.3", near(blendDistance(3, 2, true, 0.7), 2.3));
@@ -713,15 +815,22 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
     check("Pose が動いている: 新しい結果に写っていれば seen（lastSeen = 最新の結果の時刻）", mirrorVisibility(20000, 20000, 20000, o).phase === "seen");
     check("Pose が動いている: 新しい結果に写っていなければ最後に見た時刻からの経過（0.3 秒で hold）", mirrorVisibility(20300, 20000, 20250, o).phase === "hold");
   }
-  // 人数が減ったとき（修正 2）: 1 人の人には化身を 1 体だけ。前の結果の人と位置で対応づけて入れ替わりにくく
+  // 人数が減ったとき（修正 2）: 1 人の人には化身を 1 体だけ。前の結果の人と画像の上の位置で対応づけて入れ替わりにくく
   {
-    const A = { head: [-0.6, 0.25, -2.8], depth: 2.8 };
-    const B = { head: [0.6, 0.25, -3.4], depth: 3.4 };
-    const r1 = assignMirrorTracked([A, B], [{ id: "p1", last: null }, { id: "p2", last: null }], 0.5);
-    check("割り当て（対応づけ）: 初めは近い順 × 参加順（p1 → A、p2 → B）", r1.assign.get("p1") === 0 && r1.assign.get("p2") === 1);
+    const imgOf = (h) => {
+      const q = projectToImage({ x: h[0], y: h[1], z: h[2] }, m);
+      return [q.x, q.y];
+    };
+    const P = (head) => ({ head, depth: -head[2], img: imgOf(head) });
+    const L = (p) => ({ img: p.img, head: p.head });
+    const ao = { matchImg: 0.15, holdMs: 500 };
+    const A = P([-0.6, 0.25, -2.8]);
+    const B = P([0.6, 0.25, -3.4]);
+    const r1 = assignMirrorTracked([A, B], [{ id: "p1", last: null, sinceSeenMs: Infinity }, { id: "p2", last: null, sinceSeenMs: Infinity }], ao);
+    check("割り当て（対応づけ）: 初めは近い順 × 参加順（p1 → A、p2 → B・new）", r1.assign.get("p1") === 0 && r1.assign.get("p2") === 1 && r1.info.get("p1").reason === "new");
     // A が画面から消えた: B は p2 のまま（p1 に付け替えない）
-    const r2 = assignMirrorTracked([B], [{ id: "p1", last: A.head }, { id: "p2", last: B.head }], 0.5);
-    check("割り当て（対応づけ）: 2 人 → 1 人（A が消えた）で B は p2 のまま・p1 はどの人にも付かない", r2.assign.get("p2") === 0 && !r2.assign.has("p1") && r2.displaced.size === 0);
+    const r2 = assignMirrorTracked([B], [{ id: "p1", last: L(A), sinceSeenMs: 100 }, { id: "p2", last: L(B), sinceSeenMs: 100 }], ao);
+    check("割り当て（対応づけ）: 2 人 → 1 人（A が消えた）で B は p2 のまま（tracked）・p1 はどの人にも付かない（hold）", r2.assign.get("p2") === 0 && !r2.assign.has("p1") && r2.displaced.size === 0 && r2.info.get("p2").reason === "tracked" && r2.info.get("p1").reason === "hold");
     // 描かれる化身の数を数える（p1 は A の位置で保持 → フェード、p2 は B）。B の所（0.5m 以内）に描かれる化身は常に 1 体、1 秒後には全体で 1 体
     const o = { holdMs: 500, fadeMs: 500, staleResultMs: 1000 };
     const drawnAt = (t) => {
@@ -734,12 +843,146 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
     // 対応づけ無しの旧方式（近い順 × 参加順）だと、p1 が B に付け替わる（= B に 2 体重なっていた原因）
     check("（旧方式の確認）対応づけ無しだと 2 人 → 1 人で p1 が B に付け替わる", assignMirror([B.depth], ["p1", "p2"]).get("p1") === 0);
     // 2 人が近くにいて、前の人を取られた化身: 保持せずにすぐフェード（displaced）
-    const r3 = assignMirrorTracked([{ head: [0.1, 0.25, -3], depth: 3 }], [{ id: "p1", last: [0.35, 0.25, -3] }, { id: "p2", last: [0.05, 0.25, -3] }], 0.5);
+    const C = P([0.1, 0.25, -3]);
+    const r3 = assignMirrorTracked([C], [{ id: "p1", last: L(P([0.35, 0.25, -3])), sinceSeenMs: 300 }, { id: "p2", last: L(P([0.05, 0.25, -3])), sinceSeenMs: 300 }], ao);
     check("割り当て（対応づけ）: 1 人を 2 体が指していたら近い方だけ付け、もう一方は displaced（すぐフェード）", r3.assign.get("p2") === 0 && !r3.assign.has("p1") && r3.displaced.has("p1"));
-    const r4 = assignMirrorTracked([{ head: [1.8, 0.25, -3], depth: 3 }], [{ id: "p1", last: [-0.5, 0.25, -3] }], 0.5);
-    check("割り当て（対応づけ）: 1 体・1 人で、人が遠くへ移った（見失い中に別の人）なら付け替える", r4.assign.get("p1") === 0);
-    const r5 = assignMirrorTracked([{ head: [0, 0.25, -3.1], depth: 3.1 }, { head: [0.1, 0.25, -2.2], depth: 2.2 }], [{ id: "p1", last: [0.05, 0.25, -3.05] }], 0.5);
-    check("割り当て（対応づけ）: 前の人がいれば、より近い（手前の）人が現れても付け替えない", r5.assign.get("p1") === 0);
+    const far = P([1.8, 0.25, -3]);
+    const r4 = assignMirrorTracked([far], [{ id: "p1", last: L(P([-0.5, 0.25, -3])), sinceSeenMs: 600 }], ao);
+    check("割り当て（対応づけ）: 1 体・1 人で、前の人を見失って保持（0.5 秒）を過ぎ、遠くに別の人がいれば付け替える（new）", r4.assign.get("p1") === 0 && r4.info.get("p1").reason === "new");
+    const r4b = assignMirrorTracked([far], [{ id: "p1", last: L(P([-0.5, 0.25, -3])), sinceSeenMs: 400 }], ao);
+    check("割り当て（対応づけ）: 保持の時間（0.5 秒）の間は、別の人がいても付け替えない（hold）", !r4b.assign.has("p1") && r4b.info.get("p1").reason === "hold");
+    const r5 = assignMirrorTracked([P([0, 0.25, -3.1]), P([0.1, 0.25, -2.2])], [{ id: "p1", last: L(P([0.05, 0.25, -3.05])), sinceSeenMs: 60 }], ao);
+    check("割り当て（対応づけ）: 前の人がいれば、より近い（手前の）人が現れても付け替えない", r5.assign.get("p1") === 0 && r5.info.get("p1").reason === "tracked");
+  }
+  // Pose が付けた人を 1 回だけ取りこぼした（隣に並んだ人は画像の上で 0.12 離れている）: 隣の人へ移らず、戻ったら同じ人
+  {
+    const imgOf = (h) => {
+      const q = projectToImage({ x: h[0], y: h[1], z: h[2] }, m);
+      return [q.x, q.y];
+    };
+    const P = (head) => ({ head, depth: -head[2], img: imgOf(head) });
+    const ao = { matchImg: 0.15, holdMs: 500 };
+    const A = P([-0.24, 0.25, -3.0]);
+    const B = P([0.24, 0.25, -3.0]);
+    const sep = Math.hypot(A.img[0] - B.img[0], A.img[1] - B.img[1]);
+    const lastA = { img: A.img, head: A.head };
+    const drop1 = assignMirrorTracked([B], [{ id: "p1", last: lastA, sinceSeenMs: 67 }], ao);
+    const drop2 = assignMirrorTracked([B], [{ id: "p1", last: lastA, sinceSeenMs: 200 }], ao);
+    const back = assignMirrorTracked([B, A], [{ id: "p1", last: lastA, sinceSeenMs: 267 }], ao);
+    check(
+      "鏡: 付けた人を Pose が 1〜2 回取りこぼしても、隣の人（画像の上で 0.12）へ移らない（しきい値は最後に見えてからの時間で広がる: 67ms で 0.05・200ms で 0.1）。戻れば同じ人",
+      near(sep, 0.119, 0.01) && !drop1.assign.has("p1") && drop1.info.get("p1").reason === "hold" && !drop2.assign.has("p1") && back.assign.get("p1") === 1 && back.info.get("p1").reason === "tracked",
+      `sep=${sep.toFixed(3)} gate67=${mirrorImgGate(0.15, 67)} gate200=${mirrorImgGate(0.15, 200)}`,
+    );
+    check("鏡: しきい値は 0.05 から時間で広がり、0.3 秒で ?mirrorMatchImg=0.15 に届く（見失ったままならそれ以上は広げない）", near(mirrorImgGate(0.15, 0), 0.05) && near(mirrorImgGate(0.15, 300), 0.15) && near(mirrorImgGate(0.15, 60000), 0.15) && near(mirrorImgGate(0.15, Infinity), 0.15));
+    // Codex の指摘（高）: 元の人 A が消えて、画像の上で 0.12 離れた隣の人 B だけが残る。修正前は 300ms で範囲が 0.15 に広がり、保持（500ms）を待たずに B を tracked にしていた
+    const [An, Bn] = withNearImg([A, B]);
+    const lastAn = { img: An.img, head: An.head, nearImg: An.nearImg };
+    const onlyB = withNearImg([B]);
+    const at = (ms) => assignMirrorTracked(onlyB, [{ id: "p1", last: lastAn, sinceSeenMs: ms }], ao);
+    const holds = [100, 300, 450].map((ms) => at(ms));
+    const after = at(550);
+    check(
+      "鏡（Codex の指摘）: 元の人が消えて 0.12 離れた隣の人だけが残っても、保持の間（100 / 300 / 450ms）は付け替えない（hold）・保持を過ぎたら付け替わる",
+      near(An.nearImg, sep, 1e-12) && holds.every((r) => !r.assign.has("p1") && r.info.get("p1").reason === "hold" && r.displaced.size === 0) && after.assign.get("p1") === 0,
+      JSON.stringify({ holds: holds.map((r) => `${r.info.get("p1").reason}/gate=${r.info.get("p1").gate?.toFixed(3)}`), after: after.info.get("p1").reason }),
+    );
+    check("鏡（Codex の指摘・修正前の再現）: 前回の隣の人までの距離を渡さないと、300ms で隣の人を tracked にする", assignMirrorTracked(onlyB, [{ id: "p1", last: { img: A.img, head: A.head }, sinceSeenMs: 300 }], ao).info.get("p1").reason === "tracked");
+    // 保持の間でも、本人が戻れば（隣の人がいても・いなくても）捕まえ直す。隣の人がいなかった人は、今までどおり広げた範囲で追いかける
+    const backA = assignMirrorTracked(withNearImg([B, A]), [{ id: "p1", last: lastAn, sinceSeenMs: 300 }], ao);
+    const moved = P([0.12, 0.25, -3.0]);
+    const alone = withNearImg([A])[0];
+    const movedAlone = assignMirrorTracked(withNearImg([moved]), [{ id: "p1", last: { img: alone.img, head: alone.head, nearImg: alone.nearImg }, sinceSeenMs: 300 }], ao);
+    const dMove = Math.hypot(moved.img[0] - A.img[0], moved.img[1] - A.img[1]);
+    check("鏡: 保持の間に本人が戻れば捕まえ直す（tracked）・隣の人がいなかった人は保持の間も広げた範囲で追いかける", backA.assign.get("p1") === 1 && backA.info.get("p1").reason === "tracked" && movedAlone.info.get("p1").reason === "tracked" && dMove > 0.06, `dMove=${dMove.toFixed(3)}`);
+  }
+  // 実機の不具合（2026-09-28。assign p28→1 / p28→0 が 0.1 秒おきに交互）: 2 人が同じくらいの距離に並び、Pose の距離の推定が ±0.3m ぶれる。
+  // 本物の経路（合成の骨格 → mirrorPersonFromPose）で、体の大きさの仮定（bodyScale）を毎回 0.9〜1.1 でぶらし（3m で ±0.3m）、結果の中の人の順番も毎回入れ替える
+  {
+    const ao = { matchImg: 0.15, holdMs: 500 };
+    const HOLD = 500;
+    const FADE = 500;
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const detect = (people) => {
+      const out = [];
+      for (const pp of people) {
+        const r = fakeMirrorPose([pp], m);
+        // 画像の上の点も揺らす（人全体で ±0.01・点ごとに ±0.003。体の揺れと推定のぶれ）
+        const ox = (rnd() - 0.5) * 0.02;
+        const oy = (rnd() - 0.5) * 0.02;
+        const lm = r.landmarks[0].map((l) => ({ ...l, x: l.x + ox + (rnd() - 0.5) * 0.006, y: l.y + oy + (rnd() - 0.5) * 0.006 }));
+        const q = mirrorPersonFromPose(lm, r.worldLandmarks[0], m, { ...opts, bodyScale: 0.9 + rnd() * 0.2 });
+        if (q) out.push(q);
+      }
+      if (out.length === 2 && rnd() < 0.5) out.reverse();
+      return out;
+    };
+    const X = person([-0.35, 0.25, -3.0], 0);
+    const Y = person([0.35, 0.25, -3.0], 0);
+    /** mirror.ts の assignNow と同じ使い方（状態は化身の「前回の人」と「最後に見えた時刻」だけ）で、10Hz の結果を流す */
+    const run = (steps, peopleAt) => {
+      const st = { target: null, lastSeen: -Infinity };
+      const log = [];
+      let depthMin = Infinity;
+      let depthMax = -Infinity;
+      for (let k = 0; k < steps; k++) {
+        const now = k * 100;
+        const ps = withNearImg(detect(peopleAt(now)));
+        for (const q of ps) {
+          depthMin = Math.min(depthMin, q.depth);
+          depthMax = Math.max(depthMax, q.depth);
+        }
+        const alive = st.target && now - st.lastSeen <= HOLD + FADE;
+        const res = assignMirrorTracked(ps, [{ id: "p28", last: alive ? { img: st.target.img, head: st.target.head, nearImg: st.target.nearImg } : null, sinceSeenMs: now - st.lastSeen }], ao);
+        const idx = res.assign.get("p28");
+        if (idx !== undefined) {
+          st.target = ps[idx];
+          st.lastSeen = now;
+        }
+        // 付いている人（画像の x で左 = X、右 = Y を見分ける。鏡の反転前）
+        log.push({ now, who: idx === undefined ? "-" : ps[idx].img[0] < 0.5 ? "X" : "Y", reason: res.info.get("p28").reason, dImg: res.info.get("p28").dImg, dImg2: res.info.get("p28").dImg2 });
+      }
+      return { log, depthMin, depthMax };
+    };
+    const r = run(600, () => [X, Y]);
+    const first = r.log[0].who;
+    const switches = r.log.filter((x, i) => i > 0 && x.who !== r.log[i - 1].who).length;
+    check(
+      "鏡（実機の不具合）: 2 人が同じ距離（3m）で推定距離が ±0.3m ぶれ、画像の上の点も揺れ、結果の順番も入れ替わっても、60 秒間（600 回）付け替わらない",
+      first !== "-" && switches === 0 && r.log.every((x) => x.who === first) && r.depthMax - r.depthMin > 0.45,
+      `付け替え=${switches} 推定距離=${r.depthMin.toFixed(2)}〜${r.depthMax.toFixed(2)}m dImg最大=${Math.max(...r.log.slice(1).map((x) => x.dImg ?? 0)).toFixed(3)} dImg2最小=${Math.min(...r.log.slice(1).map((x) => x.dImg2 ?? 9)).toFixed(3)}`,
+    );
+    // 旧方式（近い順 × 参加順）は、推定距離のぶれで近い人が入れ替わるたびに付け替わる（実機の 228 回の原因の再現）
+    {
+      seed = 12345;
+      let prev = null;
+      let oldSwitches = 0;
+      for (let k = 0; k < 600; k++) {
+        const ps = detect([X, Y]);
+        const i = assignMirror(ps.map((q) => q.depth), ["p28"]).get("p28");
+        const who = ps[i].img[0] < 0.5 ? "X" : "Y";
+        if (prev && who !== prev) oldSwitches++;
+        prev = who;
+      }
+      check("（旧方式の確認）近い順 × 参加順だけだと、同じ条件で何度も付け替わる", oldSwitches > 50, `付け替え=${oldSwitches}`);
+    }
+    // 付けた人が画面から出る: 最初の 1 秒は X だけ（X に付く）→ Y も入る → 3 秒目に X が出ていく。保持（0.5 秒）の間は付け替えず、その後に残った Y へ移る
+    const leaverName = "X";
+    const stayerName = "Y";
+    seed = 999;
+    const r2 = run(60, (now) => (now < 1000 ? [X] : now < 3000 ? [X, Y] : [Y]));
+    const who = (t) => r2.log.find((x) => x.now === t);
+    const before = r2.log.filter((x) => x.now < 3000);
+    // X を最後に見たのは 2.9 秒の結果（3 秒の結果から X がいない）。保持はそこから数える
+    const lastX = 2900;
+    const during = r2.log.filter((x) => x.now >= 3000 && x.now <= lastX + HOLD);
+    const moved = r2.log.find((x) => x.now > lastX + HOLD && x.who !== "-");
+    check(
+      "鏡: 付けた人が画面から出たら、保持（0.5 秒）の間は残った人へ付け替えず（hold）、保持を過ぎたら残った人へ移る（new → 以後 tracked）",
+      before.every((x) => x.who === leaverName) && during.every((x) => x.who === "-" && x.reason === "hold") && moved && moved.who === stayerName && moved.now <= lastX + HOLD + 100 && moved.reason === "new" && during.length >= 4 && who(5900).who === stayerName && who(5900).reason === "tracked",
+      JSON.stringify({ during: during.map((x) => `${x.now}:${x.who}/${x.reason}`), moved: moved && `${moved.now}:${moved.who}/${moved.reason}` }),
+    );
   }
   // 反転: 背景と 3D をまとめて左右反転しても、化身は人の背後・同じ向きに見える
   {
