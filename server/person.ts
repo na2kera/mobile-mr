@@ -1,8 +1,7 @@
 // Phase 9 (09-person-id) 用の Room サーバー。接続の共通部分は server/room-server.ts。
 // 役割は「Player 一覧（id・名前・色）を持つ」「pose（頭の姿勢 + 誰をどこで見たか）を中継する」だけで、
 // 人物との対応づけは各端末が行う（src/shared/person-match.ts）
-import type { RawData } from "ws";
-import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
+import { isVec, parseName, roomServerPlugin, type RoomContext, type WireData, wireText } from "./room-server.ts";
 import {
   MAX_PLAYERS,
   NAME_MAX_LENGTH,
@@ -29,10 +28,10 @@ const PLAYER_ID_PATTERN = /^p\d{1,9}$/;
 type State = { players: Map<string, PlayerInfo>; poseRate: RateLimiter };
 type Ctx = RoomContext<PersonRoomConfig, State>;
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }

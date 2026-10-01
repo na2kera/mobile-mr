@@ -1,0 +1,25 @@
+// ex9-1-keshin（化身）を Cloudflare Workers + Durable Objects で配る設定。
+// 静的ファイルは dist-keshin/（vite.keshin.config.ts のビルド出力）を Workers Static Assets で、
+// Room サーバー（/api/keshin の WebSocket）は Durable Object KeshinRoom（Room 1 つ = DO 1 つ）で動かす。
+// パスはこのファイルからの相対。ローカル: npx wrangler dev --config deploy/cloudflare/wrangler.jsonc
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mobile-mr-keshin",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../../dist-keshin",
+    "binding": "ASSETS",
+    // 無いファイルは最寄りの 404.html（無ければ空の 404）。SPA ではないので index.html に落とさない
+    "not_found_handling": "404-page",
+    // "/" のリダイレクトと /api/*（WebSocket・実機ログ）は静的ファイルより先に Worker で受ける
+    "run_worker_first": ["/", "/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "KESHIN_ROOM", "class_name": "KeshinRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KeshinRoom"] }],
+  "observability": {
+    "enabled": true
+  }
+}

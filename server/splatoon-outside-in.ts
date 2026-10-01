@@ -12,8 +12,7 @@
 //     拒否され、所有者が切断したら引き継ぐ。Codex レビューの指摘: 複数トラッカーが locked と位置を競合する）
 //   - 08-8（Pose カメラ）も同じサーバーを別パスで使う（splatoonOutsideInServer のオプション path / checkTrackIdCollision / dropMissing。
 //     オプションを付けなければ 08-3 の挙動のまま）
-import type { RawData } from "ws";
-import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
+import { isVec, parseName, roomServerPlugin, type RoomContext, type WireData, wireText } from "./room-server.ts";
 import {
   HAND_FLAT_LENGTH,
   MAX_POSE_MARKER_IDS,
@@ -123,10 +122,10 @@ function lastTracked(room: Ctx, id: string): Tracked | null {
   return room.state.tracked.get(id) ?? null;
 }
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }

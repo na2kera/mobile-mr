@@ -2,8 +2,7 @@
 // 姿勢（pose）は中継する。接続の受け付け等の共通部分は server/room-server.ts（今回抽出）で、
 // ここは「Room 設定」「メッセージ」「状態（PaintBoard）」の 3 点だけ
 import process from "node:process";
-import type { RawData } from "ws";
-import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
+import { isVec, parseName, roomServerPlugin, type RoomContext, type WireData, wireText } from "./room-server.ts";
 import {
   NAME_MAX_LENGTH,
   PLAYER_COLOR_COUNT,
@@ -49,10 +48,10 @@ type State = {
 };
 type Ctx = RoomContext<SurfaceRoomConfig, State>;
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }

@@ -3,8 +3,7 @@
 // 役割: プレイヤー（スマホ）と俯瞰画面（PC。?role=overview。Joy-Con のハブでもある）。俯瞰画面はプレイヤーではないが、
 // 誰かの代わりに address / stroke を送れる唯一の端末（Joy-Con を割り当てたプレイヤーの 1 打）。
 // スマホは自分の分だけ送れる（Joy-Con が無いときの保険: 画面長押しで溜めて離す）
-import type { RawData } from "ws";
-import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
+import { isVec, parseName, roomServerPlugin, type RoomContext, type WireData, wireText } from "./room-server.ts";
 import {
   GOLF_PATH,
   GOLF_PROTOCOL_VERSION,
@@ -50,10 +49,10 @@ function playerIds(room: Ctx, excludeId: string): string[] {
 const isPlayerId = (v: unknown): v is string => typeof v === "string" && /^p\d{1,9}$/.test(v);
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }

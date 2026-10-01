@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-keshin
 dist-ssr
 *.local
 
@@ -36,3 +37,6 @@ public/vendor/alva/
 
 # ex9-1-keshin の化身モデル（npm run fetch:keshin で手元の Blender 作業フォルダからコピー。公開リポジトリに入れない）
 local-assets/
+
+# wrangler dev のローカル状態（deploy/cloudflare/.wrangler/。Durable Object のローカル SQLite など）
+.wrangler/

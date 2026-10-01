@@ -38,7 +38,7 @@ function roomListenerLimit(): Plugin {
   };
 }
 
-function jsAruco2Esm(): Plugin {
+export function jsAruco2Esm(): Plugin {
   const patches: Record<string, [RegExp, string][]> = {
     "cv.js": [[/^this\.CV = CV;$/m, "export { CV };"]],
     "svd.js": [[/^this\.SVD = SVD;$/m, "export { SVD };"]],

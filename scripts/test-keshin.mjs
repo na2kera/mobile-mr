@@ -7,9 +7,12 @@
 //   6. server/keshin.ts — メッセージの検証（NaN・巨大値・退化クォータニオン・不正な向き）
 //   7. server/keshin.ts — サーバーの流れ（Vite dev サーバーを起動して WebSocket で: 入室 → 割り当て → keshin on → 全員に配られる →
 //      途中入室者のスナップショット → 途中反転 → 退室 → 番号の再利用、役割ごとの上限）
+//      KESHIN_TEST_SERVER=worker（`npm run test:keshin:worker`）のときは Vite の代わりに
+//      `wrangler dev`（deploy/cloudflare/ の Worker + Durable Object）を起動して同じ検査を回す
 // テストフレームワークは使わない（04〜09 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import WebSocket from "ws";
 import {
   BACK_CLEARANCE_M,
@@ -1113,15 +1116,58 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
 }
 
 // ================= 7. サーバーの流れ =================
-const PORT = 5221;
-const server = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
+// 既定は Vite の dev サーバー（Node の ws。HTTPS）。KESHIN_TEST_SERVER=worker なら wrangler dev（Worker + Durable Object。HTTP）
+const WORKER = process.env.KESHIN_TEST_SERVER === "worker";
+/** 空いているポート（wrangler dev 用。Vite は従来どおり 5221 固定） */
+async function freePort() {
+  return await new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+const PORT = WORKER ? await freePort() : 5221;
+const HTTP = WORKER ? "http" : "https";
+const WS = WORKER ? "ws" : "wss";
+// wrangler は assets のディレクトリ（dist-keshin/）が無いと起動できないので、無ければ空で作り、終わったら消す
+// （WebSocket と実機ログの検査には静的ファイルは要らない）
+const ASSETS_DIR = new URL("../dist-keshin/", import.meta.url);
+const createdAssetsDir = WORKER && !existsSync(ASSETS_DIR);
+if (createdAssetsDir) {
+  mkdirSync(ASSETS_DIR, { recursive: true });
+  console.log("  (dist-keshin/ が無いので、wrangler dev のために空のディレクトリを作った。終了時に消す)");
+}
+if (WORKER) {
+  console.log(`  (worker モード: wrangler dev を 127.0.0.1:${PORT} で起動する。初回は workerd の取得で時間がかかる)`);
+  // 7 章に Node 固有の検査（maxRooms・heartbeat・送信キューの監視）は無いので、スキップする検査は無い。
+  // それらは DO 版では意図的に持たない（deploy/cloudflare/keshin-room.ts の冒頭を参照）
+  console.log("  (worker モード: 7 章に Node 固有の検査（maxRooms・heartbeat）は無いのでスキップなし。DO 版はそれらを持たない)");
+}
+const server = WORKER
+  ? spawn("npx", ["wrangler", "dev", "--config", "deploy/cloudflare/wrangler.jsonc", "--port", String(PORT), "--ip", "127.0.0.1"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      // npx → wrangler → workerd の子孫ごと止めるため、プロセスグループを分ける
+      detached: true,
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+    })
+  : spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], { stdio: ["ignore", "pipe", "pipe"] });
 let portInUse = false;
+/** サーバーの標準出力の行（worker モードの実機ログの検査で使う） */
+const serverLines = [];
 server.stderr.on("data", (d) => {
   process.stderr.write(d);
-  if (/already in use/.test(d.toString())) portInUse = true;
+  if (/already in use/i.test(d.toString())) portInUse = true;
 });
 server.stdout.on("data", (d) => {
-  for (const line of d.toString().split("\n")) if (line.startsWith("[keshin]")) console.log(`  server: ${line}`);
+  for (const line of d.toString().split("\n")) {
+    serverLines.push(line);
+    // wrangler は console.warn に色と接頭辞を付けるので、行の途中の [keshin] も拾う
+    const i = line.indexOf("[keshin]");
+    if (i === 0 || (WORKER && i > 0)) console.log(`  server: ${line.slice(i)}`);
+  }
 });
 let serverExited = false;
 server.on("exit", () => {
@@ -1129,12 +1175,26 @@ server.on("exit", () => {
 });
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
-async function waitForServer(timeoutMs = 20000) {
+function stopServer() {
+  if (WORKER) {
+    try {
+      process.kill(-server.pid, "SIGTERM");
+    } catch {
+      server.kill();
+    }
+    if (createdAssetsDir) rmSync(ASSETS_DIR, { recursive: true, force: true });
+  } else {
+    server.kill();
+  }
+}
+
+async function waitForServer(timeoutMs = WORKER ? 180000 : 20000) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     if (serverExited || portInUse) return false;
-    const res = await fetch(`https://localhost:${PORT}/`).catch(() => null);
-    if (res?.ok) return true;
+    // worker モードの "/" は化身のページへの 302（dist-keshin が空でも返る）
+    const res = await fetch(`${HTTP}://localhost:${PORT}/`, { redirect: "manual" }).catch(() => null);
+    if (res && (res.ok || (WORKER && res.status === 302))) return true;
     await sleep(300);
   }
   return false;
@@ -1144,9 +1204,9 @@ const clients = [];
 function connect(query, name = "") {
   const q = new URLSearchParams({ v: String(KESHIN_PROTOCOL_VERSION), ...query });
   if (name) q.set("name", name);
-  const ws = new WebSocket(`wss://localhost:${PORT}${KESHIN_PATH}?${q}`, {
+  const ws = new WebSocket(`${WS}://localhost:${PORT}${KESHIN_PATH}?${q}`, {
     rejectUnauthorized: false,
-    headers: { origin: `https://localhost:${PORT}` },
+    headers: { origin: `${HTTP}://localhost:${PORT}` },
   });
   const client = { ws, msgs: [] };
   ws.on("message", (d) => client.msgs.push(JSON.parse(d.toString())));
@@ -1168,7 +1228,40 @@ function connect(query, name = "") {
 
 let exitCode = 1;
 try {
-  if (!(await waitForServer())) throw new Error(`dev サーバーが起動しなかった（ポート ${PORT} が使用中でないか確認）`);
+  if (!(await waitForServer())) throw new Error(`${WORKER ? "wrangler dev" : "dev サーバー"}が起動しなかった（ポート ${PORT} が使用中でないか確認）`);
+  if (WORKER) {
+    // Worker の振り分け: "/" はページへ、実機ログは console.log へ（wrangler tail で読む）、room 名と Origin の検査
+    const root = await fetch(`${HTTP}://localhost:${PORT}/`, { redirect: "manual" });
+    check("worker: GET / は化身のページへ 302", root.status === 302 && new URL(root.headers.get("location"), `${HTTP}://localhost:${PORT}`).pathname === "/demos/ex9-1-keshin/", `${root.status} ${root.headers.get("location")}`);
+    const marker = `keshin-worker-log-${Date.now()}`;
+    const logRes = await fetch(`${HTTP}://localhost:${PORT}/api/client-log`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([{ t: new Date().toISOString(), tag: "test", level: "log", msg: `${marker}\n2 行目` }]),
+    });
+    let logged = false;
+    for (let i = 0; i < 50 && !logged; i++) {
+      logged = serverLines.some((l) => l.includes(marker) && l.includes("[client-log]") && l.includes("⏎"));
+      if (!logged) await sleep(100);
+    }
+    check("worker: 実機ログの POST は 204 で、1 行に潰して console.log に出る", logRes.status === 204 && logged, `status=${logRes.status} logged=${logged}`);
+    const upgrade = (query, origin) =>
+      new Promise((resolve) => {
+        const ws = new WebSocket(`${WS}://localhost:${PORT}${KESHIN_PATH}?${new URLSearchParams(query)}`, origin ? { headers: { origin } } : {});
+        ws.on("unexpected-response", (_req, res) => {
+          resolve(res.statusCode);
+          ws.terminate();
+        });
+        ws.on("open", () => {
+          resolve(101);
+          ws.close();
+        });
+        ws.on("error", () => resolve(-1));
+      });
+    const v = String(KESHIN_PROTOCOL_VERSION);
+    check("worker: 不正な room 名は 400", (await upgrade({ v, room: "bad room!", markerId: "0", markerMm: "150" })) === 400);
+    check("worker: ページと違う Origin は 403", (await upgrade({ v, room: "ktestorigin", markerId: "0", markerMm: "150" }, "https://evil.example")) === 403);
+  }
   const cfg = { room: "ktest", markerId: "0", markerMm: "150" };
   const a = connect(cfg, "Alice");
   const wa = await a.waitFor((m) => m.type === "welcome");
@@ -1446,6 +1539,6 @@ try {
 } catch (e) {
   console.error("テストの実行エラー:", e.message ?? e);
 } finally {
-  server.kill();
+  stopServer();
 }
 process.exit(exitCode);

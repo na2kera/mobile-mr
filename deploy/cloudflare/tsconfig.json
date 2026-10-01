@@ -1,0 +1,21 @@
+{
+  // Worker（deploy/cloudflare/）の型チェック用。DOM ではなく Workers の型（@cloudflare/workers-types）で見る。
+  // ルートの tsconfig.json からは exclude している。実行: npx tsc --noEmit -p deploy/cloudflare
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["."]
+}

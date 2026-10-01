@@ -6,8 +6,7 @@
 // 「field（フィールドの寸法の変更）」を送れる（issue #19 / #21 / #32 / #47 / #45）。
 // フィールドの寸法（幅・高さ・奥行き・マーカーの高さ）は URL クエリではなく room の状態（game.config）で、welcome / field で全員に配る。
 // 追加マーカーの配置（issue #30）も同じく room の状態（game.config.markers）で、俯瞰画面の markers で変えて welcome / markers で配る
-import type { RawData } from "ws";
-import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
+import { isVec, parseName, roomServerPlugin, type RoomContext, type WireData, wireText } from "./room-server.ts";
 import {
   HAND_FLAT_LENGTH,
   MAX_POSE_MARKER_IDS,
@@ -50,10 +49,10 @@ function playerIds(room: Ctx, excludeId: string): string[] {
   return [...room.members.keys()].filter((k) => k !== excludeId && !room.state.overviews.has(k));
 }
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }
