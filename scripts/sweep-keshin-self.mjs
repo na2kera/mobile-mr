@@ -1,6 +1,6 @@
 // ex9-1-keshin: 主観（見上げたときの自分の化身）の見え方を、パラメータを振って 1 枚のコンタクトシートにする。
 // `node scripts/sweep-keshin-self.mjs` で実行する（ヘッドレス Chrome。モデルは local-assets/keshin/ にあれば実モデル）。
-// 3 体 × 見上げ角 45° / 60° / 75° × 設定（下の SETTINGS）を、スマホのページ（フェイクカメラ）の左目で撮って並べ、
+// 4 体 × 見上げ角 45° / 60° / 75° × 設定（下の SETTINGS）を、スマホのページ（フェイクカメラ）の左目で撮って並べ、
 // 各コマに設定値と数値（化身の画素・目の近くを消した割合・視界の中心 50% を覆う割合）を入れる。
 // 出力: logs/keshin-check/self-sweep.png と self-sweep.json
 // 数値の意味:
@@ -29,11 +29,11 @@ const SETTINGS = process.env.SWEEP_SETTINGS ? JSON.parse(process.env.SWEEP_SETTI
   { key: "S1", label: "lean 35 / face +0.25（旧既定）", lean: 35, face: 0.25, back: null },
   { key: "S2", label: "lean 15 / face 0（頭をもっと後ろ・上）", lean: 15, face: 0, back: null },
   { key: "S3", label: "lean 0 / back 0.6（直立・後ろへ）", lean: 0, face: 0, back: 0.6 },
-  { key: "S4", label: "lean 35 / face +0.7（前へ出す。ペガサス・ランスロットの既定）", lean: 35, face: 0.7, back: null },
+  { key: "S4", label: "lean 35 / face +0.7（前へ出す。ペガサス・ランスロット・マエストロの既定）", lean: 35, face: 0.7, back: null },
   { key: "S5", label: "lean 50 / face +1.0（前へ大きく出して倒す。魔神の既定）", lean: 50, face: 1.0, back: null },
   { key: "S6", label: "lean 20 / face +1.0（前に立つ・背中を見る）", lean: 20, face: 1.0, back: null },
 ];
-const NAMES = ["魔神", "ペガサス", "ランスロット"];
+const NAMES = ["魔神", "ペガサス", "ランスロット", "マエストロ"];
 const TILE_W = 256;
 /** 片目（640×577 前後）を縮めたときの高さ（コマの枠。実際の画像は縦横比を保って上に置く） */
 const TILE_H = 232;
@@ -143,9 +143,9 @@ try {
     const created = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
     return openPage((await cdpJson("/json")).find((x) => x.id === created.result.targetId), name);
   };
-  // 参加順で化身 0・1・2 が割り当てられる
+  // 参加順で化身 0・1・2・3 が割り当てられる（化身の数 = NAMES の数）
   const phones = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < NAMES.length; i++) {
     const p = i === 0 ? await openPage(first, `phone${i}`) : await newWindow(`phone${i}`);
     await p.send("Page.navigate", { url: `${BASE}?${PHONE}&name=S${i}` });
     const s = await waitUntil(async () => {

@@ -31,7 +31,7 @@ const PHONE = `fov=70&camZoom=1&fakecam=1&autostart=1&fakeMarkerPx=80&occlude=0&
 const ROOM2 = `${ROOM}s2`;
 const SHOT_DIR = join(ROOT, "logs", "keshin-check");
 const LOG_FILE = join(ROOT, "logs", "client.log");
-const MODELS_PRESENT = ["majin_the_hand.glb", "majin_pegasus_arc.glb", "kensei_lancelot.glb"].every((f) => existsSync(join(ROOT, "local-assets", "keshin", f)));
+const MODELS_PRESENT = ["majin_the_hand.glb", "majin_pegasus_arc.glb", "kensei_lancelot.glb", "sousha_maestro.glb"].every((f) => existsSync(join(ROOT, "local-assets", "keshin", f)));
 
 if (!existsSync(CHROME)) {
   console.log(`SKIP: Chrome が見つかりません (${CHROME})。CHROME=/path/to/chrome で指定できます`);
@@ -331,7 +331,7 @@ try {
     return { ok: a?.me && b?.me && a.track === "marker" && b.track === "marker" && a.model !== "loading" && b.model !== "loading" && a.model !== "idle" && b.model !== "idle", a, b };
   }, 40000);
   const ks = [s23?.a?.keshin, s23?.b?.keshin].sort();
-  check("スマホ 2・3 に化身 1・2 が割り当てられる（最初の 3 人は別々）", ks[0] === 1 && ks[1] === 2, JSON.stringify(ks));
+  check("スマホ 2・3 に化身 1・2 が割り当てられる（最初の 4 人は別々）", ks[0] === 1 && ks[1] === 2, JSON.stringify(ks));
   const ov2 = await newWindow("overview2", `${BASE}overview.html?room=${ROOM}&remoteLog=0`);
   const late = await waitUntil(async () => {
     const me = (await overviewState(ov2)).find((x) => x.id === p1id);

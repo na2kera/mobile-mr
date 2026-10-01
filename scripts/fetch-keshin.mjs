@@ -1,4 +1,4 @@
-// ex9-1-keshin（化身）の 3D モデル 3 体（GLB）を local-assets/keshin/ にコピーする。`npm run fetch:keshin` で実行する。
+// ex9-1-keshin（化身）の 3D モデル 4 体（GLB）を local-assets/keshin/ にコピーする。`npm run fetch:keshin` で実行する。
 // モデルは手元の Blender 作業フォルダで作ったもので、公開リポジトリには入れない（.gitignore 済み）。
 // dev サーバーだけが /local-assets/keshin/*.glb で配る（vite.config.ts の keshinLocalAssets。build には出さない）。
 // コピーしていなくてもページは開け、HUD に「モデル未配置（npm run fetch:keshin）」と出て代わりの人型で演出を確認できる。
@@ -7,6 +7,7 @@
 //   <src>/majin-fable/majin_the_hand.glb       … 0: 魔神 ザ・ハンド
 //   <src>/Pegasus-Opus/majin_pegasus_arc.glb   … 1: 魔神ペガサスアーク
 //   <src>/Lancelot-Opus/kensei_lancelot.glb    … 2: 剣聖ランスロット
+//   <src>/Maestro-Opus/sousha_maestro.glb      … 3: 奏者マエストロ
 // 各フォルダの README.md に Three.js での扱い方（半透明・下半身の隠し方・クリッピング・アニメの時刻）が書いてある
 import { copyFile, mkdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -20,6 +21,7 @@ const MODELS = [
   { dir: "majin-fable", file: "majin_the_hand.glb", label: "0: 魔神 ザ・ハンド" },
   { dir: "Pegasus-Opus", file: "majin_pegasus_arc.glb", label: "1: 魔神ペガサスアーク" },
   { dir: "Lancelot-Opus", file: "kensei_lancelot.glb", label: "2: 剣聖ランスロット" },
+  { dir: "Maestro-Opus", file: "sousha_maestro.glb", label: "3: 奏者マエストロ" },
 ];
 
 const srcStat = await stat(SRC).catch(() => null);

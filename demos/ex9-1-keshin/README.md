@@ -19,14 +19,15 @@
 | 0 | 魔神 ザ・ハンド | `majin_the_hand.glb` | `MTH_SummonPose` を最後まで再生して保持（口は召喚まで閉じ、決めポーズで叫ぶ） | 2.77m（腰の分割位置） |
 | 1 | 魔神ペガサスアーク | `majin_pegasus_arc.glb` | たたんだ翼から `PA_WingFold` を逆再生して翼を開く（開き切ったらオーラの帯 `PA_FX_Aura` を出す） | 2.35m（腰帯の上） |
 | 2 | 剣聖ランスロット | `kensei_lancelot.glb` | `KL_ArmTest` を再生して剣と盾を構える | 1.72m（腰装甲の下端。1 枚のマントもここで切る） |
+| 3 | 奏者マエストロ | `sousha_maestro.glb` | `MS_ArmTest` を再生して 4 本の腕を振る（レスト → 振る → レストの往復なので最後はレストに戻る）。指揮棒（`Baton`。extras の `default_visible` は false）は出す | 2.50m（胴の底。蓋がある） |
 
-- 割り当ては参加順。サーバーが「今いるプレイヤーの中で使われている数が最も少ない番号のうち最小」を割り当てる（最初の 3 人は必ず別々）。
-- モデルの扱い（半透明・下半身の隠し方・クリッピング・スキンのカリング無効化・アニメの時刻）は各モデルの README（`/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus}/README.md`）に従う。
+- 割り当ては参加順。サーバーが「今いるプレイヤーの中で使われている数が最も少ない番号のうち最小」を割り当てる（最初の 4 人は必ず別々）。
+- モデルの扱い（半透明・下半身の隠し方・クリッピング・スキンのカリング無効化・アニメの時刻）は各モデルの README（`/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus,Maestro-Opus}/README.md`）に従う。マエストロは根ノードが `SoushaMaestro`、子ノードに接頭辞が無い（`LowerBody` / `Baton` など）。
 
 ## モデルの置き方（公開リポジトリには入れない）
 
 ```sh
-npm run fetch:keshin      # /Users/keranatsuki/dev/blender から local-assets/keshin/ へ 3 つの GLB をコピー（KESHIN_SRC_DIR で場所を変えられる）
+npm run fetch:keshin      # /Users/keranatsuki/dev/blender から local-assets/keshin/ へ 4 つの GLB をコピー（KESHIN_SRC_DIR で場所を変えられる）
 npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb で配る（vite build には入らない）
 ```
 
@@ -192,7 +193,7 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
   管の断面の横向きは「本人の後ろ向き × 上」で固定（曲線はこの 2 つの面の中にあるので、どこでも曲線に直交してねじれない）。
 - 足元の柱（今のオーラ）は `?footAuraK=0.3` に控え、床から背中の高さまで。腰の渦は溶けた腰のまわり。
 - `?look=0` で段階 2 までの見え方（比べる用）。値は起動時のログ（`event=start ... look waistAbove=...`）に出る。
-- **既定値は候補**（`node scripts/sweep-keshin-look.mjs` → `logs/keshin-check/look-sweep.png`。鏡モード・iPad 前面 106° のまね・人 1.3m / 2.5m・3 体 × 4 設定）。確定は方針側が画像を見て行う。
+- **既定値は候補**（`node scripts/sweep-keshin-look.mjs` → `logs/keshin-check/look-sweep.png`。鏡モード・iPad 前面 106° のまね・人 1.3m / 2.5m・4 体 × 4 設定）。確定は方針側が画像を見て行う。
   既定は方針側が look-sweep を見て決めた値（腰 頭 +0.3・間隔 0.4・流れの明るさ 0.7。シートの L1 に近い）。
 
 ## ファイル
@@ -263,7 +264,7 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
 ```sh
 npm run test:keshin     # 数学・時刻表・割り当て・検証・サーバーの流れ（実サーバー + WebSocket）
 npm run check:keshin    # ヘッドレス Chrome: スマホ 3 台 + 俯瞰画面 2 つ。スクリーンショットは logs/keshin-check/
-node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × 見上げ 45/60/75° × 設定）→ logs/keshin-check/self-sweep.png / .json
+node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（4 体 × 見上げ 45/60/75° × 設定）→ logs/keshin-check/self-sweep.png / .json
 ```
 
 ### 主観の見え方の既定値（確定。self-sweep.png を見て方針側が決めた）
@@ -273,6 +274,7 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × �
 | 魔神 | 50° | 1.0m | 35° / 0.25m では兜の裏と細い腕しか見えなかった。前へ大きく出して倒すと、見上げ 45〜60° で顔（開いた口）と広げた腕の輪郭が入り、目の近くで消える頂点は 2% |
 | ペガサス | 35° | 0.7m | 35° / 0.25m は髪の房の裏が重なり、頂点の 43% が目の近くで消えていた。0.7m 前へ出すと翼・髪・肩が入り、消える頂点 12% |
 | ランスロット | 35° | 0.7m | 見上げ 45° で兜・角・肩当て・胸当てが入り、消える頂点 14%。35° / 0.25m（兜・肩当て・胸が読める）は頂点の 45% が消えている |
+| マエストロ | 35° | 0.7m | 見上げ 45° で髪・肩飾り・立ち襟・上段の腕が入り、消える頂点 4%、視界の中心を 85%（60° で 51%）覆う。35° / 0.25m は頂点の 51% が消え、50° / 1.0m は 60° 以上で画素が大きく減る（2026-10-01） |
 
 どの設定でも化身は本人と同じ向きなので、顔を前から見ることはない（前へ出すほど背中側、上に置くほどあご側から見る）。
 
@@ -300,7 +302,7 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（3 体 × �
 | 0 | 背面カメラ | HUD の `cam=` とログの `event=camera` | **iPad でも iPhone でも `facing=environment`**（背面）。iPhone は `背面超広角カメラ` / `Back Ultra Wide Camera` で `why=back-ultra-wide`・`camFov=106`。iPad（超広角が前面だけ）は `why=environment(front-only(前面超広角カメラ))` で広角・`camFov=68`。`facing=user` なら失敗 |
 | 1 | ログが出る | `grep keshin-phone logs/client.log \| tail` | 1 秒ごとに `state: fps=...` の行、入室で `event=welcome`・モデルで `event=model-loaded`（読み込み時間 ms） |
 | 2 | 重さ（化身 off） | HUD / ログの `fps=` `render=` | fps ≥ 50、`render=`（CPU 側、2 眼込み）≤ 5ms |
-| 3 | 重さ（化身 on・見上げて化身が見えている） | 同上 + `tris=` `calls=` | **fps ≥ 30**。tris は魔神約 8 万・ペガサス約 26 万・ランスロット約 19 万（2 眼 × 深度の前描画込み）。ペガサスで 30 を切るなら `?auraN=200` と `?selfOpacity=` での差を記録 |
+| 3 | 重さ（化身 on・見上げて化身が見えている） | 同上 + `tris=` `calls=` | **fps ≥ 30**。tris は魔神約 8 万・ペガサス約 26 万・ランスロット約 19 万・マエストロ約 18 万（2 眼 × 深度の前描画込み。マエストロは GLB の三角形 53,614 − LowerBody 9,760 = 43,854 × 4 の計算値で、HUD では未測定）。ペガサスで 30 を切るなら `?auraN=200` と `?selfOpacity=` での差を記録 |
 | 4 | マーカー検出の重さ | `det=` | ≤ 30ms（08 と同程度） |
 | 5 | 演出 | ボタンを押して俯瞰画面とスマホで見る | 押してから 0.5s 以内に全員で始まる。柱 → せり上がり → 決めポーズが約 1.5s。もう一度押すと約 1.0s で消える。連打しても見え方が飛ばない |
 | 6 | 主観・正面 | ゴーグルで正面を見る | 視界の中心は空いていてオーラは周りだけ。化身は見えない（視界を遮らない） |
