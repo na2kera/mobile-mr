@@ -1,11 +1,12 @@
 // 化身の 3D モデル（GLB）の読み込みと、1 体ぶんの描画用インスタンス（半透明・腰のクリッピング・目の近くを消す・決めポーズ）。
-// モデルの扱いは各モデルの README（/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus}/README.md）に従う:
-//   - 拡大縮小・移動・回転はモデルの根（MTH_Root / PA_Root / KL_Root）の外側で行う（ここでは keshin-view.ts の holder）
-//   - 下半身ノード（*_LowerBody）は非表示、残り（ランスロットのマント・ペガサスのたてがみ等）は腰のクリッピング平面で切る
+// モデルの扱いは各モデルの README（/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus,Maestro-Opus}/README.md）に従う:
+//   - 拡大縮小・移動・回転はモデルの根（MTH_Root / PA_Root / KL_Root / SoushaMaestro）の外側で行う（ここでは keshin-view.ts の holder）
+//   - 下半身ノード（*_LowerBody。マエストロは LowerBody）は非表示、残り（ランスロットのマント・ペガサスのたてがみ等）は腰のクリッピング平面で切る
+//   - extras の default_visible が false のノード（マエストロの指揮棒 Baton）は読み込み後に隠す。spec.showNodes にあれば出す
 //   - スキンメッシュの境界球はアニメで追従しないので frustumCulled = false（disableSkinnedCulling）
 //   - 半透明は makeGhost の方法: 深度だけ書く複製を先に描いてから色を重ねる（内側の面が透けない）。発光部分（目など）は濃く残す
 //   - アニメの時刻: MTH_SummonPose 0〜1.25s（A ポーズ → 召喚ポーズ）/ PA_WingFold 0.0417〜0.8333s（レスト → たたむ。逆再生で開く）/
-//     KL_ArmTest 0.0417〜0.833s（A ポーズ → 剣と盾を構える）
+//     KL_ArmTest 0.0417〜0.833s（A ポーズ → 剣と盾を構える）/ MS_ArmTest 0.0417〜1.0417s（レスト → 腕を振る → レスト。ループ用）
 // 読み込めない（未配置・build 版）ときは代わりの人型（カプセル）を同じ寸法の約束（5m・腰の高さ・頭の位置）で作り、演出と位置を確認できるようにする
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -43,12 +44,18 @@ export type KeshinSpec = {
    * 値は README「主観の見え方の既定値」（self-sweep.png を見て確定。scripts/sweep-keshin-self.mjs）
    */
   self: { leanDeg: number; faceAheadM: number; backM: number | null };
+  /**
+   * extras（userData）の default_visible が false でも表示するノード名。default_visible が false のノードは読み込み後に隠し、
+   * ここに名前があるものだけ出す（マエストロの指揮棒 Baton。glTF には表示の概念が無いので読み込んだままだと見えてしまう）
+   */
+  showNodes?: readonly string[];
 };
 
 /**
- * 3 体の仕様。腰の高さは README の推奨: 魔神は腰の分割位置 2.77m（userData.waist_height_m。断面に蓋がある）、
+ * 4 体の仕様。腰の高さは README の推奨: 魔神は腰の分割位置 2.77m（userData.waist_height_m。断面に蓋がある）、
  * ペガサスは腰帯の上 2.35m（「胸から上だけにしたい場合は 2.35」）、ランスロットは腰装甲の下端付近 1.72m
- * （マントが 1 枚なので下半身を隠しても腰より下が残る。README の setClipBelow(knight, 1.72)）
+ * （マントが 1 枚なので下半身を隠しても腰より下が残る。README の setClipBelow(knight, 1.72)）、
+ * マエストロは胴の底 2.50m（README 6 章: UpperBody の胴は Z 2.50 で底を閉じた立体。setClipBelow(THREE, root, 2.5)）
  */
 export const KESHIN_SPECS: readonly KeshinSpec[] = [
   {
@@ -95,6 +102,29 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 頂点の 45% が目の近くで消えていた
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
   },
+  {
+    index: 3,
+    name: "奏者マエストロ",
+    short: "マエストロ",
+    file: "sousha_maestro.glb",
+    // 根ノードは *_Root ではなく SoushaMaestro（README 3 章）。子ノードも接頭辞なし（UpperBody / LowerBody / Baton など）
+    rootName: "SoushaMaestro",
+    // 胴の底（README 6 章: Z 2.50 に蓋がある。LowerBody を隠すと胴の暗い底面が見える）。前布（下端 2.25）と下段の手（指先 ≈ 2.05）は
+    // この面で切れる
+    cutY: 2.5,
+    // 上段の腕を上下・下段の腕を前後に振る（README 5 章。レスト → 山 → レストの往復なので決めポーズの終わりはレストに戻る）
+    clip: "MS_ArmTest",
+    clipReverse: false,
+    // 元画像の光の演出（青いボールの球体・水色のベール）から。モデル自体に発光は無い
+    auraColors: [0x2f6fff, 0x9fe8ff],
+    // 演出ノード（fx_nodes）が無い
+    selfHideFx: false,
+    // 確定（2026-10-01 の self-sweep.png の S4）: 見上げ 45° で髪・肩飾り・立ち襟・上段の腕が入り、消える頂点 4%、視界の中心を 85%（60° で 51%）覆う。
+    // S1（35° / +0.25）は頂点の 51% が消え、S5（50° / +1.0）は 60° 以上で画素が 1/2〜1/20 に減った
+    self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
+    // 指揮棒（README 7 章: 上段の右手のボーン HandUp.R の子の剛体。extras の default_visible は false）を出す
+    showNodes: ["Baton"],
+  },
 ];
 
 /** 読み込んだ（または代わりに作った）1 体ぶんのテンプレート。インスタンスはここから複製する */
@@ -132,9 +162,19 @@ function nodeNames(root: THREE.Object3D, spec: KeshinSpec): { lower: string; fx:
   return { lower: ud.lower_body_node ?? `${prefix}_LowerBody`, fx: ud.fx_nodes ?? [] };
 }
 
-/** モデルの根（MTH_Root / PA_Root / KL_Root。README の仕様値が userData にある）。無ければ渡したもの */
+/** モデルの根（MTH_Root / PA_Root / KL_Root / SoushaMaestro。README の仕様値が userData にある）。無ければ渡したもの */
 function modelRootOf(root: THREE.Object3D, spec: KeshinSpec): THREE.Object3D {
   return root.getObjectByName(spec.rootName) ?? root;
+}
+
+/**
+ * extras（userData）の default_visible が false のノードを隠す（マエストロ README 7 章の applyDefaultVisibility と同じ）。
+ * show に名前があるノードは逆に出す。該当するノードが無いモデル（魔神・ペガサス・ランスロット）では何もしない
+ */
+function applyDefaultVisibility(root: THREE.Object3D, show: readonly string[]) {
+  root.traverse((o) => {
+    if ((o.userData as { default_visible?: unknown }).default_visible === false) o.visible = show.includes(o.name);
+  });
 }
 
 /** o が names のどれかのノードの子孫（自身を含む）か */
@@ -187,6 +227,7 @@ export function createKeshinInstance(
   const names = nodeNames(root, loaded.spec);
   const lower = root.getObjectByName(names.lower);
   if (lower) lower.visible = false;
+  applyDefaultVisibility(root, loaded.spec.showNodes ?? []);
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const nearUniforms = nearFade
     ? { uKeshinEye: { value: new THREE.Vector3() }, uKeshinNear: { value: new THREE.Vector2(nearFade[0], nearFade[1]) } }

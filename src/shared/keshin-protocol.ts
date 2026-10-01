@@ -10,8 +10,9 @@ export const KESHIN_PATH = "/api/keshin";
 /**
  * メッセージや座標系の意味を変えたら上げる（不一致は入室拒否）。
  * v2: session 鍵での再接続の引き継ぎ、welcome / join の poseAgeMs、join の now
+ * v3: 化身が 4 種類（index 3 = 奏者マエストロ）。3 体しか知らない古いページが index 3 を受けて落ちないよう入室で弾く
  */
-export const KESHIN_PROTOCOL_VERSION = 2;
+export const KESHIN_PROTOCOL_VERSION = 3;
 
 /**
  * 再接続の鍵（WS の URL の ?session=）。クライアントがタブごとに sessionStorage に持つランダムな文字列。
@@ -32,10 +33,10 @@ export const MAX_PLAYERS = 8;
 /** 俯瞰画面（PC）の上限（運営 + 予備） */
 export const MAX_OVERVIEWS = 2;
 
-/** 化身の種類の数（0: 魔神 ザ・ハンド / 1: 魔神ペガサスアーク / 2: 剣聖ランスロット） */
-export const KESHIN_COUNT = 3;
-export type KeshinIndex = 0 | 1 | 2;
-export const KESHIN_NAMES = ["魔神 ザ・ハンド", "魔神ペガサスアーク", "剣聖ランスロット"] as const;
+/** 化身の種類の数（0: 魔神 ザ・ハンド / 1: 魔神ペガサスアーク / 2: 剣聖ランスロット / 3: 奏者マエストロ） */
+export const KESHIN_COUNT = 4;
+export type KeshinIndex = 0 | 1 | 2 | 3;
+export const KESHIN_NAMES = ["魔神 ザ・ハンド", "魔神ペガサスアーク", "剣聖ランスロット", "奏者マエストロ"] as const;
 
 export type V3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -111,7 +112,7 @@ export type KeshinRoomConfig = SpaceConfig;
 
 /**
  * 化身の割り当て: 今いるプレイヤーの中で使われている数が最も少ない番号のうち最小。
- * 最初の 3 人は必ず別々になり、抜けた人の番号は次の人に回る
+ * 最初の 4 人は必ず別々になり、抜けた人の番号は次の人に回る
  */
 export function assignKeshin(used: readonly number[]): KeshinIndex {
   const counts = Array.from({ length: KESHIN_COUNT }, () => 0);

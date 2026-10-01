@@ -9,7 +9,7 @@ import { mulMat4, transformPoint } from "../../src/shared/marker-layout.ts";
 export type V3 = [number, number, number];
 export type Quat = [number, number, number, number];
 
-/** GLB の全高 [m]（3 体とも 5.0。userData.height_m） */
+/** GLB の全高 [m]（4 体とも 5.0。userData.height_m） */
 export const MODEL_HEIGHT_M = 5;
 /** 化身の上半身の前面と本人の頭の中心の最小の間隔 [m] */
 export const BACK_CLEARANCE_M = 0.25;

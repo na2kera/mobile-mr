@@ -9,6 +9,7 @@
 import type { RawData, WebSocket } from "ws";
 import { isVec, parseName, roomServerPlugin, type RoomContext } from "./room-server.ts";
 import {
+  KESHIN_COUNT,
   KESHIN_PATH,
   KESHIN_PROTOCOL_VERSION,
   MAX_OVERVIEWS,
@@ -251,8 +252,8 @@ export function keshinServer() {
       const res = reservations(room.state, key);
       const current = [...players.values()];
       const carryColorOk = carry !== null && !current.some((p) => p.color === carry.color);
-      // 番号は 4 人目から重複するのが正常なので、「いまいる人の中で使われている数が最少の番号」なら引き継ぐ（それより多ければ選び直す）
-      const counts = [0, 0, 0];
+      // 番号は 5 人目（KESHIN_COUNT + 1 人目）から重複するのが正常なので、「いまいる人の中で使われている数が最少の番号」なら引き継ぐ（それより多ければ選び直す）
+      const counts = Array.from({ length: KESHIN_COUNT }, () => 0);
       for (const p of current) counts[p.keshin]++;
       const carryKeshinOk = carry !== null && counts[carry.keshin] === Math.min(...counts);
       const player: KeshinPlayer = {

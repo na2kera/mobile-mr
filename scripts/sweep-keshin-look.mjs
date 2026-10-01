@@ -1,7 +1,7 @@
 // ex9-1-keshin 段階 3 の C: 他人用の化身の「背中からビヨーンと出る」見え方を、パラメータを振って 1 枚のコンタクトシートにする。
 // `node scripts/sweep-keshin-look.mjs` で実行する（ヘッドレス Chrome。モデルは local-assets/keshin/ にあれば実モデル）。
 // 鏡モード（mirror.html?fakeperson=1。iPad の前面カメラのまね: 水平の画角 106°・画面 1180×820）に合成の人を 1 人立たせ、
-// Node の WebSocket の仮想プレイヤー 3 人（参加順で化身 0・1・2）のうち 1 人だけ化身を出して撮る。
+// Node の WebSocket の仮想プレイヤー 4 人（参加順で化身 0・1・2・3。人数 = NAMES の数）のうち 1 人だけ化身を出して撮る。
 // 行 = 設定（下の SETTINGS）、列 = 化身 × 人の距離（1.3m / 2.5m）。各コマに設定値と数値:
 //   人の上 = 人の形で隠す処理を切った状態で、化身（モデル）が人の画素に重なった画素数（本人の頭・肩に被らないなら 0 に近い）
 //   頭 = 化身のいちばん上が画面の上で切れているか（切 = 切れている / 入 = 入っている）
@@ -30,7 +30,7 @@ const SETTINGS = process.env.SWEEP_SETTINGS ? JSON.parse(process.env.SWEEP_SETTI
   { key: "L2", label: "腰 頭+0.5 / 間隔 0.7 / 溶け 0.6 / 流れ 0.07-0.32", q: "waistAboveHeadM=0.5&backClearM=0.7&dissolveM=0.6&streamR0=0.07&streamR1=0.32" },
   { key: "L3", label: "腰 頭+0.7 / 間隔 1.0 / 溶け 0.8 / 流れ 0.08-0.4", q: "waistAboveHeadM=0.7&backClearM=1.0&dissolveM=0.8&streamR0=0.08&streamR1=0.4" },
 ];
-const NAMES = ["魔神", "ペガサス", "ランスロット"];
+const NAMES = ["魔神", "ペガサス", "ランスロット", "マエストロ"];
 const TILE_W = 236;
 const TILE_H = 164;
 
@@ -129,7 +129,7 @@ try {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   mkdirSync(OUT_DIR, { recursive: true });
   if (!(await waitForServer())) throw new Error(`dev サーバーが起動しなかった（ポート ${PORT}）`);
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < NAMES.length; i++) {
     const p = virtualPlayer(`K${i}`, `lookSweepPlayer${i}xx`);
     const w = await p.welcome();
     const me = w.players.find((x) => x.id === w.id);
@@ -154,7 +154,7 @@ try {
     await page.send("Page.navigate", { url: `${BASE}mirror.html?room=${ROOM}&fakecam=1&fakeperson=1&autostart=1&remoteLog=0&camFov=106&${st.q}` });
     const ok = await waitUntil(async () => {
       const s = await page.eval("window.__keshinMirror?.state() ?? null").catch(() => null);
-      return s && s.me && s.persons.length === 1 && s.entries.length === 3 ? s : null;
+      return s && s.me && s.persons.length === 1 && s.entries.length === NAMES.length ? s : null;
     });
     if (!ok) throw new Error(`${st.key}: 鏡が準備できない`);
     await page.eval("for (const s of ['#hud', '#mirror-message', '#fs-button']) { const e = document.querySelector(s); if (e) e.style.display = 'none'; }");

@@ -3,11 +3,12 @@
 //   2. keshin-math.ts — 化身の配置（頭の姿勢 → モデル行列・背中からの距離・腰のクリッピング平面・せり上がり・主観の前傾）
 //   3. keshin-math.ts — 主観の見上げフェード、受信側の信用度による薄さ
 //   4. keshin-timeline.ts — 出現・消去・途中反転の連続性（純粋関数で隠れた状態が無い）
-//   5. keshin-protocol.ts — 化身の割り当て（最初の 3 人は別々・抜けた番号を次の人へ）
+//   5. keshin-protocol.ts — 化身の割り当て（最初の 4 人は別々・抜けた番号を次の人へ）
 //   6. server/keshin.ts — メッセージの検証（NaN・巨大値・退化クォータニオン・不正な向き）
 //   7. server/keshin.ts — サーバーの流れ（Vite dev サーバーを起動して WebSocket で: 入室 → 割り当て → keshin on → 全員に配られる →
 //      途中入室者のスナップショット → 途中反転 → 退室 → 番号の再利用、役割ごとの上限）
 // テストフレームワークは使わない（04〜09 と同じ方針）。Node 22.18+ は .ts をそのまま import できる
+import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import {
@@ -37,7 +38,7 @@ import {
   yawOfForward,
 } from "../demos/ex9-1-keshin/keshin-math.ts";
 import { APPEAR_SEC, AURA_SUSTAIN, RISE_M, VANISH_SEC, elapsedForProgress, keshinTimeline, progressOf, retargetElapsed, visualAt } from "../src/shared/keshin-timeline.ts";
-import { KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLACED_REASON, assignKeshin } from "../src/shared/keshin-protocol.ts";
+import { KESHIN_COUNT, KESHIN_NAMES, KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLACED_REASON, assignKeshin } from "../src/shared/keshin-protocol.ts";
 import { parseClientMessage } from "../server/keshin.ts";
 import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
@@ -1074,10 +1075,22 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
 
 // ================= 5. 割り当て =================
 {
-  check("割り当て: 1 人目 0・2 人目 1・3 人目 2", assignKeshin([]) === 0 && assignKeshin([0]) === 1 && assignKeshin([0, 1]) === 2);
-  check("割り当て: 4 人目は 0（全部 1 回ずつ → 最小）、5 人目は 1", assignKeshin([0, 1, 2]) === 0 && assignKeshin([0, 1, 2, 0]) === 1);
-  check("割り当て: 0 の人が抜けたら次の人は 0", assignKeshin([1, 2]) === 0 && assignKeshin([2]) === 0 && assignKeshin([0, 2]) === 1);
-  check("割り当て: 使われている数が最少の番号のうち最小", assignKeshin([0, 0, 1, 2, 2]) === 1 && assignKeshin([1, 1, 0, 0]) === 2);
+  check("化身は 4 種類（番号と名前の数が一致）", KESHIN_COUNT === 4 && KESHIN_NAMES.length === KESHIN_COUNT && KESHIN_NAMES[3] === "奏者マエストロ");
+  {
+    // keshin-assets.ts は three / GLTFLoader と Vite の拡張子なし import に依存して Node から読めないので、ソースから index と name を拾って照合する
+    const src = readFileSync(new URL("../demos/ex9-1-keshin/keshin-assets.ts", import.meta.url), "utf8");
+    const specs = [...src.matchAll(/^\s+index: (\d+),\s*\n\s+name: "([^"]+)",/gm)].map((m) => [Number(m[1]), m[2]]);
+    check(
+      "KESHIN_SPECS（モデルの仕様）は KESHIN_COUNT / KESHIN_NAMES と同期している（index が並び順・名前が一致）",
+      specs.length === KESHIN_COUNT && specs.every(([i, n], k) => i === k && n === KESHIN_NAMES[k]),
+      JSON.stringify(specs),
+    );
+  }
+  check("割り当て: 1 人目 0・2 人目 1・3 人目 2・4 人目 3", assignKeshin([]) === 0 && assignKeshin([0]) === 1 && assignKeshin([0, 1]) === 2 && assignKeshin([0, 1, 2]) === 3);
+  check("割り当て: 5 人目は 0（全部 1 回ずつ → 最小）、6 人目は 1", assignKeshin([0, 1, 2, 3]) === 0 && assignKeshin([0, 1, 2, 3, 0]) === 1);
+  check("割り当て: 0 の人が抜けたら次の人は 0", assignKeshin([1, 2, 3]) === 0 && assignKeshin([2]) === 0 && assignKeshin([0, 2]) === 1);
+  check("割り当て: 使われている数が最少の番号のうち最小", assignKeshin([0, 0, 1, 2, 2, 3]) === 1 && assignKeshin([1, 1, 0, 0, 3, 3]) === 2 && assignKeshin([0, 1, 2]) === 3);
+  check("割り当て: 範囲外・整数でない番号は数えない", assignKeshin([0, 1, 2, 4, -1, 1.5]) === 3);
 }
 
 // ================= 6. メッセージの検証 =================
@@ -1167,7 +1180,7 @@ try {
   const wc = await c.waitFor((m) => m.type === "welcome");
   const kb = wb?.players.find((p) => p.id === wb.id)?.keshin;
   const kc = wc?.players.find((p) => p.id === wc.id)?.keshin;
-  check("2 人目は化身 1、3 人目は化身 2（最初の 3 人は別々）", kb === 1 && kc === 2, `${kb} ${kc}`);
+  check("2 人目は化身 1、3 人目は化身 2（最初の 4 人は別々）", kb === 1 && kc === 2, `${kb} ${kc}`);
   const ja = await a.waitFor((m) => m.type === "join" && m.player.id === wc?.id);
   check("join に化身の番号が付く", ja && ja.player.keshin === 2 && ja.player.on === false);
   const o = connect({ ...cfg, role: "overview" });
@@ -1223,7 +1236,7 @@ try {
     typeof aliceSnap?.poseAgeMs === "number" && aliceSnap.poseAgeMs >= sinceGyro - 150 && aliceSnap.poseAgeMs <= sinceGyro + 50,
     `poseAgeMs=${aliceSnap?.poseAgeMs} 送ってから=${sinceGyro}ms`,
   );
-  check("4 人目は化身 0（全部 1 回ずつ使われていれば最小）", wd?.players.find((p) => p.id === wd.id)?.keshin === 0);
+  check("4 人目は化身 3（最初の 4 人は別々）", wd?.players.find((p) => p.id === wd.id)?.keshin === 3);
 
   // 途中反転: 出切ったあと消し、0.2s 後に出し直す → 開始時刻は u = 1.5 − 0.2×1.5 = 1.2 になる時刻（経過 ≈ 1.2s）
   await sleep(Math.max(0, APPEAR_SEC * 1000 + 100 - (wd.now - aliceSnap.changedAt)));
@@ -1262,12 +1275,12 @@ try {
   const ninth = connect(cfg, "Nine");
   const e9 = await ninth.waitFor((m) => m.type === "error");
   check(`プレイヤーは ${MAX_PLAYERS} 人まで（俯瞰画面は数えない）`, e9 && /満員/.test(e9.reason), e9?.reason);
-  const counts = [0, 0, 0];
+  const counts = Array.from({ length: KESHIN_COUNT }, () => 0);
   for (const x of [a, c, d, e, ...more]) {
     const w = x.msgs.find((m) => m.type === "welcome");
     counts[w.players.find((p) => p.id === w.id).keshin]++;
   }
-  check("8 人の割り当ては偏らない（各番号 2〜3 人）", counts.every((n) => n >= 2 && n <= 3), JSON.stringify(counts));
+  check(`8 人の割り当ては偏らない（${KESHIN_COUNT} 種類で各番号 2 人）`, counts.every((n) => n === 2), JSON.stringify(counts));
 
   // 再接続（v2）: 同じ session 鍵で入り直すと、古い接続を切って番号・on・changedAt を引き継ぐ（別の room で確かめる）
   {
