@@ -1205,6 +1205,53 @@ try {
   }
 
   }
+  // 炎の膜だけを小さな専用シーンで描く（粒が描けただけで成功と誤認しない）。GPU の出力画素で確認する。
+  const flame = await pM.eval(`(async () => {
+    const THREE = await import('/node_modules/three/build/three.module.js');
+    const { WorldAura } = await import('/demos/ex9-1-keshin/keshin-aura.ts');
+    const { keshinTimeline } = await import('/src/shared/keshin-timeline.ts');
+    const renderer = new THREE.WebGLRenderer({ alpha: true, preserveDrawingBuffer: true });
+    renderer.setSize(256, 320);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 256 / 320, 0.1, 20);
+    camera.position.set(0, 1.8, 6);
+    camera.lookAt(0, 1.8, 0);
+    const aura = new WorldAura(1, [0x6a5cff, 0xff2a48]);
+    aura.points.geometry.setDrawRange(0, 0);
+    aura.uniforms.uSwirlC.value.set(0, 1.5, -0.5);
+    scene.add(aura.points);
+    const draw = (elapsed, time, cap = 10000, mode = 'appear') => {
+      const v = keshinTimeline(elapsed, mode);
+      aura.uniforms.uAuraK.value = v.auraK;
+      aura.uniforms.uPillarK.value = v.pillarK;
+      aura.uniforms.uBurstK.value = v.burstK;
+      aura.uniforms.uTime.value = time;
+      aura.uniforms.uColumnMaxH.value = cap;
+      renderer.render(scene, camera);
+      const pixels = new Uint8Array(256 * 320 * 4);
+      const gl = renderer.getContext();
+      gl.readPixels(0, 0, 256, 320, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return pixels;
+    };
+    const count = (p) => p.reduce((n, v, i) => n + (i % 4 === 3 && v > 8 ? 1 : 0), 0);
+    try {
+      const off = count(draw(0, 0));
+      const rising = count(draw(0.15, 2));
+      const full = draw(1.5, 2);
+      const moving = draw(1.5, 2.4);
+      let changed = 0;
+      for (let i = 0; i < full.length; i += 4)
+        if (Math.abs(full[i] - moving[i]) + Math.abs(full[i + 1] - moving[i + 1]) + Math.abs(full[i + 2] - moving[i + 2]) > 15) changed++;
+      const capped = count(draw(1.5, 2, 1.2));
+      const vanished = count(draw(1, 2, 10000, 'vanish'));
+      aura.points.children[0].visible = false;
+      const disabled = count(draw(1.5, 2));
+      return { off, rising, full: count(full), changed, capped, vanished, disabled };
+    } finally { aura.dispose(); renderer.dispose(); }
+  })()`);
+  check("炎: 粒なしでも連続した面が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
+  check("炎: 出現完了後も時刻に合わせて揺らめく", flame.changed > flame.full * 0.1, `changed=${flame.changed} full=${flame.full}`);
+  check("炎: 主観の肩の高さの制限で上部が消える・炎非表示なら画素が残らない", flame.capped > 0 && flame.capped < flame.full * 0.5 && flame.disabled === 0, `capped=${flame.capped} disabled=${flame.disabled}`);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
   const shader2 = pages.flatMap((p) => p.logs.filter((l) => /Shader Error|WebGLProgram|THREE\.WebGLRenderer/.test(l)).map((l) => `${p.name}: ${l.slice(0, 200)}`));

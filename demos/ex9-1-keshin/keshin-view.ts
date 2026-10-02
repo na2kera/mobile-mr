@@ -1,11 +1,11 @@
-// 化身 1 体の描画部品（モデル + 足元のオーラの柱 + 腰の渦）。「自分用（主観）」と「他人用（俯瞰画面・段階 2 の相手）」の両方で使う。
+// 化身 1 体の描画部品（モデル + 炎の膜 + 足元の柱 + 腰の渦）。「自分用（主観）」と「他人用（俯瞰画面・段階 2 の相手）」の両方で使う。
 //   - 自分用: 腰の切断面を支点に前傾（?selfLean=）し、目から ?nearFade= m 以内を消す。見上げフェードは呼び出し側が fade で渡す
 //   - 他人用: 前傾なし。受信側の「信用できるか」による薄さは呼び出し側が fade で渡す
 // 配置の数学は keshin-math.ts（純粋関数・テスト済み）のモデル行列とクリッピング平面をそのまま使う。
 // group は親（シーン or マーカー座標系のアンカー）の座標で置く。head / yaw も親の座標系で渡す
 import * as THREE from "three";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
-import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack } from "./keshin-math";
+import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack, MODEL_HEIGHT_M } from "./keshin-math";
 import { AURA_SUSTAIN } from "../../src/shared/keshin-timeline";
 import { createDissolveUniforms } from "./keshin-assets";
 import type { DissolveUniforms } from "./keshin-assets";
@@ -308,6 +308,8 @@ export class KeshinView {
       au.uColumnH.value = this.look ? Math.max(0.3, eyeH - 0.35) : cutH;
       au.uColumnK.value = this.look ? this.look.footAuraK : 1;
       au.uColumnR.value = 0.45;
+      au.uFlameH.value = cutH + (MODEL_HEIGHT_M - this.loaded.spec.cutY) * scale + 0.35;
+      au.uFlameR.value = Math.max(0.65, scale * 1.35);
       au.uSwirlC.value.set(0, cutH, -back);
       au.uSwirlR.value = 0.55 * scale * 1.6;
       au.uViewportH.value = u.viewportH;

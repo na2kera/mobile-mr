@@ -1,12 +1,13 @@
-// 化身のオーラ（加算合成の粒子 + ゆっくり動くノイズの揺らぎ）。粒子の位置はすべて頂点シェーダーで時刻から計算する
+// 化身のオーラ（連続した炎の膜 + 加算合成の補助粒子）。位置は頂点シェーダーで時刻から計算する
 // （CPU は uniform を書くだけ。粒子数 ?auraN= を増やしても JS の負荷は増えない）。
-//   - WorldAura: 本人の足元から腰の高さへ立ち上る柱 + 化身の腰（切断面）の渦。ワールドに置くので左右 2 眼で自然に立体に見える
+//   - WorldAura: 足元から化身の頭上へ立ち上る炎 + 足元の柱 + 化身の腰（切断面）の渦。ワールドに置くので左右 2 眼で自然に立体に見える
 //   - PeripheralAura: 主観で視界の周り（周辺）にうっすら出すオーラ。カメラの子にして 0.6〜1.2m 先の実際の 3D 位置に置く
 //     （画面空間のポストエフェクトは StereoEffect と相性が悪いので使わない）。視線から 25° 以内は空け、外側ほど濃く、
 //     小さな火の粉が下から上へ立ち上って消える。外周には大きく柔らかい低アルファのもやを少し置く
 import * as THREE from "three";
 import { MASK_HEAD_GLSL } from "./keshin-occlusion";
 import type { MaskBinding } from "./keshin-occlusion";
+import { createFlame } from "./keshin-flame";
 
 /** 共通の GLSL: ハッシュと滑らかなノイズ（1 次元） */
 const NOISE_GLSL = /* glsl */ `
@@ -67,6 +68,9 @@ export type WorldAuraUniforms = {
   uColB: { value: THREE.Color };
   uColumnR: { value: number };
   uColumnH: { value: number };
+  /** 人物から化身の頭上まで伸びる炎の高さ・上側の半径 [m] */
+  uFlameH: { value: number };
+  uFlameR: { value: number };
   uSwirlC: { value: THREE.Vector3 };
   uSwirlR: { value: number };
   /** 渦の強さ（主観では渦が自分の頭のまわりに来て視界の中心を埋めるので 0） */
@@ -89,6 +93,7 @@ export type WorldAuraUniforms = {
 export class WorldAura {
   readonly points: THREE.Points;
   readonly uniforms: WorldAuraUniforms;
+  private readonly flame: THREE.Mesh;
   constructor(n: number, colors: [number, number], mask: MaskBinding | null = null) {
     // 6 割を柱、4 割を渦
     const geometry = seededGeometry(n, (i) => (i % 5 < 3 ? 0 : 1));
@@ -101,6 +106,8 @@ export class WorldAura {
       uColB: { value: new THREE.Color(colors[1]) },
       uColumnR: { value: 0.45 },
       uColumnH: { value: 1.5 },
+      uFlameH: { value: 3.5 },
+      uFlameR: { value: 0.8 },
       uSwirlC: { value: new THREE.Vector3() },
       uSwirlR: { value: 0.5 },
       uSwirlK: { value: 1 },
@@ -160,7 +167,7 @@ export class WorldAura {
           vMaskWorld = world.xyz;
           // 目のすぐ近くの粒は消す（主観で視界を塞がない。他人用は uNear = 0）
           float nearK = uNear.y > 0.0 ? smoothstep(uNear.x, uNear.y, distance(world.xyz, uEye)) : 1.0;
-          vAlpha = alpha * flick * uAuraK * (1.0 + 0.8 * uBurstK) * nearK;
+          vAlpha = alpha * flick * uAuraK * (1.0 + 0.8 * uBurstK) * nearK * 0.35;
           vColor = mix(uColA, uColB, mixK);
           vec4 mv = viewMatrix * world;
           gl_Position = projectionMatrix * mv;
@@ -173,10 +180,16 @@ export class WorldAura {
     this.points = new THREE.Points(geometry, material);
     this.points.frustumCulled = false;
     this.points.matrixAutoUpdate = false;
+    this.flame = createFlame(this.uniforms, mask);
+    // 同じ足元の行列・表示状態・デバッグの withHidden を炎にも適用する。auraN=0 は従来どおりオーラなし。
+    this.flame.visible = n > 0;
+    this.points.add(this.flame);
   }
   dispose() {
     this.points.geometry.dispose();
     (this.points.material as THREE.Material).dispose();
+    this.flame.geometry.dispose();
+    (this.flame.material as THREE.Material).dispose();
   }
 }
 
