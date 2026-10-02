@@ -1,11 +1,12 @@
 // Phase 10-2 (10-2-batting) の Vite 同居 WebSocket サーバー。
 // 接続の共通部分は room-server.ts、ゲーム状態は純粋な BattingGame が持つ。
-import type { RawData } from "ws";
 import {
   isVec,
   parseName,
   roomServerPlugin,
   type RoomContext,
+  type WireData,
+  wireText,
 } from "./room-server.ts";
 import {
   BATTING_PATH,
@@ -62,10 +63,10 @@ const isPlayerId = (v: unknown): v is string =>
 const isNum = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
-function parseClientMessage(data: RawData): ClientMessage | null {
+function parseClientMessage(data: WireData): ClientMessage | null {
   let msg: unknown;
   try {
-    msg = JSON.parse(data.toString());
+    msg = JSON.parse(wireText(data));
   } catch {
     return null;
   }

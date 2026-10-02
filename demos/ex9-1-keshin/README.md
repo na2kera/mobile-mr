@@ -431,3 +431,30 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（4 体 × �
 - 主観の化身は 3DoF（ジャイロ）なので、歩いても化身は頭についてくる（位置はマーカーのアンカーに依らない）。
 - スキンメッシュの境界球は使わず、カリングを切っている（README どおり）。見えていないときは描かない（見上げフェード 0・不透明度 0 で非表示）。
 - ペガサスのオーラの帯（`PA_FX_Aura`）は主観では出さない（自分の頭を囲んで視界を横切るため）。俯瞰画面では翼を開き切ったあとに出す。
+
+## Cloudflare へのデプロイ
+
+化身だけを Cloudflare Workers（静的アセット + Durable Object）に出す。ビルドは `vite.keshin.config.ts`（全体の `vite.config.ts` とは別）、配信は `deploy/cloudflare/`（`wrangler.jsonc` / `worker.ts` / `keshin-room.ts`）。
+
+前提:
+
+- `npm run fetch:keshin` でモデル 4 体を `local-assets/keshin/` に置いておく（無いとビルドが止まる）。`public/models/pose_landmarker_lite.task` も要る（無ければ `npm run fetch:models`）
+- `npx wrangler login` で Cloudflare のアカウントにログインしておく
+
+手順:
+
+```sh
+npm run build:keshin                                          # dist-keshin/ に出す
+npx wrangler deploy --config deploy/cloudflare/wrangler.jsonc  # dist-keshin/ と Worker を出す
+```
+
+- `dist-keshin/` に入るのは化身の 3 ページ（index / overview / mirror）・マーカー印刷ページ（`demos/08-splatoon/markers.html`）・JS と MediaPipe の wasm（`assets/`）・`models/pose_landmarker_lite.task`・`favicon.svg`・`local-assets/keshin/*.glb`。
+  `public/vendor/`（OpenCV・AlvaAR・AprilTag）と `hand_landmarker.task` は化身で使わないので入れない（合計 28MB 前後、1 ファイルの最大は wasm の約 12MB。Cloudflare の上限は 1 ファイル 25MB）
+- 公開 URL は `https://mobile-mr-keshin.<workers.dev のサブドメイン>.workers.dev/demos/ex9-1-keshin/`（`/` は化身へリダイレクトする）。俯瞰画面は `overview.html`、鏡は `mirror.html`
+- **モデル（GLB）は公開 URL から誰でも取れるようになる**（`/local-assets/keshin/<file>.glb`。dev サーバーだけで配っていたときと違う）
+- 実機のログは `npx wrangler tail --config deploy/cloudflare/wrangler.jsonc` で見る
+- 既知の制約: Room の状態は Durable Object のメモリだけに持つ（再起動・退避で消える）。WebSocket のハイバネーションは使っていない（つないでいる間は Durable Object が起きたまま）。
+  heartbeat（ping/pong）が無いので、スマホのスリープや Wi-Fi 切断で半開きになった接続は検出まで数分かかりうる（その間その人は Player として残り、8 人の枠を 1 つ使う。同じタブで戻れば session 鍵で置き換わる）。
+  Room 数の上限（dev サーバーの 64）は無い（Room 名ごとに Durable Object ができる。公開 URL なので必要になれば Cloudflare の WAF のレート制限で抑える）。
+  実機ログ（`/api/client-log`）には **訪問者全員の console ログ**が来る（`?remoteLog=0` 以外で常に有効）。同じホストからの送信だけ受け、1 リクエスト 256KB・200 件までに抑えている。
+  マーカー印刷ページの「俯瞰画面へ」「プレイヤー画面へ」（08 のページ）は入れていないのでリンク切れになる
