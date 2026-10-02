@@ -90,6 +90,11 @@ export class KeshinView {
   modelVisible = false;
   /** 直近の体の不透明度（診断用） */
   lastOpacity = 0;
+  /** 直近の炎の形の値（診断・テスト用: 広がり始める高さ・背中の高さ・足元の濃さ・腰の高さ・太さ） */
+  get flameShape() {
+    const au = this.aura.uniforms;
+    return { joinY: au.uJoinY.value, columnH: au.uColumnH.value, columnK: au.uColumnK.value, waistY: au.uSwirlC.value.y, columnR: au.uColumnR.value, flameR: au.uFlameR.value };
+  }
   /** 直近の発光部分の不透明度 */
   private lastOwn = 0;
 
@@ -315,6 +320,8 @@ export class KeshinView {
       au.uColumnH.value = this.look ? Math.max(0.3, eyeH - 0.35) : cutH;
       au.uColumnK.value = this.look ? this.look.footAuraK : 1;
       au.uColumnR.value = 0.45;
+      // 他人用は本人の背中まで細い柱のままにして、そこから化身の腰へ向けて広げる（人のまわりを炎で埋めない）
+      au.uJoinY.value = this.look ? au.uColumnH.value : 0.2;
       // 炎は化身の頭上を越えて吹き上がる（頂部の 3 割ほどは炎の舌にちぎれる）。太さは腕や翼を広げた化身が収まる幅
       au.uFlameH.value = (cutH + (MODEL_HEIGHT_M - this.loaded.spec.cutY) * scale) * 1.3;
       // 主観は体に沿う細い柱のまま（太くすると、正面を向いたとき肩の高さの縁が視界の中心に入る。check:keshin の「各眼の中心 50% はほぼ空」）

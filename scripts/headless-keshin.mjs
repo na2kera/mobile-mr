@@ -174,6 +174,8 @@ const logSizeBefore = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0;
 const profile = mkdtempSync(join(tmpdir(), "mobile-mr-chrome-"));
 let chrome = null;
 let exitCode = 1;
+/** 鏡で読んだ他人用の炎の形（keshin-view.ts が入れた値）。炎だけのシーンの確認で同じ値を使う */
+let mirrorFlameShape = null;
 const pages = [];
 try {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -916,6 +918,14 @@ try {
   const bands = probe?.dissolve?.bands ?? [];
   check("鏡・見え方: 切り口が無い（腰の近くほど化身の画素が疎ら: 溶ける範囲の上 > 範囲の上半分 > 腰の近く、腰の近くは上の半分未満）", bands.length === 3 && bands[0] > bands[1] && bands[1] > bands[2] && bands[2] < bands[0] * 0.5, JSON.stringify(bands.map((b) => b.toFixed(3))));
   check("鏡・見え方: 背中から化身の腰まで光の流れがつながって描かれている（曲線上の 7 点すべてに流れの画素）", probe?.stream && probe.stream.hits === probe.stream.total, JSON.stringify(probe?.stream?.samples?.map((q) => `${q.t.toFixed(2)}:${q.hit ? 1 : 0}`)));
+  // 炎の形（他人用）: 人のまわりは細い柱のまま、本人の背中から上で広がり始め、足元は ?footAuraK= の薄さ（keshin-view.ts の式）
+  const fs = probe?.flame;
+  check(
+    "鏡・見え方: 炎は本人の背中から上で広がり始め（背中より下は細い柱）、足元は薄い（既定 0.3）",
+    fs && Math.abs(fs.joinY - fs.columnH) < 1e-6 && fs.joinY > 0.8 && fs.joinY < fs.waistY && fs.columnR < fs.flameR * 0.6 && Math.abs(fs.columnK - 0.3) < 1e-6,
+    JSON.stringify(fs),
+  );
+  mirrorFlameShape = fs ?? null;
   await pML.shot("mirror-look.png");
   await browser.send("Target.closeTarget", { targetId: pML.targetId });
   pages.splice(pages.indexOf(pML), 1);
@@ -1330,13 +1340,39 @@ try {
         if (Math.abs(full[i] - moving[i]) + Math.abs(full[i + 1] - moving[i + 1]) + Math.abs(full[i + 2] - moving[i + 2]) > 15) changed++;
       const capped = count(draw(1.5, 2, 1.2));
       const vanished = count(draw(1, 2, 10000, 'vanish'));
+      // 他人用の形（鏡で読んだ keshin-view.ts の値）: 人の高さ（床から 0.8m）は細く薄く、化身の高さ（2.4m）は従来どおり広い。
+      // 高さ → 画素の行: カメラは高さ 1.8m・距離 6m・縦の画角 45°（readPixels は下から）
+      const rowOf = (y) => Math.round(160 + (y - 1.8) * 160 / (6 * Math.tan(Math.PI / 8)));
+      const band = (p, y) => {
+        let width = 0, alpha = 0;
+        for (let r = rowOf(y) - 3; r <= rowOf(y) + 3; r++)
+          for (let x = 0; x < 256; x++) {
+            const a = p[(r * 256 + x) * 4 + 3];
+            if (a > 8) { width++; alpha += a; }
+          }
+        return { width: width / 7, alpha: width ? alpha / width : 0 };
+      };
+      const wide = { low: band(full, 0.8), high: band(full, 2.4) };
+      const shape = ${JSON.stringify(mirrorFlameShape ?? { joinY: 1.25, columnH: 1.25, columnK: 0.3, waistY: 1.9 })};
+      aura.uniforms.uJoinY.value = shape.joinY;
+      aura.uniforms.uColumnH.value = shape.columnH;
+      aura.uniforms.uColumnK.value = shape.columnK;
+      aura.uniforms.uSwirlC.value.y = shape.waistY;
+      const other = draw(1.5, 2);
+      const thin = { low: band(other, 0.8), high: band(other, 2.4) };
       aura.points.children[0].visible = false;
       const disabled = count(draw(1.5, 2));
-      return { off, rising, full: count(full), changed, capped, vanished, disabled };
+      return { off, rising, full: count(full), changed, capped, vanished, disabled, wide, thin };
     } finally { aura.dispose(); renderer.dispose(); }
   })()`);
   check("炎: 粒なしでも炎が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
   check("炎: 出現完了後も時刻に合わせて揺らめく", flame.changed > flame.full * 0.1, `changed=${flame.changed} full=${flame.full}`);
+  check(
+    "炎: 他人用の形では人の高さ（0.8m）が細く薄く（幅は従来の 85% 未満・化身の高さの 6 割未満。このシーンの太さは既定の 0.8m なので従来との差は実機より小さい、濃さは従来の半分未満）、化身の高さ（2.4m）の幅は変わらない",
+    flame.thin.low.width > 0 && flame.thin.low.width < flame.wide.low.width * 0.85 && flame.thin.low.width < flame.thin.high.width * 0.6 &&
+      flame.thin.low.alpha < flame.wide.low.alpha * 0.5 && Math.abs(flame.thin.high.width - flame.wide.high.width) < flame.wide.high.width * 0.15,
+    JSON.stringify({ wide: flame.wide, thin: flame.thin }),
+  );
   check("炎: 主観の肩の高さの制限で上部が消える・炎非表示なら画素が残らない", flame.capped > 0 && flame.capped < flame.full * 0.5 && flame.disabled === 0, `capped=${flame.capped} disabled=${flame.disabled}`);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
