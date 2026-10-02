@@ -885,7 +885,7 @@ startButton.addEventListener("click", () => {
     occlusion.uniforms.uMaskOn.value = 0;
     const render = () => renderer.render(scene, camera);
     try {
-      return { dissolve: LOOK ? probeDissolve(gl, render, e.view, camera, e.view.below?.dissolveM ?? 0) : null, stream: probeStream(gl, render, e.view, camera) };
+      return { dissolve: LOOK ? probeDissolve(gl, render, e.view, camera, e.view.below?.dissolveM ?? 0) : null, stream: probeStream(gl, render, e.view, camera), flame: e.view.flameShape };
     } finally {
       occlusion.uniforms.uMaskOn.value = wasOn;
     }

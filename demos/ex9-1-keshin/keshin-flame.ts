@@ -39,7 +39,7 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
     side: THREE.BackSide,
     blending: THREE.NormalBlending,
     vertexShader: /* glsl */ `
-      uniform float uTime, uBurstK, uFlameH, uFlameR, uColumnR, uInsideFade;
+      uniform float uTime, uBurstK, uFlameH, uFlameR, uJoinY, uColumnR, uInsideFade;
       uniform vec3 uSwirlC;
       varying float vH, vOutK;
       varying vec2 vDir;
@@ -50,8 +50,8 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         float a = atan(position.z, position.x);
         float t = uTime * (1.0 + 0.6 * uBurstK);
         float y = h * uFlameH;
-        // 足元は人物を包む細い柱、背中から上は化身を包む太さへ。その先も上へ行くほど広がる
-        float join = smoothstep(0.2, max(0.4, uSwirlC.y), y);
+        // 足元は人物を包む細い柱、背中（uJoinY）から上は化身を包む太さへ。その先も上へ行くほど広がる
+        float join = smoothstep(uJoinY, max(uJoinY + 0.2, uSwirlC.y), y);
         float baseR = mix(uColumnR, uFlameR, join) * (1.0 + 0.3 * h);
         // 輪郭のうねり: 周期の違う大きな膨らみが上へ流れる（上ほど大きく、出現の勢いでさらに大きく）
         float lobe = sin(a * 2.0 + y * 1.7 - t * 1.3) * 0.14
@@ -73,7 +73,7 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         vec3 camD = cameraPosition - modelMatrix[3].xyz;
         vec3 camL = vec3(dot(modelMatrix[0].xyz, camD), dot(modelMatrix[1].xyz, camD), dot(modelMatrix[2].xyz, camD));
         float yc = clamp(camL.y, 0.0, uFlameH);
-        float jc = smoothstep(0.2, max(0.4, uSwirlC.y), yc);
+        float jc = smoothstep(uJoinY, max(uJoinY + 0.2, uSwirlC.y), yc);
         float rc = mix(uColumnR, uFlameR, jc) * (1.0 + 0.3 * yc / uFlameH);
         float dc = length(camL.xz - vec2(0.0, uSwirlC.z * jc));
         vOutK = mix(1.0, smoothstep(rc * 0.9, rc * 1.5, dc), uInsideFade);
@@ -122,8 +122,8 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         vec3 color = mix(uColA, uColA * 0.14, core);
         color = mix(color, bright, clamp(max(rim, edge * edge) * 0.9 + streak * 0.35 * (1.0 - rim), 0.0, 1.0));
         float foot = smoothstep(0.0, 0.05, vH);
-        // 足元から背中まで: 他人用の「足元は控えめ」（uColumnK）を炎にも半分だけ掛ける
-        float low = mix(sqrt(clamp(uColumnK, 0.0, 1.0)), 1.0, smoothstep(uColumnH * 0.6, uColumnH, y));
+        // 足元から背中まで: 他人用の「足元は控えめ」（uColumnK）を炎にも掛ける（人のまわりは薄く、背中から上で濃くなる）
+        float low = mix(clamp(uColumnK, 0.0, 1.0), 1.0, smoothstep(uColumnH * 0.6, uColumnH, y));
         // 主観は肩より上へ描かない。近距離フェードも粒子と共有する
         float cap = 1.0 - smoothstep(uColumnMaxH - 0.2, uColumnMaxH, y);
         float nearK = uNear.y > 0.0 ? smoothstep(uNear.x, uNear.y, distance(vWorld, uEye)) : 1.0;

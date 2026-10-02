@@ -74,6 +74,8 @@ export type WorldAuraUniforms = {
   /** 人物から化身の頭上まで伸びる炎の高さと、背中から上の基準の半径 [m]（上へ行くほど 1.3 倍まで広がる） */
   uFlameH: { value: number };
   uFlameR: { value: number };
+  /** 炎が足元の細い柱から化身を包む太さへ広がり始める高さ（床から [m]）。他人用は本人の背中から（人のまわりは細いまま） */
+  uJoinY: { value: number };
   /** 炎の濃さの倍率（主観は自分の体のまわりを塞がないよう薄くする） */
   uFlameK: { value: number };
   /** 見ている人が炎の内側にいるとき消すか（1 = 消す: 他人用。0 = 消さない: 主観は自分の炎の中にいる） */
@@ -117,6 +119,7 @@ export class WorldAura {
       uColumnH: { value: 1.5 },
       uFlameH: { value: 3.5 },
       uFlameR: { value: 0.8 },
+      uJoinY: { value: 0.2 },
       uFlameK: { value: 1 },
       uInsideFade: { value: 1 },
       uParticleK: { value: PARTICLE_K_WITH_FLAME },
