@@ -4,7 +4,7 @@
 // コピーしていなくてもページは開け、HUD に「モデル未配置（npm run fetch:keshin）」と出て代わりの人型で演出を確認できる。
 //
 // コピー元の既定: リポジトリ直下から ../../../blender（= /Users/keranatsuki/dev/blender）。環境変数 KESHIN_SRC_DIR で上書きする。
-//   <src>/majin-fable/majin_the_hand.glb       … 0: 魔神 ザ・ハンド
+//   <src>/majin-fable/majin_the_hand.glb       … 0: マジン・ザ・ハンド
 //   <src>/Pegasus-Opus/majin_pegasus_arc.glb   … 1: 魔神ペガサスアーク
 //   <src>/Lancelot-Opus/kensei_lancelot.glb    … 2: 剣聖ランスロット
 //   <src>/Maestro-Opus/sousha_maestro.glb      … 3: 奏者マエストロ
@@ -18,7 +18,7 @@ const SRC = process.env.KESHIN_SRC_DIR ? resolve(process.env.KESHIN_SRC_DIR) : r
 const DEST = join(ROOT, "local-assets", "keshin");
 
 const MODELS = [
-  { dir: "majin-fable", file: "majin_the_hand.glb", label: "0: 魔神 ザ・ハンド" },
+  { dir: "majin-fable", file: "majin_the_hand.glb", label: "0: マジン・ザ・ハンド" },
   { dir: "Pegasus-Opus", file: "majin_pegasus_arc.glb", label: "1: 魔神ペガサスアーク" },
   { dir: "Lancelot-Opus", file: "kensei_lancelot.glb", label: "2: 剣聖ランスロット" },
   { dir: "Maestro-Opus", file: "sousha_maestro.glb", label: "3: 奏者マエストロ" },

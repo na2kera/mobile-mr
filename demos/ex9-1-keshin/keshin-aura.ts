@@ -1,4 +1,4 @@
-// 化身のオーラ（連続した炎の膜 + 加算合成の補助粒子）。位置は頂点シェーダーで時刻から計算する
+// 化身のオーラ（背後に立つ炎 + 加算合成の補助粒子）。位置は頂点シェーダーで時刻から計算する
 // （CPU は uniform を書くだけ。粒子数 ?auraN= を増やしても JS の負荷は増えない）。
 //   - WorldAura: 足元から化身の頭上へ立ち上る炎 + 足元の柱 + 化身の腰（切断面）の渦。ワールドに置くので左右 2 眼で自然に立体に見える
 //   - PeripheralAura: 主観で視界の周り（周辺）にうっすら出すオーラ。カメラの子にして 0.6〜1.2m 先の実際の 3D 位置に置く
@@ -59,6 +59,9 @@ void main() {
 }
 `;
 
+/** 炎を背負っているときの補助の粒の明るさ（粒だけだった頃の 35%） */
+export const PARTICLE_K_WITH_FLAME = 0.35;
+
 export type WorldAuraUniforms = {
   uTime: { value: number };
   uAuraK: { value: number };
@@ -68,9 +71,15 @@ export type WorldAuraUniforms = {
   uColB: { value: THREE.Color };
   uColumnR: { value: number };
   uColumnH: { value: number };
-  /** 人物から化身の頭上まで伸びる炎の高さ・上側の半径 [m] */
+  /** 人物から化身の頭上まで伸びる炎の高さと、背中から上の基準の半径 [m]（上へ行くほど 1.3 倍まで広がる） */
   uFlameH: { value: number };
   uFlameR: { value: number };
+  /** 炎の濃さの倍率（主観は自分の体のまわりを塞がないよう薄くする） */
+  uFlameK: { value: number };
+  /** 見ている人が炎の内側にいるとき消すか（1 = 消す: 他人用。0 = 消さない: 主観は自分の炎の中にいる） */
+  uInsideFade: { value: number };
+  /** 補助の粒の明るさの倍率（炎の前で白く飛ばないよう他人用は控えめ。主観は炎を肩までで切るので従来の明るさ） */
+  uParticleK: { value: number };
   uSwirlC: { value: THREE.Vector3 };
   uSwirlR: { value: number };
   /** 渦の強さ（主観では渦が自分の頭のまわりに来て視界の中心を埋めるので 0） */
@@ -108,6 +117,9 @@ export class WorldAura {
       uColumnH: { value: 1.5 },
       uFlameH: { value: 3.5 },
       uFlameR: { value: 0.8 },
+      uFlameK: { value: 1 },
+      uInsideFade: { value: 1 },
+      uParticleK: { value: PARTICLE_K_WITH_FLAME },
       uSwirlC: { value: new THREE.Vector3() },
       uSwirlR: { value: 0.5 },
       uSwirlK: { value: 1 },
@@ -126,7 +138,7 @@ export class WorldAura {
       vertexShader: /* glsl */ `
         attribute vec4 aSeed;
         attribute float aKind;
-        uniform float uTime, uAuraK, uPillarK, uBurstK, uColumnR, uColumnH, uSwirlR, uSwirlK, uColumnMaxH, uColumnK, uSize, uViewportH;
+        uniform float uTime, uAuraK, uPillarK, uBurstK, uColumnR, uColumnH, uSwirlR, uSwirlK, uColumnMaxH, uColumnK, uParticleK, uSize, uViewportH;
         uniform vec3 uSwirlC, uColA, uColB, uEye;
         uniform vec2 uNear;
         varying float vAlpha;
@@ -167,7 +179,7 @@ export class WorldAura {
           vMaskWorld = world.xyz;
           // 目のすぐ近くの粒は消す（主観で視界を塞がない。他人用は uNear = 0）
           float nearK = uNear.y > 0.0 ? smoothstep(uNear.x, uNear.y, distance(world.xyz, uEye)) : 1.0;
-          vAlpha = alpha * flick * uAuraK * (1.0 + 0.8 * uBurstK) * nearK * 0.35;
+          vAlpha = alpha * flick * uAuraK * (1.0 + 0.8 * uBurstK) * nearK * uParticleK;
           vColor = mix(uColA, uColB, mixK);
           vec4 mv = viewMatrix * world;
           gl_Position = projectionMatrix * mv;

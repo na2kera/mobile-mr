@@ -1205,9 +1205,16 @@ try {
   }
 
   }
-  // 炎の膜だけを小さな専用シーンで描く（粒が描けただけで成功と誤認しない）。GPU の出力画素で確認する。
+  // 炎だけを小さな専用シーンで描く（粒が描けただけで成功と誤認しない）。GPU の出力画素で確認する。
+  // uFlameH / uFlameR は WorldAura の既定値（3.5 / 0.8）のまま（keshin-view.ts の式はここでは検査しない）
   const flame = await pM.eval(`(async () => {
-    const THREE = await import('/node_modules/three/build/three.module.js');
+    // ページ本体と同じ three を使う（別の経路で読むと three が 2 つになり、instanceof や内部のキャッシュが食い違う）。
+    // Vite が keshin-aura.ts の import を書き換えた先（事前バンドルの URL）をそのまま読む
+    const auraSrc = await (await fetch('/demos/ex9-1-keshin/keshin-aura.ts')).text();
+    // （この文字列はテンプレートリテラルの中なので、バックスラッシュを使う正規表現は書かない）
+    const threeUrl = auraSrc.split(/["']/).find((x) => x.includes('/deps/three.js'));
+    if (!threeUrl) throw new Error('keshin-aura.ts の three の読み込み先が分からない');
+    const THREE = await import(threeUrl);
     const { WorldAura } = await import('/demos/ex9-1-keshin/keshin-aura.ts');
     const { keshinTimeline } = await import('/src/shared/keshin-timeline.ts');
     const renderer = new THREE.WebGLRenderer({ alpha: true, preserveDrawingBuffer: true });
@@ -1249,7 +1256,7 @@ try {
       return { off, rising, full: count(full), changed, capped, vanished, disabled };
     } finally { aura.dispose(); renderer.dispose(); }
   })()`);
-  check("炎: 粒なしでも連続した面が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
+  check("炎: 粒なしでも炎が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
   check("炎: 出現完了後も時刻に合わせて揺らめく", flame.changed > flame.full * 0.1, `changed=${flame.changed} full=${flame.full}`);
   check("炎: 主観の肩の高さの制限で上部が消える・炎非表示なら画素が残らない", flame.capped > 0 && flame.capped < flame.full * 0.5 && flame.disabled === 0, `capped=${flame.capped} disabled=${flame.disabled}`);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
