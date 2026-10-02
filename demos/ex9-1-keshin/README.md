@@ -444,13 +444,26 @@ node scripts/sweep-keshin-self.mjs   # 主観の見え方の比較（4 体 × �
 手順:
 
 ```sh
+npm run fetch:keshin                                          # モデル 4 体を local-assets/keshin/ にコピー
 npm run build:keshin                                          # dist-keshin/ に出す
 npx wrangler deploy --config deploy/cloudflare/wrangler.jsonc  # dist-keshin/ と Worker を出す
 ```
 
+公開 URL（Worker 名 `mobile-mr-keshin`。2026-10-02 に初回デプロイ）:
+
+| 端末 | 用途 | URL |
+|---|---|---|
+| iPhone（ゴーグル） | 化身を出す人のページ | <https://mobile-mr-keshin.na2kera.workers.dev/demos/ex9-1-keshin/> |
+| iPad | 鏡モード（前面カメラに写った人の背後に化身） | <https://mobile-mr-keshin.na2kera.workers.dev/demos/ex9-1-keshin/mirror> |
+| PC | 俯瞰画面（全員の頭と化身を上から見る） | <https://mobile-mr-keshin.na2kera.workers.dev/demos/ex9-1-keshin/overview> |
+| PC | マーカーの印刷 | <https://mobile-mr-keshin.na2kera.workers.dev/demos/08-splatoon/markers> |
+
+- 全員が同じ room に入る。何も付けなければ room は `demo`。分けたいときは全部の URL に同じ `?room=<名前>` を付ける（英数字・`_`・`-`、32 文字まで）
+- `https://mobile-mr-keshin.na2kera.workers.dev/` だけでも iPhone 用のページへ飛ぶ。`overview.html` / `mirror.html` と書いても拡張子なしの URL へ転送される
+
 - `dist-keshin/` に入るのは化身の 3 ページ（index / overview / mirror）・マーカー印刷ページ（`demos/08-splatoon/markers.html`）・JS と MediaPipe の wasm（`assets/`）・`models/pose_landmarker_lite.task`・`favicon.svg`・`local-assets/keshin/*.glb`。
   `public/vendor/`（OpenCV・AlvaAR・AprilTag）と `hand_landmarker.task` は化身で使わないので入れない（合計 28MB 前後、1 ファイルの最大は wasm の約 12MB。Cloudflare の上限は 1 ファイル 25MB）
-- 公開 URL は `https://mobile-mr-keshin.<workers.dev のサブドメイン>.workers.dev/demos/ex9-1-keshin/`（`/` は化身へリダイレクトする）。俯瞰画面は `overview.html`、鏡は `mirror.html`
+- 別のアカウントにデプロイすると、URL のホストは `mobile-mr-keshin.<workers.dev のサブドメイン>.workers.dev` になる（上の表の `na2kera` の部分が変わる）
 - **モデル（GLB）は公開 URL から誰でも取れるようになる**（`/local-assets/keshin/<file>.glb`。dev サーバーだけで配っていたときと違う）
 - 実機のログは `npx wrangler tail --config deploy/cloudflare/wrangler.jsonc` で見る
 - 既知の制約: Room の状態は Durable Object のメモリだけに持つ（再起動・退避で消える）。WebSocket のハイバネーションは使っていない（つないでいる間は Durable Object が起きたまま）。
