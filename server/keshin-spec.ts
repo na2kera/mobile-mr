@@ -6,7 +6,9 @@
 // 接続の役割は 08 と同じく ?role=player（最大 8）/ ?role=overview（俯瞰画面、最大 2）の自己申告。
 // 再接続（v2）: クライアントはタブごとの session 鍵を ?session= に付ける。同じ鍵で入ってきたら古い接続を切って
 // 化身の番号・on・changedAt・色・直近の pose を引き継ぐ（古い id の leave は全員に配る）。きれいに切れた後の再入室も
-// SESSION_TTL_MS 以内なら引き継ぐ（ページの再読み込み・bfcache の復帰）
+// SESSION_TTL_MS 以内なら引き継ぐ（ページの再読み込み・bfcache の復帰）。
+// 化身の番号は、入室のときに本人が選んでいれば（?keshin=0..3）それを使う（ほかの人と重複してよい。引き継ぎより優先）。
+// 選んでいなければ（おまかせ）従来どおり参加順に割り当てる
 import { isVec, parseName, wireText, type RoomContext, type RoomServerSpec, type WireData } from "./room-core.ts";
 import {
   KESHIN_COUNT,
@@ -19,6 +21,7 @@ import {
   SESSION_PATTERN,
   TRACKS,
   assignKeshin,
+  parseKeshinChoice,
   type ClientMessage,
   type ClientRole,
   type KeshinPlayer,
@@ -261,11 +264,13 @@ export function keshinSpec(): RoomServerSpec<KeshinRoomConfig, State, ClientMess
       const counts = Array.from({ length: KESHIN_COUNT }, () => 0);
       for (const p of current) counts[p.keshin]++;
       const carryKeshinOk = carry !== null && counts[carry.keshin] === Math.min(...counts);
+      // 本人が選んだ番号（無ければおまかせ）。選んだ番号は重複していてもそのまま使う
+      const chosen = parseKeshinChoice(url.searchParams.get("keshin"));
       const player: KeshinPlayer = {
         id,
         name: parseName(url, id, NAME_MAX_LENGTH),
         color: carry && carryColorOk ? carry.color : pickColor(players, res.colors),
-        keshin: carry && carryKeshinOk ? carry.keshin : assignKeshin([...current.map((p) => p.keshin), ...res.keshins]),
+        keshin: chosen ?? (carry && carryKeshinOk ? carry.keshin : assignKeshin([...current.map((p) => p.keshin), ...res.keshins])),
         on: carry?.on ?? false,
         changedAt: carry?.changedAt ?? null,
       };
@@ -276,7 +281,7 @@ export function keshinSpec(): RoomServerSpec<KeshinRoomConfig, State, ClientMess
       players.set(id, player);
       room.send(id, { type: "welcome", id, role: "player", players: [...players.values()].map((p) => wirePlayer(room, p, now)), now } satisfies ServerMessage);
       room.broadcast({ type: "join", player: wirePlayer(room, player, now), now } satisfies ServerMessage, id);
-      console.log(`[keshin] ${id} "${player.name}" color ${player.color} keshin ${player.keshin}${carry ? ` (引き継ぎ: ${player.on ? "on" : "off"})` : ""}`);
+      console.log(`[keshin] ${id} "${player.name}" color ${player.color} keshin ${player.keshin}${chosen !== null ? "（選択）" : ""}${carry ? ` (引き継ぎ: ${player.on ? "on" : "off"})` : ""}`);
     },
     onMessage(room: Ctx, id, msg, now) {
       const player = room.state.players.get(id);

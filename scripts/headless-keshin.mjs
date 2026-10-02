@@ -403,6 +403,59 @@ try {
   );
 
   console.log(`models (overview): ${JSON.stringify(await ov.eval("window.__keshinOverview.models()"))}`);
+
+  // ---- 5-2. 化身を選ぶ画面（issue #90。?autostart= を付けずに、名前 → 選ぶ → 開始）----
+  {
+    const PICK = `fov=70&camZoom=1&fakecam=1&fakeMarkerPx=80&occlude=0&room=${ROOM}pick&posMode=declared&remoteLog=0`;
+    const pk = await newWindow("phone-pick", `${BASE}?${PICK}&name=Pick`);
+    await waitUntil(async () => ({ ok: await pk.eval("!!document.querySelector('#keshin-options .keshin-option')") }), 20000);
+    const shown = (sel) => `(() => { const e = document.querySelector('${sel}'); return !!e && getComputedStyle(e).display !== 'none' && e.getClientRects().length > 0; })()`;
+    check("選ぶ画面: 最初は名前の入力だけ（選ぶ画面は出ていない）", (await pk.eval(shown("#name-form"))) && !(await pk.eval(shown("#keshin-choice"))));
+    await pk.eval("document.querySelector('#start-button').click()");
+    const labels = await pk.eval("[...document.querySelectorAll('#keshin-options .keshin-option')].map((b) => b.dataset.keshin + ':' + b.textContent)");
+    check(
+      "選ぶ画面: 名前を決めると 4 体 + おまかせが出て、まだ開始しない（名前の入力は隠れる）",
+      (await pk.eval(shown("#keshin-choice"))) && !(await pk.eval(shown("#name-form"))) && !(await pk.eval("document.body.classList.contains('started')")) && JSON.stringify(labels) === JSON.stringify(["0:魔神 ザ・ハンド", "1:魔神ペガサスアーク", "2:剣聖ランスロット", "3:奏者マエストロ", "auto:おまかせ（参加順に割り当て）"]),
+      JSON.stringify(labels),
+    );
+    const fits = await pk.eval("(() => { const r = document.querySelector('#keshin-choice').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth; })()");
+    check("選ぶ画面: 画面内に収まっている", fits === true);
+    await pk.shot("keshin-choice.png");
+    await pk.eval("document.querySelector('#keshin-back').click()");
+    check("選ぶ画面: 「名前に戻る」で名前の入力に戻る", (await pk.eval(shown("#name-form"))) && !(await pk.eval(shown("#keshin-choice"))));
+    await pk.eval("document.querySelector('#start-button').click()");
+    await pk.eval(`document.querySelector('.keshin-option[data-keshin="3"]').click()`);
+    const picked = await waitUntil(async () => {
+      const s = await phoneState(pk);
+      return { ok: !!s?.me, s };
+    }, 20000);
+    check("選ぶ画面: 奏者マエストロ（3）を選ぶと開始して、1 人目でも化身 3 で入室する", picked?.ok && picked.s.keshin === 3 && (await pk.eval("document.body.classList.contains('started')")), `keshin=${picked?.s?.keshin}`);
+    const pk2 = await newWindow("phone-pick2", `${BASE}?${PICK}&name=Pick2`);
+    await waitUntil(async () => ({ ok: await pk2.eval("!!document.querySelector('#keshin-options .keshin-option')") }), 20000);
+    await pk2.eval("document.querySelector('#start-button').click()");
+    await pk2.eval(`document.querySelector('.keshin-option[data-keshin="3"]').click()`);
+    const picked2 = await waitUntil(async () => {
+      const s = await phoneState(pk2);
+      return { ok: !!s?.me, s };
+    }, 20000);
+    check("選ぶ画面: 2 人目も同じ化身（3）を選べる", picked2?.ok && picked2.s.keshin === 3, `keshin=${picked2?.s?.keshin}`);
+    const pk3 = await newWindow("phone-pick3", `${BASE}?${PICK}&name=Pick3`);
+    await waitUntil(async () => ({ ok: await pk3.eval("!!document.querySelector('#keshin-options .keshin-option')") }), 20000);
+    await pk3.eval("document.querySelector('#start-button').click()");
+    await pk3.eval(`document.querySelector('.keshin-option[data-keshin="auto"]').click()`);
+    const picked3 = await waitUntil(async () => {
+      const s = await phoneState(pk3);
+      return { ok: !!s?.me, s };
+    }, 20000);
+    check("選ぶ画面: おまかせは従来どおりの割り当て（使われていない番号のうち最小 = 0）", picked3?.ok && picked3.s.keshin === 0, `keshin=${picked3?.s?.keshin}`);
+    const pk4 = await newWindow("phone-pick4", `${BASE}?${PICK}&autostart=1&keshin=2&name=Pick4`);
+    const picked4 = await waitUntil(async () => {
+      const s = await phoneState(pk4);
+      return { ok: !!s?.me, s };
+    }, 20000);
+    check("選ぶ画面: ?autostart=1&keshin=2 は選ぶ画面を飛ばして化身 2 で入室する", picked4?.ok && picked4.s.keshin === 2, `keshin=${picked4?.s?.keshin}`);
+  }
+
   // ---- iPhone で Fullscreen API がオフのときの案内（issue #91）----
   // iPhone の UA にし、オフの端末は requestFullscreen 自体が無いのでそれを消して模擬する。開始はしない（入室しない）
   const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7 Mobile/15E148 Safari/604.1";

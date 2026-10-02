@@ -3,7 +3,7 @@
 //   2. keshin-math.ts — 化身の配置（頭の姿勢 → モデル行列・背中からの距離・腰のクリッピング平面・せり上がり・主観の前傾）
 //   3. keshin-math.ts — 主観の見上げフェード、受信側の信用度による薄さ
 //   4. keshin-timeline.ts — 出現・消去・途中反転の連続性（純粋関数で隠れた状態が無い）
-//   5. keshin-protocol.ts — 化身の割り当て（最初の 4 人は別々・抜けた番号を次の人へ）
+//   5. keshin-protocol.ts — 化身の割り当て（最初の 4 人は別々・抜けた番号を次の人へ）、本人が選んだ化身の読み取り（issue #90）
 //   6. server/keshin.ts — メッセージの検証（NaN・巨大値・退化クォータニオン・不正な向き）
 //   7. server/keshin.ts — サーバーの流れ（Vite dev サーバーを起動して WebSocket で: 入室 → 割り当て → keshin on → 全員に配られる →
 //      途中入室者のスナップショット → 途中反転 → 退室 → 番号の再利用、役割ごとの上限）
@@ -41,7 +41,7 @@ import {
   yawOfForward,
 } from "../demos/ex9-1-keshin/keshin-math.ts";
 import { APPEAR_SEC, AURA_SUSTAIN, RISE_M, VANISH_SEC, elapsedForProgress, keshinTimeline, progressOf, retargetElapsed, visualAt } from "../src/shared/keshin-timeline.ts";
-import { KESHIN_COUNT, KESHIN_NAMES, KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLACED_REASON, assignKeshin } from "../src/shared/keshin-protocol.ts";
+import { KESHIN_COUNT, KESHIN_NAMES, KESHIN_PATH, KESHIN_PROTOCOL_VERSION, MAX_OVERVIEWS, MAX_PLAYERS, REPLACED_REASON, assignKeshin, parseKeshinChoice } from "../src/shared/keshin-protocol.ts";
 import { parseClientMessage } from "../server/keshin.ts";
 import { invertRigid, levelRotation, markerAxes, mulMat4, transformPoint } from "../src/shared/marker-layout.ts";
 import { fakeCameraToField } from "../src/shared/fake-markers.ts";
@@ -1094,6 +1094,9 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("割り当て: 0 の人が抜けたら次の人は 0", assignKeshin([1, 2, 3]) === 0 && assignKeshin([2]) === 0 && assignKeshin([0, 2]) === 1);
   check("割り当て: 使われている数が最少の番号のうち最小", assignKeshin([0, 0, 1, 2, 2, 3]) === 1 && assignKeshin([1, 1, 0, 0, 3, 3]) === 2 && assignKeshin([0, 1, 2]) === 3);
   check("割り当て: 範囲外・整数でない番号は数えない", assignKeshin([0, 1, 2, 4, -1, 1.5]) === 3);
+  // 本人が選んだ化身（issue #90）
+  check("選択: 0〜3 はその番号", [0, 1, 2, 3].every((k) => parseKeshinChoice(String(k)) === k));
+  check("選択: 無し・範囲外・整数でない・空はおまかせ（null）", [null, "4", "-1", "1.5", "", "auto", " 2", "1e0"].every((raw) => parseKeshinChoice(raw) === null));
 }
 
 // ================= 6. メッセージの検証 =================
@@ -1430,6 +1433,41 @@ try {
     const r4 = connect({ ...cfg2, session: KEY }, "Rin");
     const w4 = await r4.waitFor((m) => m.type === "welcome" || m.type === "error");
     check("満員（8 人）でも同じ鍵の再接続は入れる", w4?.type === "welcome" && w4.players.length === MAX_PLAYERS, w4?.type === "error" ? w4.reason : `players=${w4?.players?.length}`);
+  }
+
+  // 化身を選んで入室（issue #90）: 選んだ番号はそのまま（重複してよい）、選ばなければ従来どおり参加順
+  {
+    const cfg90 = { room: "ktest90", markerId: "0", markerMm: "150" };
+    const keshinOf = (w) => w?.players.find((p) => p.id === w.id)?.keshin;
+    const s1 = connect({ ...cfg90, keshin: "2" }, "Sel1");
+    const ws1 = await s1.waitFor((m) => m.type === "welcome");
+    check("選択: 1 人目が 2 を選ぶと 2 になる（参加順なら 0）", keshinOf(ws1) === 2, `keshin=${keshinOf(ws1)}`);
+    const s2 = connect({ ...cfg90, keshin: "2" }, "Sel2");
+    const ws2 = await s2.waitFor((m) => m.type === "welcome");
+    const js2 = await s1.waitFor((m) => m.type === "join" && m.player.id === ws2?.id);
+    check("選択: 2 人目も同じ 2 を選べる（重複 OK）・join にも載る", keshinOf(ws2) === 2 && js2?.player.keshin === 2, `keshin=${keshinOf(ws2)} join=${js2?.player.keshin}`);
+    const a1 = connect(cfg90, "Auto1");
+    const wa1 = await a1.waitFor((m) => m.type === "welcome");
+    check("選択: おまかせ（?keshin= 無し）は使われていない番号のうち最小（0）", keshinOf(wa1) === 0, `keshin=${keshinOf(wa1)}`);
+    const bad5 = connect({ ...cfg90, keshin: "9" }, "Bad");
+    const wbad = await bad5.waitFor((m) => m.type === "welcome");
+    check("選択: 範囲外の番号はおまかせ扱い（1）で入室できる", keshinOf(wbad) === 1, `keshin=${keshinOf(wbad)}`);
+    s1.send({ type: "keshin", on: true });
+    const on5 = await s2.waitFor((m) => m.type === "keshin" && m.id === ws1.id);
+    check("選択: 化身を出すと選んだ番号で全員に配られる", on5?.on === true && on5.keshin === 2);
+    // 再接続: 同じ鍵・同じ選択なら番号と on を保つ。選び直した（再読み込みして別の化身）なら新しい番号が優先
+    const KEY90 = "selSession_0090";
+    const r1 = connect({ ...cfg90, session: KEY90, keshin: "3" }, "Re");
+    const wr1 = await r1.waitFor((m) => m.type === "welcome");
+    r1.send({ type: "keshin", on: true });
+    await s1.waitFor((m) => m.type === "keshin" && m.id === wr1.id);
+    const r2 = connect({ ...cfg90, session: KEY90, keshin: "3" }, "Re");
+    const wr2 = await r2.waitFor((m) => m.type === "welcome");
+    const me5 = wr2?.players.find((p) => p.id === wr2.id);
+    check("選択: 同じ鍵・同じ選択の再接続は番号（3）と on を保つ", me5?.keshin === 3 && me5.on === true, JSON.stringify(me5 && { keshin: me5.keshin, on: me5.on }));
+    const r3 = connect({ ...cfg90, session: KEY90, keshin: "1" }, "Re");
+    const wr3 = await r3.waitFor((m) => m.type === "welcome");
+    check("選択: 同じ鍵で選び直すと新しい番号（1）になる（引き継ぎより優先）", keshinOf(wr3) === 1, `keshin=${keshinOf(wr3)}`);
   }
 
   // タブの複製（同じ鍵の 2 つのタブが自動で再接続し合う）: 置き換えられた側は REPLACED を受けて再接続をやめ、奪い合いは 1 回で止まる
