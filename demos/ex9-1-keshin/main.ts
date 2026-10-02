@@ -720,7 +720,8 @@ function connect(name: string) {
         const shifted = now - changedAt;
         if (id === selfId) {
           if (pending && pending.on === on) pending = null;
-          flash = { text: on ? `化身 ${KESHIN_NAMES[keshin]}\n見上げると見えます` : "化身を戻しました", untilMs: recv + 2500 };
+          const label = keshin === 0 ? KESHIN_NAMES[keshin] : `化身 ${KESHIN_NAMES[keshin]}`;
+          flash = { text: on ? `${label}\n見上げると見えます` : keshin === 0 ? `${label}を戻しました` : "化身を戻しました", untilMs: recv + 2500 };
         }
         logEvent(on ? "keshin-on" : "keshin-off", `${id}${id === selfId ? "(me)" : ""} keshin=${keshin}${shifted > 1 ? ` shifted=${shifted.toFixed(0)}ms` : ""}`);
       },
@@ -763,7 +764,7 @@ function updateButton(now: number) {
   const key = `${name}|${state}|${on}|${!!pending}|${!!me}`;
   if (key === lastButtonKey) return;
   lastButtonKey = key;
-  keshinButtonTitle.textContent = me ? `化身: ${name}` : "化身";
+  keshinButtonTitle.textContent = me ? (me.info.keshin === 0 ? name : `化身: ${name}`) : "化身";
   keshinButtonState.textContent = state;
   keshinButton.disabled = !me || netStatus.startsWith("error");
   keshinButton.classList.toggle("on", on && !pending);

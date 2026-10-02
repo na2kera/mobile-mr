@@ -16,7 +16,7 @@
 
 | 番号 | 化身 | モデル（`local-assets/keshin/`） | 決めポーズ | 腰の切断面（モデル座標） |
 | --- | --- | --- | --- | --- |
-| 0 | 魔神 ザ・ハンド | `majin_the_hand.glb` | `MTH_SummonPose` を最後まで再生して保持（口は召喚まで閉じ、決めポーズで叫ぶ） | 2.77m（腰の分割位置） |
+| 0 | マジン・ザ・ハンド | `majin_the_hand.glb` | `MTH_SummonPose` を最後まで再生して保持（口は召喚まで閉じ、決めポーズで叫ぶ） | 2.77m（腰の分割位置） |
 | 1 | 魔神ペガサスアーク | `majin_pegasus_arc.glb` | たたんだ翼から `PA_WingFold` を逆再生して翼を開く（開き切ったらオーラの帯 `PA_FX_Aura` を出す） | 2.35m（腰帯の上） |
 | 2 | 剣聖ランスロット | `kensei_lancelot.glb` | `KL_ArmTest` を再生して剣と盾を構える | 1.72m（腰装甲の下端。1 枚のマントもここで切る） |
 | 3 | 奏者マエストロ | `sousha_maestro.glb` | `MS_ArmTest` を再生して 4 本の腕を振る（レスト → 振る → レストの往復なので最後はレストに戻る）。指揮棒（`Baton`。extras の `default_visible` は false）は出す | 2.50m（胴の底。蓋がある） |

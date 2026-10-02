@@ -60,8 +60,8 @@ export type KeshinSpec = {
 export const KESHIN_SPECS: readonly KeshinSpec[] = [
   {
     index: 0,
-    name: "魔神 ザ・ハンド",
-    short: "魔神",
+    name: "マジン・ザ・ハンド",
+    short: "マジン・ザ・ハンド",
     file: "majin_the_hand.glb",
     rootName: "MTH_Root",
     cutY: 2.7701,
