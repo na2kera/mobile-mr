@@ -21,11 +21,13 @@ const CDP_PORT = 9363;
 const BASE = `https://localhost:${PORT}/demos/ex9-1-keshin/`;
 const ROOM = `look${Date.now() % 100000}`;
 const OUT_DIR = join(ROOT, "logs", "keshin-check");
-/** 人の距離 [m]（カメラ座標系の頭の z）。頭の高さはカメラより 0.3m 上（スタンドの iPad が胸の高さ） */
-const DISTANCES = [1.3, 2.5];
+/** 人の距離 [m]（カメラ座標系の頭の z）。頭の高さはカメラより 0.3m 上（スタンドの iPad が胸の高さ）。SWEEP_DISTANCES（JSON）で差し替えられる */
+const DISTANCES = process.env.SWEEP_DISTANCES ? JSON.parse(process.env.SWEEP_DISTANCES) : [1.3, 2.5];
 /** 設定（look=0 は段階 2 までの見え方。比較用） */
+// showBelowM / dissolveM を書かない行は化身ごとの既定（KESHIN_SPECS の below）。書くと全員を上書きする
 const SETTINGS = process.env.SWEEP_SETTINGS ? JSON.parse(process.env.SWEEP_SETTINGS) : [
   { key: "L0", label: "段階 2 まで（腰で切る・頭の高さ）", q: "look=0" },
+  { key: "D", label: "既定（切り口・溶けは化身ごと）", q: "" },
   { key: "L1", label: "腰 頭+0.3 / 間隔 0.4 / 溶け 0.4 / 流れ 0.06-0.25", q: "waistAboveHeadM=0.3&backClearM=0.4&dissolveM=0.4&streamR0=0.06&streamR1=0.25" },
   { key: "L2", label: "腰 頭+0.5 / 間隔 0.7 / 溶け 0.6 / 流れ 0.07-0.32", q: "waistAboveHeadM=0.5&backClearM=0.7&dissolveM=0.6&streamR0=0.07&streamR1=0.32" },
   { key: "L3", label: "腰 頭+0.7 / 間隔 1.0 / 溶け 0.8 / 流れ 0.08-0.4", q: "waistAboveHeadM=0.7&backClearM=1.0&dissolveM=0.8&streamR0=0.08&streamR1=0.4" },
@@ -158,6 +160,8 @@ try {
     });
     if (!ok) throw new Error(`${st.key}: 鏡が準備できない`);
     await page.eval("for (const s of ['#hud', '#mirror-message', '#fs-button']) { const e = document.querySelector(s); if (e) e.style.display = 'none'; }");
+    // SWEEP_NO_OCCLUSION=1: 人の形で隠す処理を切って撮る（人の後ろに隠れた化身の切り口を確かめる用）
+    if (process.env.SWEEP_NO_OCCLUSION) await page.eval("window.__keshinMirror.setOcclusionDisabled(true)");
     for (const pl of players.sort((a, b) => a.index - b.index)) {
       pl.keshin(true);
       for (const d of DISTANCES) {

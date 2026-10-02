@@ -24,6 +24,7 @@ import {
   keshinModelMatrix,
   keshinModelToWorld,
   keshinScale,
+  resolveKeshinBelow,
   lookUpDeg,
   markerFwdToWorldYaw,
   markerToWorld,
@@ -154,6 +155,22 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
   check("腰のクリッピング平面の高さ = 床 + cutY × scale（上向き）", near(cut0.point[1], 0.1 + 2.77 * 0.6) && near(cut0.normal[1], 1));
   check("せり上がり中もクリッピング平面は動かない", cut0.point.every((v, i) => near(v, cut1.point[i])) && cut0.normal.every((v, i) => near(v, cut1.normal[i])));
   check("せり上がり中はモデルが RISE_M 下にある", near(keshinModelToWorld(risen, [0, 4, 0])[1], keshinModelToWorld(base, [0, 4, 0])[1] - RISE_M));
+  // 段階 3 の C（他人用）: showBelow は切り口だけを支点から下げ、モデル行列（化身の位置）は変えない
+  const lookFrame = { ...base, waistAboveHead: 0.3 };
+  const lower = { ...lookFrame, showBelow: 0.6 };
+  const cutPivot = keshinCutPlane(lookFrame);
+  const cutLow = keshinCutPlane(lower);
+  check("showBelow: 支点は頭 + waistAboveHead（未指定と 0 は同じ）", near(cutPivot.point[1], 1.6 + 0.3) && keshinCutPlane({ ...lookFrame, showBelow: 0 }).point.every((v, i) => near(v, cutPivot.point[i])));
+  check("showBelow: 切り口は支点の showBelow 下（水平位置・法線は同じ）", near(cutLow.point[1], cutPivot.point[1] - 0.6) && near(cutLow.point[0], cutPivot.point[0]) && near(cutLow.point[2], cutPivot.point[2]) && cutLow.normal.every((v, i) => near(v, cutPivot.normal[i])));
+  check("showBelow: モデル行列は変わらない（体が下へ伸びるだけ）", keshinModelMatrix(lower).every((v, i) => near(v, keshinModelMatrix(lookFrame)[i])));
+  // 他人用の切り口の既定は化身ごと（KESHIN_SPECS の below）。URL で明示した値（null 以外）だけが全員を上書きする
+  const specBelow = { showM: 0.6, dissolveM: 0.4 };
+  const none = resolveKeshinBelow(specBelow, { showBelowM: null, dissolveM: null });
+  check("切り口の既定: URL 未指定なら化身ごとの値", none.showM === 0.6 && none.dissolveM === 0.4, JSON.stringify(none));
+  const both = resolveKeshinBelow(specBelow, { showBelowM: 0, dissolveM: 0.8 });
+  check("切り口の既定: URL で指定した値は上書き（0 も上書きになる）", both.showM === 0 && both.dissolveM === 0.8, JSON.stringify(both));
+  const one = resolveKeshinBelow(specBelow, { showBelowM: 0.2, dissolveM: null });
+  check("切り口の既定: 片方だけ指定ならもう片方は化身ごとの値", one.showM === 0.2 && one.dissolveM === 0.4, JSON.stringify(one));
   // 行列は剛体 × 一様スケール
   const m = keshinModelMatrix({ ...base, yaw: 0.4, leanDeg: 20 });
   const colLen = (c) => Math.hypot(m[c * 4], m[c * 4 + 1], m[c * 4 + 2]);
@@ -1087,6 +1104,16 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
       "KESHIN_SPECS（モデルの仕様）は KESHIN_COUNT / KESHIN_NAMES と同期している（index が並び順・名前が一致）",
       specs.length === KESHIN_COUNT && specs.every(([i, n], k) => i === k && n === KESHIN_NAMES[k]),
       JSON.stringify(specs),
+    );
+  }
+  {
+    // 他人用の切り口の既定（below）: 4 体ともあり、魔神は切り口を下げない（胴の底の蓋が出るため）・マエストロは下段の手が見える 0.6 以上
+    const src = readFileSync(new URL("../demos/ex9-1-keshin/keshin-assets.ts", import.meta.url), "utf8");
+    const below = [...src.matchAll(/^\s+below: \{ showM: ([\d.]+), dissolveM: ([\d.]+) \},/gm)].map((m) => [Number(m[1]), Number(m[2])]);
+    check(
+      "KESHIN_SPECS の below: 4 体ぶん・範囲内（0〜3）、魔神 0 / マエストロ 0.6 以上",
+      below.length === KESHIN_COUNT && below.every(([a, b]) => a >= 0 && a <= 3 && b >= 0 && b <= 3) && below[0][0] === 0 && below[3][0] >= 0.6,
+      JSON.stringify(below),
     );
   }
   check("割り当て: 1 人目 0・2 人目 1・3 人目 2・4 人目 3", assignKeshin([]) === 0 && assignKeshin([0]) === 1 && assignKeshin([0, 1]) === 2 && assignKeshin([0, 1, 2]) === 3);

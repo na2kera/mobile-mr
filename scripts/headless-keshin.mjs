@@ -830,7 +830,9 @@ try {
   // ================= 鏡モード（mirror.html）: iPad の前面カメラを鏡に。写った人（Pose）の背後にその人の化身 =================
   // 別の room で、スマホ 1 台（フェイク）と鏡（?fakeperson=1: 合成の人を映像に描き、Pose の代わりに同じ骨格と人の形のマスク）
   const ROOMM = `${ROOM}m`;
-  const pP = await newWindow("M-phone", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&occlude=0&room=${ROOMM}&remoteLog=0&name=P`);
+  // KESHIN_CHECK_MIRROR_KESHIN=0〜3: 鏡の確認に使う化身を選ぶ（既定は参加順 = 魔神。化身ごとの切り口の既定を別の化身で確かめる用）
+  const mirrorPick = process.env.KESHIN_CHECK_MIRROR_KESHIN ? `&keshin=${process.env.KESHIN_CHECK_MIRROR_KESHIN}` : "";
+  const pP = await newWindow("M-phone", `${BASE}?fov=70&camZoom=1&fakecam=1&autostart=1&occlude=0&room=${ROOMM}&remoteLog=0&name=P${mirrorPick}`);
   const sP = await waitUntil(async () => {
     const st = await phoneState(pP);
     return { ok: st && st.me, st };

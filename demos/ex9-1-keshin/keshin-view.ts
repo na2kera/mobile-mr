@@ -5,13 +5,13 @@
 // group は親（シーン or マーカー座標系のアンカー）の座標で置く。head / yaw も親の座標系で渡す
 import * as THREE from "three";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
-import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack, MODEL_HEIGHT_M } from "./keshin-math";
+import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, resolveKeshinBelow, selfAutoBack, MODEL_HEIGHT_M } from "./keshin-math";
 import { AURA_SUSTAIN } from "../../src/shared/keshin-timeline";
 import { createDissolveUniforms } from "./keshin-assets";
 import type { DissolveUniforms } from "./keshin-assets";
 import { BackStream } from "./keshin-stream";
 import type { KeshinLook } from "./keshin-look";
-import type { KeshinFrameInput, V3 } from "./keshin-math";
+import type { KeshinBelow, KeshinFrameInput, V3 } from "./keshin-math";
 import { createKeshinInstance, fallbackKeshin } from "./keshin-assets";
 import type { KeshinInstance, KeshinSpec, LoadedKeshin } from "./keshin-assets";
 import { WorldAura } from "./keshin-aura";
@@ -102,6 +102,8 @@ export class KeshinView {
   private readonly maskBinding: MaskBinding | null;
   /** 段階 3 の C（他人用だけ）: 見え方の設定・腰を溶かす uniform・背中からの光の流れ */
   private readonly look: KeshinLook | null;
+  /** 他人用の切り口の下げ幅・溶ける長さ（化身ごとの既定 + URL の上書き）。自分用は null */
+  readonly below: KeshinBelow | null;
   private readonly dissolve: DissolveUniforms | null;
   readonly stream: BackStream | null;
 
@@ -111,7 +113,8 @@ export class KeshinView {
     // 主観の見え方（前傾・前後）は確認用に後から変えられるよう、自分の写しを持つ
     this.opts = { ...opts };
     this.look = opts.mode === "other" ? (opts.look ?? null) : null;
-    this.dissolve = this.look && this.look.dissolveM > 0 ? createDissolveUniforms(this.look.dissolveM) : null;
+    this.below = this.look ? resolveKeshinBelow(spec.below, this.look) : null;
+    this.dissolve = this.below && this.below.dissolveM > 0 ? createDissolveUniforms(this.below.dissolveM) : null;
     this.stream = this.look && this.look.streamK > 0 ? new BackStream(spec.auraColors, this.look.streamN, this.maskBinding) : null;
     this.loaded = loaded ?? fallbackKeshin(spec);
     this.instance = this.createInstance(this.loaded);
@@ -296,6 +299,8 @@ export class KeshinView {
       riseM: visual.riseM,
       leanDeg: this.opts.mode === "self" ? this.opts.leanDeg : 0,
       waistAboveHead: this.look ? this.look.waistAboveHeadM : undefined,
+      // 他人用だけ: 切り口を支点より下げて体を下まで見せる（主観は支点で切ったまま）
+      showBelow: this.below ? this.below.showM : undefined,
     };
     const eyeH = u.eyeH ?? this.opts.eyeH;
     this.lastFrame = frame;
@@ -347,7 +352,8 @@ export class KeshinView {
         su.uViewportH.value = u.viewportH;
         tmpBackDir.set(-Math.sin(u.yaw), 0, -Math.cos(u.yaw));
         tmpBack.set(u.head[0], u.head[1] - 0.35, u.head[2]).addScaledVector(tmpBackDir, 0.12);
-        const cut = keshinCutPlane(frame);
+        // 流れの終点は腰の支点（切り口を下げても支点のまま。溶けた体の中へ流れ込む）
+        const cut = keshinCutPlane({ ...frame, showBelow: 0 });
         tmpWaist.set(cut.point[0], cut.point[1], cut.point[2]);
         this.stream.setCurve(tmpBack, tmpWaist, tmpBackDir);
       }

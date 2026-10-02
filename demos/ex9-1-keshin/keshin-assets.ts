@@ -13,6 +13,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { KeshinIndex } from "../../src/shared/keshin-protocol";
 import { MODEL_HEIGHT_M } from "./keshin-math";
+import type { KeshinBelow } from "./keshin-math";
 import { MASK_HEAD_GLSL } from "./keshin-occlusion";
 import type { MaskBinding } from "./keshin-occlusion";
 
@@ -45,6 +46,14 @@ export type KeshinSpec = {
    */
   self: { leanDeg: number; faceAheadM: number; backM: number | null };
   /**
+   * 他人用（段階 3 の C）の腰の切り口の既定。URL の ?showBelowM= / ?dissolveM= を指定したときはそちらで全員を上書きする。
+   *   showM: 切り口を腰の支点（頭 + waistAboveHeadM）より下げて体を見せる長さ [m]（ワールド。化身の位置は変えない）
+   *   dissolveM: 切り口から上のこの長さ [m] を下へ行くほど透明にする
+   * 胴の底の作りがモデルごとに違う（cutY で蓋をして終わる胴は、showM ≥ dissolveM だと蓋が溶けずに平らな切り口として出る）ので化身ごと。
+   * 値は look-sweep.png（scripts/sweep-keshin-look.mjs）と check:keshin の mirror-look.png を見て決めた
+   */
+  below: KeshinBelow;
+  /**
    * extras（userData）の default_visible が false でも表示するノード名。default_visible が false のノードは読み込み後に隠し、
    * ここに名前があるものだけ出す（マエストロの指揮棒 Baton。glTF には表示の概念が無いので読み込んだままだと見えてしまう）
    */
@@ -56,6 +65,7 @@ export type KeshinSpec = {
  * ペガサスは腰帯の上 2.35m（「胸から上だけにしたい場合は 2.35」）、ランスロットは腰装甲の下端付近 1.72m
  * （マントが 1 枚なので下半身を隠しても腰より下が残る。README の setClipBelow(knight, 1.72)）、
  * マエストロは胴の底 2.50m（README 6 章: UpperBody の胴は Z 2.50 で底を閉じた立体。setClipBelow(THREE, root, 2.5)）
+ * 他人用の切り口の下げ幅・溶ける長さ（below）は各化身のコメントの理由で化身ごとに決めた（README の見え方 C の表）
  */
 export const KESHIN_SPECS: readonly KeshinSpec[] = [
   {
@@ -72,6 +82,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 確定（self-sweep.png の S5）: 前へ大きく出して 50° 倒す。見上げ 45〜60° で頭と広げた腕の輪郭が入り、目の近くで消える頂点 2%。
     // 35° / +0.25（S1）は兜の裏と細い腕しか見えなかった
     self: { leanDeg: 50, faceAheadM: 1.0, backM: null },
+    // 胴（MTH_UpperBody）は腰の分割位置 2.77 で蓋をして終わり、その下は炎のマントだけ。切り口を下げると胴の底の蓋が溶けずに
+    // 頭のすぐ上へ平らに出た（check:keshin の mirror-look.png）ので、切り口は腰のまま・腰から上 0.6m を溶かす（従来どおり）
+    below: { showM: 0, dissolveM: 0.6 },
   },
   {
     index: 1,
@@ -86,6 +99,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     selfHideFx: true,
     // 確定（S4）: 35° のまま頭を 0.7m 前へ。見上げ 45〜60° で翼・髪・肩が入り、消える頂点 12%（S1 は髪の房の裏が重なり 43% 消えていた）
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
+    // 胴（PA_UpperBody）の底は 2.0 前後（cutY 2.35 の 0.35 下）で蓋をして終わる。人の形で隠す処理を切って撮ると、0.6 / 溶け 0.4 は
+    // 1.3m で胴の底の楕円の蓋がはっきり出て、0.4 でも縁が残った。0.3 なら蓋は溶けて籠手（腕当て）が下まで見える
+    below: { showM: 0.3, dissolveM: 0.4 },
   },
   {
     index: 2,
@@ -101,6 +117,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 確定（S4）: 見上げ 45° で兜・角・肩当て・胸当てが入り、消える頂点 14%。S1（35° / +0.25）は兜・肩当て・胸が読めるが
     // 頂点の 45% が目の近くで消えていた
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
+    // 腰装甲（草摺り）の下端は尖った形で、その下はマント（下端 0.35）と盾・剣。0.6 / 溶け 0.4 で草摺りの先まで見え、
+    // 人の形で隠す処理を切っても平らな切り口は出なかった（1.3m・3.2m）
+    below: { showM: 0.6, dissolveM: 0.4 },
   },
   {
     index: 3,
@@ -122,6 +141,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 確定（2026-10-01 の self-sweep.png の S4）: 見上げ 45° で髪・肩飾り・立ち襟・上段の腕が入り、消える頂点 4%、視界の中心を 85%（60° で 51%）覆う。
     // S1（35° / +0.25）は頂点の 51% が消え、S5（50° / +1.0）は 60° 以上で画素が 1/2〜1/20 に減った
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
+    // 下段の手（指先 ≈ 2.05）と前布（下端 2.25）が cutY 2.5 より下にある。look-sweep.png で 0.6 / 溶け 0.4 なら下段の手 2 本と前布が読めた
+    // （0.8 は 0.6 と同じ: 2.05 より下に頂点が無い）。胴の底の蓋（2.50）は前布が覆うので切り口に見えない
+    below: { showM: 0.6, dissolveM: 0.4 },
     // 指揮棒（README 7 章: 上段の右手のボーン HandUp.R の子の剛体。extras の default_visible は false）を出す
     showNodes: ["Baton"],
   },
