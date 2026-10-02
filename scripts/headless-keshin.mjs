@@ -455,6 +455,33 @@ try {
     }, 20000);
     check("選ぶ画面: ?autostart=1&keshin=2 は選ぶ画面を飛ばして化身 2 で入室する", picked4?.ok && picked4.s.keshin === 2, `keshin=${picked4?.s?.keshin}`);
   }
+
+  // ---- iPhone で Fullscreen API がオフのときの案内（issue #91）----
+  // iPhone の UA にし、オフの端末は requestFullscreen 自体が無いのでそれを消して模擬する。開始はしない（入室しない）
+  const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7 Mobile/15E148 Safari/604.1";
+  const openIphone = async (name, fullscreenApi) => {
+    const created = await browser.send("Target.createTarget", { url: "about:blank", newWindow: true });
+    const page = await openPage((await cdpJson("/json")).find((x) => x.id === created.result.targetId), name);
+    pages.push(page);
+    await page.send("Emulation.setUserAgentOverride", { userAgent: IPHONE_UA });
+    if (!fullscreenApi) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: "delete Element.prototype.requestFullscreen;" });
+    await page.send("Page.navigate", { url: `${BASE}?room=${ROOM}guide&remoteLog=0` });
+    await waitUntil(async () => ({ ok: await page.eval("document.readyState === 'complete' && !!document.querySelector('#fs-guide-close')") }));
+    await sleep(500);
+    return page;
+  };
+  const guideShown = (p) => p.eval("getComputedStyle(document.querySelector('#fs-guide')).display !== 'none'");
+  const pOff = await openIphone("iphone-fs-off", false);
+  check("全画面の案内: iPhone で Fullscreen API が無いと起動時に出る", (await guideShown(pOff)) === true);
+  await pOff.shot("fs-guide.png");
+  await pOff.eval("document.querySelector('#fs-guide-close').click()");
+  check(
+    "全画面の案内: 「このまま続ける」で閉じ、開始画面に戻る（全画面風のまま続行できる）",
+    (await guideShown(pOff)) === false && (await pOff.eval("getComputedStyle(document.querySelector('#start-overlay')).display !== 'none'")) === true,
+  );
+  const pOn = await openIphone("iphone-fs-on", true);
+  check("全画面の案内: iPhone でも Fullscreen API があれば出ない", (await guideShown(pOn)) === false);
+  check("全画面の案内: iPhone 以外（PC）では出ない", (await guideShown(p1)) === false);
   // ---- 6. 例外・実機ログ ----
   await sleep(1500);
   const exceptions = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));

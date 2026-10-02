@@ -1044,6 +1044,19 @@ const tryEnterFullscreen = setupFullscreen({
   isStarted: () => document.body.classList.contains("started"),
 });
 
+// iPhone の Safari は Fullscreen API が機能フラグ扱いで、オフだと requestFullscreen 自体が無い
+// （iPad は既定で使える）。Web から設定アプリの該当ページは開けないので、起動時に手順を見せる。
+// 閉じたら従来どおり 100dvh の全画面風のまま続行する（issue #91）
+const fsGuide = document.querySelector<HTMLDivElement>("#fs-guide")!;
+if (/iPhone/.test(navigator.userAgent) && !document.documentElement.requestFullscreen) {
+  fsGuide.hidden = false;
+  hudState.fsResult = "unsupported (guide)";
+  logEvent("fullscreen", "unsupported: 案内を表示");
+}
+document.querySelector<HTMLButtonElement>("#fs-guide-close")!.addEventListener("click", () => {
+  fsGuide.hidden = true;
+});
+
 const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 const nameForm = document.querySelector<HTMLFormElement>("#name-form")!;
 const roomError = document.querySelector<HTMLParagraphElement>("#room-error")!;

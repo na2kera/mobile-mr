@@ -166,6 +166,51 @@
       #room-error[hidden] {
         display: none;
       }
+      /* iPhone で Fullscreen API がオフのときに起動時に出す案内（issue #91）。
+         Web から設定アプリは開けないので手順を見せるだけ。閉じると全画面風（100dvh）のまま続行する */
+      #fs-guide {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #14161a;
+        text-align: center;
+        padding: 24px;
+        box-sizing: border-box;
+        z-index: 11;
+        overflow-y: auto;
+      }
+      #fs-guide[hidden] {
+        display: none;
+      }
+      #fs-guide h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #fs-guide p,
+      #fs-guide ol {
+        margin: 0;
+        color: #9aa0a6;
+        font-size: 0.85rem;
+        max-width: 32em;
+      }
+      #fs-guide ol {
+        text-align: left;
+        padding-left: 1.5em;
+        color: #e8eaed;
+      }
+      #fs-guide-close {
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: 14px 48px;
+        border-radius: 999px;
+        border: none;
+        background: #8ab4f8;
+        color: #14161a;
+      }
       /* 開始後、縦向きのときだけ表示する案内 */
       #rotate-hint {
         display: none;
@@ -312,6 +357,21 @@
       </p>
       <p>モデルは dev サーバーでだけ読み込めます（npm run fetch:keshin）。無いときは代わりの人型で演出を確認できます。</p>
       <a href="/">← デモ一覧へ戻る</a>
+    </div>
+    <div id="fs-guide" role="dialog" aria-labelledby="fs-guide-title" hidden>
+      <h1 id="fs-guide-title">全画面表示をオンにしてください</h1>
+      <p>
+        この iPhone では Safari の全画面表示（Fullscreen API）がオフになっています。
+        オンにするとアドレスバーが消えて、ゴーグルで見やすくなります。
+      </p>
+      <ol>
+        <li>「設定」アプリを開く</li>
+        <li>「アプリ」→「Safari」→「詳細」→「機能フラグ」</li>
+        <li>「Fullscreen API」をオンにする</li>
+        <li>Safari に戻り、このページを再読み込みする</li>
+      </ol>
+      <button id="fs-guide-close" type="button">このまま続ける</button>
+      <p>オフのままでも遊べます（アドレスバーが残ります）。</p>
     </div>
     <div id="rotate-hint">スマホを横向きにしてください</div>
     <button id="keshin-button" type="button" disabled>
