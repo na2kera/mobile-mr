@@ -150,7 +150,23 @@ export type KeshinFrameInput = {
    * 本人の頭・肩に化身の体が被らないように、化身を頭の上・後ろに浮かせる
    */
   waistAboveHead?: number;
+  /**
+   * 他人用: 腰の支点より下へこれだけ [m]（ワールド）化身の体を見せる。クリッピング平面（と溶ける範囲の下端）を支点から下げるだけで、
+   * モデル行列（化身の位置・頭の高さ）は変えない。未指定・0 なら支点で切る
+   */
+  showBelow?: number;
 };
+
+/**
+ * 段階 3 の C（他人用）: 腰の切り口をどれだけ下げて体を見せるか（showM）と、切り口から上をどれだけ溶かすか（dissolveM）[m]。
+ * 化身ごとの既定は KESHIN_SPECS の below（胴の底の作りがモデルごとに違うため）
+ */
+export type KeshinBelow = { showM: number; dissolveM: number };
+
+/** 化身ごとの既定に、URL で明示された値（null = 指定なし）だけを上書きする */
+export function resolveKeshinBelow(spec: KeshinBelow, override: { showBelowM: number | null; dissolveM: number | null }): KeshinBelow {
+  return { showM: override.showBelowM ?? spec.showM, dissolveM: override.dissolveM ?? spec.dissolveM };
+}
 
 function translation(x: number, y: number, z: number): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
@@ -193,11 +209,15 @@ export function keshinModelMatrix(p: KeshinFrameInput): number[] {
   return mulMat4(mulMat4(pivotMatrix(p), translation(0, -cutW + p.riseM, 0)), scaling(p.scale));
 }
 
-/** 腰のクリッピング平面（ワールド）。normal の側（上）を残す。前傾すると平面も一緒に傾く */
+/**
+ * 腰のクリッピング平面（ワールド）。normal の側（上）を残す。前傾すると平面も一緒に傾く。
+ * showBelow があれば支点より下（支点座標系で [0, −showBelow, 0]）へずらす（体を下まで見せる）
+ */
 export function keshinCutPlane(p: KeshinFrameInput): { point: V3; normal: V3 } {
   const m = pivotMatrix(p);
-  const point = transformPoint(m, [0, 0, 0]);
-  const up = transformPoint(m, [0, 1, 0]);
+  const below = p.showBelow ?? 0;
+  const point = transformPoint(m, [0, -below, 0]);
+  const up = transformPoint(m, [0, 1 - below, 0]);
   return { point, normal: [up[0] - point[0], up[1] - point[1], up[2] - point[2]] };
 }
 
