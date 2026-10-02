@@ -60,8 +60,8 @@ export type KeshinSpec = {
 export const KESHIN_SPECS: readonly KeshinSpec[] = [
   {
     index: 0,
-    name: "魔神 ザ・ハンド",
-    short: "魔神",
+    name: "マジン・ザ・ハンド",
+    short: "マジン・ザ・ハンド",
     file: "majin_the_hand.glb",
     rootName: "MTH_Root",
     cutY: 2.7701,
@@ -234,7 +234,9 @@ export function createKeshinInstance(
     : null;
 
   // 深度だけ書く複製のマテリアル（インスタンスで 1 つ。スキン・モーフはオブジェクト側の属性で自動）
-  const depthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false });
+  // transparent にするのは描く順のため（色は書かない）: 背後の炎（keshin-flame.ts。renderOrder −2）→ この深度（−1）→ 体の色（0）。
+  // 不透明のままだと不透明の段で炎より先に深度が書かれ、化身がまだ薄い出現・消去の途中に、化身の形に炎が抜けて背景が見える
+  const depthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, transparent: true });
   depthMaterial.clippingPlanes = [plane];
   if (nearUniforms || mask || dissolve) addKeshinShader(depthMaterial, nearUniforms, mask, "depth", dissolve);
 
@@ -279,7 +281,7 @@ export function createKeshinInstance(
     depth.scale.set(1, 1, 1);
     depth.frustumCulled = false;
     if (mesh.morphTargetInfluences) depth.morphTargetInfluences = mesh.morphTargetInfluences;
-    // 深度を先に書く（同じ距離の半透明より前に描かれるよう不透明のまま。renderOrder も念のため下げる）
+    // 深度を体の色より先に書く（半透明の段の中で renderOrder を下げて先に描く。炎はさらに前の −2）
     depth.renderOrder = -1;
     mesh.add(depth);
   }

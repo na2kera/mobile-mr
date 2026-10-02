@@ -1,11 +1,11 @@
-// 化身 1 体の描画部品（モデル + 足元のオーラの柱 + 腰の渦）。「自分用（主観）」と「他人用（俯瞰画面・段階 2 の相手）」の両方で使う。
+// 化身 1 体の描画部品（モデル + 背後の炎 + 足元の柱 + 腰の渦）。「自分用（主観）」と「他人用（俯瞰画面・段階 2 の相手）」の両方で使う。
 //   - 自分用: 腰の切断面を支点に前傾（?selfLean=）し、目から ?nearFade= m 以内を消す。見上げフェードは呼び出し側が fade で渡す
 //   - 他人用: 前傾なし。受信側の「信用できるか」による薄さは呼び出し側が fade で渡す
 // 配置の数学は keshin-math.ts（純粋関数・テスト済み）のモデル行列とクリッピング平面をそのまま使う。
 // group は親（シーン or マーカー座標系のアンカー）の座標で置く。head / yaw も親の座標系で渡す
 import * as THREE from "three";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
-import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack } from "./keshin-math";
+import { autoBack, keshinCutPlane, keshinModelMatrix, keshinScale, selfAutoBack, MODEL_HEIGHT_M } from "./keshin-math";
 import { AURA_SUSTAIN } from "../../src/shared/keshin-timeline";
 import { createDissolveUniforms } from "./keshin-assets";
 import type { DissolveUniforms } from "./keshin-assets";
@@ -72,6 +72,9 @@ const tmpBackDir = new THREE.Vector3();
 const tmpBack = new THREE.Vector3();
 const tmpWaist = new THREE.Vector3();
 
+/** 主観の炎の半径 [m]（足元の柱 0.45 より少し太いだけ。目から肩の縁まで 0.6m 前後・正面から 29° 下） */
+const SELF_FLAME_R = 0.55;
+
 export class KeshinView {
   readonly group = new THREE.Group();
   readonly spec: KeshinSpec;
@@ -117,6 +120,10 @@ export class KeshinView {
       this.aura.uniforms.uNear.value.set(0.2, 0.45);
       this.aura.uniforms.uSwirlK.value = 0;
       this.aura.uniforms.uColumnMaxH.value = opts.eyeH - 0.3;
+      // 炎も肩までで切れる（下を見たときだけ見える）。自分の体と床を塞がないよう薄くし、粒は炎を足す前の明るさのままにする
+      this.aura.uniforms.uFlameK.value = 0.5;
+      this.aura.uniforms.uInsideFade.value = 0;
+      this.aura.uniforms.uParticleK.value = 1;
     }
     this.group.add(this.holder, this.aura.points);
     if (this.stream) {
@@ -308,6 +315,10 @@ export class KeshinView {
       au.uColumnH.value = this.look ? Math.max(0.3, eyeH - 0.35) : cutH;
       au.uColumnK.value = this.look ? this.look.footAuraK : 1;
       au.uColumnR.value = 0.45;
+      // 炎は化身の頭上を越えて吹き上がる（頂部の 3 割ほどは炎の舌にちぎれる）。太さは腕や翼を広げた化身が収まる幅
+      au.uFlameH.value = (cutH + (MODEL_HEIGHT_M - this.loaded.spec.cutY) * scale) * 1.3;
+      // 主観は体に沿う細い柱のまま（太くすると、正面を向いたとき肩の高さの縁が視界の中心に入る。check:keshin の「各眼の中心 50% はほぼ空」）
+      au.uFlameR.value = this.opts.mode === "self" ? SELF_FLAME_R : Math.max(1.0, scale * 2.3);
       au.uSwirlC.value.set(0, cutH, -back);
       au.uSwirlR.value = 0.55 * scale * 1.6;
       au.uViewportH.value = u.viewportH;

@@ -33,10 +33,10 @@ export const MAX_PLAYERS = 8;
 /** 俯瞰画面（PC）の上限（運営 + 予備） */
 export const MAX_OVERVIEWS = 2;
 
-/** 化身の種類の数（0: 魔神 ザ・ハンド / 1: 魔神ペガサスアーク / 2: 剣聖ランスロット / 3: 奏者マエストロ） */
+/** 化身の種類の数（0: マジン・ザ・ハンド / 1: 魔神ペガサスアーク / 2: 剣聖ランスロット / 3: 奏者マエストロ） */
 export const KESHIN_COUNT = 4;
 export type KeshinIndex = 0 | 1 | 2 | 3;
-export const KESHIN_NAMES = ["魔神 ザ・ハンド", "魔神ペガサスアーク", "剣聖ランスロット", "奏者マエストロ"] as const;
+export const KESHIN_NAMES = ["マジン・ザ・ハンド", "魔神ペガサスアーク", "剣聖ランスロット", "奏者マエストロ"] as const;
 
 export type V3 = [number, number, number];
 export type Quat = [number, number, number, number];

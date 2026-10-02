@@ -415,7 +415,7 @@ try {
     const labels = await pk.eval("[...document.querySelectorAll('#keshin-options .keshin-option')].map((b) => b.dataset.keshin + ':' + b.textContent)");
     check(
       "選ぶ画面: 名前を決めると 4 体 + おまかせが出て、まだ開始しない（名前の入力は隠れる）",
-      (await pk.eval(shown("#keshin-choice"))) && !(await pk.eval(shown("#name-form"))) && !(await pk.eval("document.body.classList.contains('started')")) && JSON.stringify(labels) === JSON.stringify(["0:魔神 ザ・ハンド", "1:魔神ペガサスアーク", "2:剣聖ランスロット", "3:奏者マエストロ", "auto:おまかせ（参加順に割り当て）"]),
+      (await pk.eval(shown("#keshin-choice"))) && !(await pk.eval(shown("#name-form"))) && !(await pk.eval("document.body.classList.contains('started')")) && JSON.stringify(labels) === JSON.stringify(["0:マジン・ザ・ハンド", "1:魔神ペガサスアーク", "2:剣聖ランスロット", "3:奏者マエストロ", "auto:おまかせ（参加順に割り当て）"]),
       JSON.stringify(labels),
     );
     const fits = await pk.eval("(() => { const r = document.querySelector('#keshin-choice').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth; })()");
@@ -1284,6 +1284,60 @@ try {
   }
 
   }
+  // 炎だけを小さな専用シーンで描く（粒が描けただけで成功と誤認しない）。GPU の出力画素で確認する。
+  // uFlameH / uFlameR は WorldAura の既定値（3.5 / 0.8）のまま（keshin-view.ts の式はここでは検査しない）
+  const flame = await pM.eval(`(async () => {
+    // ページ本体と同じ three を使う（別の経路で読むと three が 2 つになり、instanceof や内部のキャッシュが食い違う）。
+    // Vite が keshin-aura.ts の import を書き換えた先（事前バンドルの URL）をそのまま読む
+    const auraSrc = await (await fetch('/demos/ex9-1-keshin/keshin-aura.ts')).text();
+    // （この文字列はテンプレートリテラルの中なので、バックスラッシュを使う正規表現は書かない）
+    const threeUrl = auraSrc.split(/["']/).find((x) => x.includes('/deps/three.js'));
+    if (!threeUrl) throw new Error('keshin-aura.ts の three の読み込み先が分からない');
+    const THREE = await import(threeUrl);
+    const { WorldAura } = await import('/demos/ex9-1-keshin/keshin-aura.ts');
+    const { keshinTimeline } = await import('/src/shared/keshin-timeline.ts');
+    const renderer = new THREE.WebGLRenderer({ alpha: true, preserveDrawingBuffer: true });
+    renderer.setSize(256, 320);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 256 / 320, 0.1, 20);
+    camera.position.set(0, 1.8, 6);
+    camera.lookAt(0, 1.8, 0);
+    const aura = new WorldAura(1, [0x6a5cff, 0xff2a48]);
+    aura.points.geometry.setDrawRange(0, 0);
+    aura.uniforms.uSwirlC.value.set(0, 1.5, -0.5);
+    scene.add(aura.points);
+    const draw = (elapsed, time, cap = 10000, mode = 'appear') => {
+      const v = keshinTimeline(elapsed, mode);
+      aura.uniforms.uAuraK.value = v.auraK;
+      aura.uniforms.uPillarK.value = v.pillarK;
+      aura.uniforms.uBurstK.value = v.burstK;
+      aura.uniforms.uTime.value = time;
+      aura.uniforms.uColumnMaxH.value = cap;
+      renderer.render(scene, camera);
+      const pixels = new Uint8Array(256 * 320 * 4);
+      const gl = renderer.getContext();
+      gl.readPixels(0, 0, 256, 320, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return pixels;
+    };
+    const count = (p) => p.reduce((n, v, i) => n + (i % 4 === 3 && v > 8 ? 1 : 0), 0);
+    try {
+      const off = count(draw(0, 0));
+      const rising = count(draw(0.15, 2));
+      const full = draw(1.5, 2);
+      const moving = draw(1.5, 2.4);
+      let changed = 0;
+      for (let i = 0; i < full.length; i += 4)
+        if (Math.abs(full[i] - moving[i]) + Math.abs(full[i + 1] - moving[i + 1]) + Math.abs(full[i + 2] - moving[i + 2]) > 15) changed++;
+      const capped = count(draw(1.5, 2, 1.2));
+      const vanished = count(draw(1, 2, 10000, 'vanish'));
+      aura.points.children[0].visible = false;
+      const disabled = count(draw(1.5, 2));
+      return { off, rising, full: count(full), changed, capped, vanished, disabled };
+    } finally { aura.dispose(); renderer.dispose(); }
+  })()`);
+  check("炎: 粒なしでも炎が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
+  check("炎: 出現完了後も時刻に合わせて揺らめく", flame.changed > flame.full * 0.1, `changed=${flame.changed} full=${flame.full}`);
+  check("炎: 主観の肩の高さの制限で上部が消える・炎非表示なら画素が残らない", flame.capped > 0 && flame.capped < flame.full * 0.5 && flame.disabled === 0, `capped=${flame.capped} disabled=${flame.disabled}`);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));
   check("段階 2: 例外が出ていない", ex2.length === 0, ex2.slice(0, 3).join(" | "));
   const shader2 = pages.flatMap((p) => p.logs.filter((l) => /Shader Error|WebGLProgram|THREE\.WebGLRenderer/.test(l)).map((l) => `${p.name}: ${l.slice(0, 200)}`));
