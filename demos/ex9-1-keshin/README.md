@@ -21,7 +21,8 @@
 | 2 | 剣聖ランスロット | `kensei_lancelot.glb` | `KL_ArmTest` を再生して剣と盾を構える | 1.72m（腰装甲の下端。1 枚のマントもここで切る） |
 | 3 | 奏者マエストロ | `sousha_maestro.glb` | `MS_ArmTest` を再生して 4 本の腕を振る（レスト → 振る → レストの往復なので最後はレストに戻る）。指揮棒（`Baton`。extras の `default_visible` は false）は出す | 2.50m（胴の底。蓋がある） |
 
-- 割り当ては参加順。サーバーが「今いるプレイヤーの中で使われている数が最も少ない番号のうち最小」を割り当てる（最初の 4 人は必ず別々）。
+- 開始画面で名前を決めると次の画面で化身を選べる（issue #90。4 体 + おまかせ。ほかの人と同じ化身も選べる）。選んだ番号は WS の URL の `?keshin=0..3` でサーバーへ渡し、再接続でも同じ番号を送る。`?autostart=1`（確認用）は選ぶ画面を飛ばし、ページの URL の `?keshin=0..3` を使う（無ければおまかせ）。
+- おまかせの割り当ては参加順。サーバーが「今いるプレイヤーの中で使われている数が最も少ない番号のうち最小」を割り当てる（全員がおまかせなら最初の 4 人は必ず別々）。
 - モデルの扱い（半透明・下半身の隠し方・クリッピング・スキンのカリング無効化・アニメの時刻）は各モデルの README（`/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus,Maestro-Opus}/README.md`）に従う。マエストロは根ノードが `SoushaMaestro`、子ノードに接頭辞が無い（`LowerBody` / `Baton` など）。
 
 ## モデルの置き方（公開リポジトリには入れない）
@@ -37,6 +38,7 @@ npm run dev               # dev サーバーだけが /local-assets/keshin/*.glb
 
 1. 08 の[マーカー印刷ページ](../08-splatoon/markers.html)（既定 150mm、ID 0）を印刷して壁に貼る。
 2. スマホで `https://<Mac のホスト名>.local:5173/demos/ex9-1-keshin/` を開き、名前を入れて開始（センサー・カメラ許可 → 全画面）。まず壁のマーカーを見る。
+   - iPhone で Safari の Fullscreen API がオフ（`requestFullscreen` が無い）だと、起動時にオンにする手順（設定 → アプリ → Safari → 詳細 → 機能フラグ → Fullscreen API）の案内が出る。Web から設定アプリは開けないので手順を見せるだけ。「このまま続ける」で閉じれば、アドレスバーが残る全画面風のまま遊べる（issue #91。PC 確認済み・**実機未確認**）。
 3. PC の Chrome で `https://localhost:5173/demos/ex9-1-keshin/overview.html` を開く（同じ room。既定 `demo`）。
 4. スマホの画面下の **「化身」ボタン**（ゴーグルから一度外して押す。PC では `K` キーでも可）→ サーバーが確定した時点で全員の画面で演出が始まる。
    - 0〜0.4s: 足元〜腰の高さに光の粒とオーラの柱が吹き上がる

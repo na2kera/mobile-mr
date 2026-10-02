@@ -78,6 +78,8 @@ export function connectKeshin(
   role: ClientRole = "player",
   /** 再接続の鍵の種類（sessionStorage のキー。既定は役割名。鏡モードは "mirror"） */
   sessionKind: string = role,
+  /** 入室のときに選んだ化身（プレイヤーだけ。null = おまかせ = サーバーが参加順に割り当てる） */
+  keshin: KeshinIndex | null = null,
 ): KeshinClient {
   const query = new URLSearchParams({
     room,
@@ -88,6 +90,7 @@ export function connectKeshin(
     session: sessionKey(sessionKind),
   });
   if (name) query.set("name", name);
+  if (keshin !== null) query.set("keshin", String(keshin));
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${KESHIN_PATH}?${query}`;
   let ws: WebSocket | null = null;
   let disposed = false;
