@@ -73,7 +73,7 @@ export type KeshinPlayer = {
   name: string;
   /** 1..MAX_PLAYERS（09 と同じ参加順の色） */
   color: number;
-  /** 化身の番号（参加順にサーバーが割り当てる。assignKeshin） */
+  /** 化身の番号（入室のときに本人が選んだ番号。「おまかせ」ならサーバーが参加順に割り当てる。assignKeshin） */
   keshin: KeshinIndex;
   /** 化身が出ているか（サーバーが確定した状態） */
   on: boolean;
@@ -111,8 +111,18 @@ export type ServerMessage =
 export type KeshinRoomConfig = SpaceConfig;
 
 /**
- * 化身の割り当て: 今いるプレイヤーの中で使われている数が最も少ない番号のうち最小。
- * 最初の 4 人は必ず別々になり、抜けた人の番号は次の人に回る
+ * 入室のときに本人が選んだ化身（WS の URL の ?keshin=0..3。ページの URL の ?keshin= も同じ読み方）。
+ * 無し・範囲外・整数でないものは null = おまかせ（サーバーが assignKeshin で割り当てる）。ほかの人と同じ番号でも選べる
+ */
+export function parseKeshinChoice(raw: string | null): KeshinIndex | null {
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const k = Number(raw);
+  return k < KESHIN_COUNT ? (k as KeshinIndex) : null;
+}
+
+/**
+ * 化身の割り当て（おまかせの人）: 今いるプレイヤーの中で使われている数が最も少ない番号のうち最小。
+ * 全員がおまかせなら最初の 4 人は必ず別々になり、抜けた人の番号は次の人に回る
  */
 export function assignKeshin(used: readonly number[]): KeshinIndex {
   const counts = Array.from({ length: KESHIN_COUNT }, () => 0);

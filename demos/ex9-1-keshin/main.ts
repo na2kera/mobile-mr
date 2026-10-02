@@ -15,7 +15,7 @@ import { drawProjectedMarkers, fakeCameraToField, projectFakeMarkers } from "../
 import { TextPanel } from "../../src/shared/text-panel";
 import { startRemoteLog } from "../../src/shared/remote-log";
 import { ROOM_ID_PATTERN } from "../../src/shared/shared-room-protocol";
-import { KESHIN_NAMES, NAME_MAX_LENGTH, REPLACED_REASON } from "../../src/shared/keshin-protocol";
+import { KESHIN_NAMES, NAME_MAX_LENGTH, REPLACED_REASON, parseKeshinChoice } from "../../src/shared/keshin-protocol";
 import type { KeshinIndex, KeshinPlayer, KeshinPose, Track } from "../../src/shared/keshin-protocol";
 import { keshinTimeline } from "../../src/shared/keshin-timeline";
 import type { KeshinVisual } from "../../src/shared/keshin-timeline";
@@ -662,6 +662,9 @@ function visualOf(p: PlayerState, now: number): KeshinVisual {
   return keshinTimeline((now - p.startLocalMs) / 1000, p.info.on ? "appear" : "vanish");
 }
 
+/** 開始画面で選んだ化身（null = おまかせ）。再接続・bfcache の復帰でも同じものを送る */
+let chosenKeshin: KeshinIndex | null = null;
+
 function connect(name: string) {
   if (ROOM === null) return;
   client = connectKeshin(
@@ -725,6 +728,9 @@ function connect(name: string) {
         logEvent(on ? "keshin-on" : "keshin-off", `${id}${id === selfId ? "(me)" : ""} keshin=${keshin}${shifted > 1 ? ` shifted=${shifted.toFixed(0)}ms` : ""}`);
       },
     },
+    "player",
+    "player",
+    chosenKeshin,
   );
 }
 
@@ -1046,6 +1052,33 @@ const readPlayerName = setupPlayerNameField({
   error: document.querySelector<HTMLParagraphElement>("#name-error")!,
   maxLength: NAME_MAX_LENGTH,
 });
+
+// ---- 化身を選ぶ画面（名前を決めた後。issue #90）----
+const startOverlay = document.querySelector<HTMLDivElement>("#start-overlay")!;
+const keshinChoice = document.querySelector<HTMLDivElement>("#keshin-choice")!;
+const keshinOptions = document.querySelector<HTMLDivElement>("#keshin-options")!;
+/** 選ぶ画面を出したときの名前（選んだボタンのタップで開始する） */
+let nameForStart: string | null = null;
+function addKeshinOption(label: string, keshin: KeshinIndex | null) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "keshin-option";
+  button.dataset.keshin = keshin === null ? "auto" : String(keshin);
+  button.textContent = label;
+  // センサー許可・全画面化はユーザージェスチャー起点が必須なので、このタップの中で開始する
+  button.addEventListener("click", () => {
+    if (nameForStart !== null) start(nameForStart, keshin);
+  });
+  keshinOptions.appendChild(button);
+}
+KESHIN_NAMES.forEach((name, i) => addKeshinOption(name, i as KeshinIndex));
+addKeshinOption("おまかせ（参加順に割り当て）", null);
+function showKeshinChoice(show: boolean) {
+  keshinChoice.hidden = !show;
+  startOverlay.classList.toggle("choosing", show);
+}
+document.querySelector<HTMLButtonElement>("#keshin-back")!.addEventListener("click", () => showKeshinChoice(false));
+
 nameForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (ROOM === null) {
@@ -1055,9 +1088,21 @@ nameForm.addEventListener("submit", (event) => {
   }
   const name = readPlayerName();
   if (name === null) return;
+  // ?autostart=（PC・ヘッドレスの確認用）は選ぶ画面を飛ばす（?keshin=0..3 で指定。無ければおまかせ）
+  if (params.has("autostart")) {
+    start(name, parseKeshinChoice(params.get("keshin")));
+    return;
+  }
+  nameForStart = name;
+  showKeshinChoice(true);
+});
+
+/** 名前と化身が決まった後の開始 */
+function start(name: string, keshin: KeshinIndex | null) {
+  chosenKeshin = keshin;
   document.body.classList.add("started");
   hudState.base = `fov=${FOV_FIXED ?? "auto"} camZoom=${CAM_ZOOM} markerMm=${MARKER_MM} detW=${MARKER_DET_W}@${MARKER_INTERVAL_MS}ms gravityAlign=${GRAVITY_ALIGN ? 1 : 0} keshinH=${KESHIN_H} eyeH=${EYE_H} lean=${SELF_LEAN ?? "model"} lookUp=${LOOK_UP_DEG} auraN=${AURA_N} occlude=${OCCLUDE ? (FAKE_PERSON ? "fake" : 1) : 0} maskHz=${MASK_HZ}${MASK_HZ_AUTO ? "(auto)" : ""} maskDetW=${MASK_DET_W} maskSource=${MASK_SOURCE} maskMinMax=${MASK_MIN_MAX} delegate=${DELEGATE}${MASK_DEBUG ? " maskDebug=1" : ""} staleHideMs=${STALE_HIDE_MS} posMode=${POS_MODE} matchDeg=${MATCH_DEG} onlyOneMaxDeg=${ONLY_ONE_MAX_DEG} matchM=${MATCH_M} facingMaxDeg=${FACING_MAX_DEG} corrGateM=${CORR_GATE_M} corrResetM=${CORR_RESET_M} distW=${DIST_W} corr=${CORR_WINDOW_SEC}s/${CORR_DECAY_SEC}s/${CORR_RECENT_SEC}s mode=${touch ? "gyro" : "orbit"}`;
-  logEvent("start", `name=${name} room=${ROOM} ${hudState.base} ${describeLook(LOOK)}`);
+  logEvent("start", `name=${name} keshin=${keshin ?? "auto"} room=${ROOM} ${hudState.base} ${describeLook(LOOK)}`);
   connect(name);
   runStartFlow(touch, {
     onSensor: (state) => {
@@ -1087,7 +1132,7 @@ nameForm.addEventListener("submit", (event) => {
       hudState.wake = status;
     },
   });
-});
+}
 
 addEventListener("pagehide", () => {
   client?.dispose();

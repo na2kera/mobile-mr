@@ -117,6 +117,48 @@
         color: #9aa0a6;
         font-size: 0.8rem;
       }
+      /* 化身を選ぶ画面（名前を決めた後。選んでいる間は開始画面のほかの要素を隠す） */
+      #start-overlay.choosing > :not(#keshin-choice) {
+        display: none;
+      }
+      #keshin-choice {
+        display: grid;
+        gap: 16px;
+        justify-items: center;
+        width: min(100%, 28rem);
+      }
+      #keshin-choice[hidden] {
+        display: none;
+      }
+      #keshin-options {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        width: 100%;
+      }
+      .keshin-option {
+        box-sizing: border-box;
+        border: 1px solid #5f6368;
+        border-radius: 12px;
+        background: #202124;
+        color: #e8eaed;
+        font: inherit;
+        font-size: 1rem;
+        font-weight: 600;
+        padding: 14px 8px;
+      }
+      .keshin-option[data-keshin="auto"] {
+        grid-column: 1 / -1;
+        color: #9aa0a6;
+      }
+      #keshin-back {
+        border: none;
+        background: none;
+        color: #9aa0a6;
+        font: inherit;
+        font-size: 0.8rem;
+        padding: 8px;
+      }
       /* 不正な room 名を知らせるエラー表示（04 と同じ） */
       #room-error {
         color: #f28b82;
@@ -231,7 +273,7 @@
       <h1>ex9-1. 化身</h1>
       <p>
         番外編: 画面下の<strong>「化身」ボタン</strong>で、自分の背後に化身（魔神 ザ・ハンド / 魔神ペガサスアーク / 剣聖ランスロット / 奏者マエストロ。
-        参加順に割り当て）を出します。足元から腰の高さへオーラが吹き上がり、上半身がオーラの渦からせり上がって決めポーズを取ります。
+        名前の次の画面で選ぶ。おまかせなら参加順に割り当て）を出します。足元から腰の高さへオーラが吹き上がり、上半身がオーラの渦からせり上がって決めポーズを取ります。
         正面を見ている間は視界の周りにオーラだけが揺らめき、<strong>上を見上げる（40° 以上）と前に傾いた自分の化身</strong>が見えます。
       </p>
       <p>
@@ -253,14 +295,20 @@
         />
         <span id="name-hint">ゲーム内で表示される名前（12文字まで）</span>
         <p id="name-error" role="alert" hidden></p>
-        <button id="start-button" type="submit">名前を決めて開始</button>
+        <button id="start-button" type="submit">名前を決めて次へ</button>
       </form>
+      <div id="keshin-choice" hidden>
+        <h1>化身を選ぶ</h1>
+        <p>出したい化身を選ぶと開始します（ほかの人と同じ化身も選べます）</p>
+        <div id="keshin-options"></div>
+        <button id="keshin-back" type="button">← 名前に戻る</button>
+      </div>
       <p>
         調整: 大きさ ?keshinH=3、頭から床まで ?eyeH=1.5、背中からの距離 ?keshinBack=（既定は自動）、
         主観の前傾 ?selfLean=35・前後 ?selfBack=（既定は自動）・見上げ角 ?lookUpDeg=40・不透明度 ?selfOpacity=0.55、
         粒子数 ?auraN=400、体の向きの平滑化 ?yawSmoothSec=0.25。
         マーカーは ?markerId=0&amp;markerMm=150&amp;trackOkMs=500。表示は 06〜09 と同じ ?fov=auto&amp;eyeSep=0.064&amp;camZoom=0.7。
-        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC で確認できます（マウスで見回す）
+        PC では ?camZoom=1&amp;fakecam=1&amp;autostart=1&amp;name=PC で確認できます（マウスで見回す。autostart は選ぶ画面を飛ばすので、化身は ?keshin=0〜3 で指定。無ければおまかせ）
       </p>
       <p>モデルは dev サーバーでだけ読み込めます（npm run fetch:keshin）。無いときは代わりの人型で演出を確認できます。</p>
       <a href="/">← デモ一覧へ戻る</a>
