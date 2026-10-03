@@ -161,7 +161,9 @@ export class KeshinView {
   }
 
   private createInstance(loaded: LoadedKeshin): KeshinInstance {
-    const inst = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx, this.maskBinding, this.dissolve);
+    // 他人用の見え方 C（look あり）で spec が指定した化身（魔神）だけ下半身を出し、切り口から上を下半身ごと溶かす
+    const keepLower = this.look !== null && this.spec.keepLowerBodyForOther === true;
+    const inst = createKeshinInstance(loaded, this.opts.nearFade, this.opts.mode === "self" && this.spec.selfHideFx, this.maskBinding, this.dissolve, keepLower);
     // 人の形で隠すときは、眼ごとのビューポートを描く直前に uniform へ入れる（深度の前描画の複製も含めて）
     if (this.maskBinding) attachEyeViewport(inst.root, this.maskBinding.shared);
     return inst;

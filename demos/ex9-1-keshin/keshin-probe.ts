@@ -48,7 +48,7 @@ function project(p: THREE.Vector3, camera: THREE.Camera, vp: { x: number; w: num
 
 /**
  * 切り口が無いか: 腰（切断面の中心）から上 dissolveM の範囲を 3 つの帯に分け、化身の中央の列の画素の密度を比べる
- * （上の帯 > 中 > 腰の帯。腰の帯は溶ける範囲の上の帯の半分未満になる）
+ * （上の帯 > 中 > 腰の帯。腰の帯は溶ける範囲の上の帯の半分未満になる）。waistY = 切り口、pivotY = 腰の支点（切り口の showM 上）の画面の行
  */
 export function probeDissolve(
   gl: WebGLRenderingContext | WebGL2RenderingContext,
@@ -57,7 +57,7 @@ export function probeDissolve(
   camera: THREE.Camera,
   dissolveM: number,
   vp?: { x: number; w: number; h: number },
-): { bands: number[]; waistY: number; topY: number } | null {
+): { bands: number[]; waistY: number; topY: number; pivotY: number } | null {
   const plane = view.cutPlaneWorld();
   if (!plane) return null;
   const { on, w, h } = diffMask(gl, render, view, "model");
@@ -81,7 +81,9 @@ export function probeDissolve(
   const seg = (k0: number, k1: number) => density(waist[1] + (up[1] - waist[1]) * k0, waist[1] + (up[1] - waist[1]) * k1);
   // 帯: 溶ける範囲の上（溶けていない）/ 範囲の上半分 / 範囲の下 1/4（腰の近く）
   const bands = [density(up[1], above[1]), seg(0.5, 1), seg(0.05, 0.3)];
-  return { bands, waistY: waist[1], topY: up[1] };
+  // 腰の支点（切り口 + showM。化身の位置の基準で、切り口を下げても動かない）の画面の行
+  const pivot = project(plane.point.clone().addScaledVector(plane.normal, view.below?.showM ?? 0), camera, area);
+  return { bands, waistY: waist[1], topY: up[1], pivotY: pivot[1] };
 }
 
 /** 光の流れがつながっているか: 曲線上の点（t = 0.12〜0.78）を画面に投影し、そのまわり r px に流れの画素があるか */

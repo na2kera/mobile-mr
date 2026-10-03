@@ -1,7 +1,7 @@
 // 化身の 3D モデル（GLB）の読み込みと、1 体ぶんの描画用インスタンス（半透明・腰のクリッピング・目の近くを消す・決めポーズ）。
 // モデルの扱いは各モデルの README（/Users/keranatsuki/dev/blender/{majin-fable,Pegasus-Opus,Lancelot-Opus,Maestro-Opus}/README.md）に従う:
 //   - 拡大縮小・移動・回転はモデルの根（MTH_Root / PA_Root / KL_Root / SoushaMaestro）の外側で行う（ここでは keshin-view.ts の holder）
-//   - 下半身ノード（*_LowerBody。マエストロは LowerBody）は非表示、残り（ランスロットのマント・ペガサスのたてがみ等）は腰のクリッピング平面で切る
+//   - 下半身ノード（*_LowerBody。マエストロは LowerBody）は非表示（他人用の魔神だけ出す: spec.keepLowerBodyForOther）、残り（ランスロットのマント・ペガサスのたてがみ等）は腰のクリッピング平面で切る
 //   - extras の default_visible が false のノード（マエストロの指揮棒 Baton）は読み込み後に隠す。spec.showNodes にあれば出す
 //   - スキンメッシュの境界球はアニメで追従しないので frustumCulled = false（disableSkinnedCulling）
 //   - 半透明は makeGhost の方法: 深度だけ書く複製を先に描いてから色を重ねる（内側の面が透けない）。発光部分（目など）は濃く残す
@@ -54,6 +54,12 @@ export type KeshinSpec = {
    */
   below: KeshinBelow;
   /**
+   * 他人用（mode "other" かつ見え方 C の look あり）では下半身ノードを隠さない。胴が cutY で蓋をして終わるモデルで切り口を下げると
+   * 蓋が平らに出るので、下半身で蓋を覆い、切り口（支点 − below.showM）から上を下半身ごと溶かす（魔神だけ）。
+   * 主観（self）と ?look=0 は従来どおり隠す。インスタンス単位で切り替え、共有テンプレートは変えない
+   */
+  keepLowerBodyForOther?: boolean;
+  /**
    * extras（userData）の default_visible が false でも表示するノード名。default_visible が false のノードは読み込み後に隠し、
    * ここに名前があるものだけ出す（マエストロの指揮棒 Baton。glTF には表示の概念が無いので読み込んだままだと見えてしまう）
    */
@@ -82,10 +88,13 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 確定（self-sweep.png の S5）: 前へ大きく出して 50° 倒す。見上げ 45〜60° で頭と広げた腕の輪郭が入り、目の近くで消える頂点 2%。
     // 35° / +0.25（S1）は兜の裏と細い腕しか見えなかった
     self: { leanDeg: 50, faceAheadM: 1.0, backM: null },
-    // 胴（MTH_UpperBody）は腰の分割位置 2.77 で蓋をして終わり、その下は炎のマントだけ。切り口を下げると胴の底の蓋が溶けずに
-    // 頭のすぐ上へ平らに出た（check:keshin の mirror-look.png）ので、切り口は腰のまま。溶ける長さは 0.6 → 0.2（2026-10-03。
-    // 0.6 では胸から下が透けて薄かった。0.2 で腹まで濃く読め、人の形で隠す処理を切っても平らな蓋は出なかった）
-    below: { showM: 0, dissolveM: 0.2 },
+    // 胴（MTH_UpperBody）は腰の分割位置 2.77 で蓋をして終わり、その下は炎のマントだけ。下半身を隠したまま切り口を下げると胴の底の蓋が
+    // 溶けずに頭のすぐ上へ平らに出た（PR #95）。2026-10-03（「上半身がぶつ切り。もうちょい下まで」）に、他人用では下半身（MTH_LowerBody。
+    // 腰・脚）を隠さず蓋を覆い、切り口を 0.6 下げて腰〜腿の上部まで出して 0.3 で溶かす（look-sweep.png: 0.4 は腰の途中で本人の肩より上で
+    // 切れ、0.8 は腿が本人の肩の横まで下りて人を跨ぐように見えた。0.6 は腰と腿の付け根が本人の肩の高さで溶けて終わる。
+    // 溶け 0.2 は下端のディザの帯が硬く、0.3 の方がなめらか。人の形で隠す処理を切っても平らな蓋は出ない）
+    below: { showM: 0.6, dissolveM: 0.3 },
+    keepLowerBodyForOther: true,
   },
   {
     index: 1,
@@ -238,7 +247,7 @@ export type KeshinInstance = {
 
 /**
  * インスタンスを作る。materials は複製して個別にし（不透明度・クリッピング平面を他のインスタンスと共有しない）、
- * 下半身を隠し、スキンのカリングを切り、makeGhost（深度の前描画）を掛ける。
+ * 下半身を隠し（keepLower なら出す）、スキンのカリングを切り、makeGhost（深度の前描画）を掛ける。
  * nearFade を渡すと目から near[0] m 以内を消し、near[1] m までをなめらかに戻す（主観用。StereoEffect の左右の目で
  * 同じ結果になるよう、カメラではなく「頭の中心」のワールド位置からの距離で決める）
  */
@@ -248,11 +257,13 @@ export function createKeshinInstance(
   hideFx = false,
   mask: MaskBinding | null = null,
   dissolve: DissolveUniforms | null = null,
+  keepLower = false,
 ): KeshinInstance {
   const root = loaded.fallback ? loaded.template.clone(true) : cloneSkinned(loaded.template);
   const names = nodeNames(root, loaded.spec);
+  // 下半身は隠す（keepLower = 他人用で spec.keepLowerBodyForOther のときだけ出す。複製したインスタンスのノードなのでテンプレートは変わらない）
   const lower = root.getObjectByName(names.lower);
-  if (lower) lower.visible = false;
+  if (lower) lower.visible = keepLower;
   applyDefaultVisibility(root, loaded.spec.showNodes ?? []);
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const nearUniforms = nearFade

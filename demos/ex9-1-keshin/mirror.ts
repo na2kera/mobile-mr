@@ -824,7 +824,8 @@ startButton.addEventListener("click", () => {
     if (off) occlusion.uniforms.uMaskOn.value = 0;
   },
   /** 化身のモデルを描いたときと描かないときの画素の差を、人の形の中・外（背景の人の色 #5a6b86）で分けて数える（main.ts と同じ） */
-  pixelDiff(id: string, occlude = true) {
+  /** aboveRow を渡すと、人の画素に重なる化身の画素のうち画面の上からその行より上のもの（insideAbove）も数える */
+  pixelDiff(id: string, occlude = true, aboveRow = -1) {
     const e = entries.get(id);
     if (!e) return null;
     const gl = renderer.getContext();
@@ -857,6 +858,7 @@ startButton.addEventListener("click", () => {
     const r = 12;
     let changed = 0;
     let inside = 0;
+    let insideAbove = 0;
     let outside = 0;
     /** 化身の画素のいちばん上（画面の上から [px]。0 なら画面の上で切れている）と、人の画素のいちばん上 */
     let topY = h;
@@ -871,10 +873,12 @@ startButton.addEventListener("click", () => {
       const py = Math.floor(i / 4 / w);
       topY = Math.min(topY, h - 1 - py);
       const s = [isPerson(px, py), isPerson(px + r, py), isPerson(px - r, py), isPerson(px, py + r), isPerson(px, py - r)];
-      if (s.every(Boolean)) inside++;
-      else if (s.every((x) => !x)) outside++;
+      if (s.every(Boolean)) {
+        inside++;
+        if (h - 1 - py < aboveRow) insideAbove++;
+      } else if (s.every((x) => !x)) outside++;
     }
-    return { changed, inside, outside, total: w * h, topY, personTopY, height: h };
+    return { changed, inside, insideAbove, outside, total: w * h, topY, personTopY, height: h };
   },
   /**
    * 光の流れが人の形の縁に残す輪（頭のまわりの縁取り）の画素数。人の形で隠す処理ありで流れだけを描き、人の画素から 12px 以内で
