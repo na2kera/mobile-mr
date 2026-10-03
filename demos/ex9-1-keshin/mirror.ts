@@ -876,6 +876,54 @@ startButton.addEventListener("click", () => {
     }
     return { changed, inside, outside, total: w * h, topY, personTopY, height: h };
   },
+  /**
+   * 光の流れが人の形の縁に残す輪（頭のまわりの縁取り）の画素数。人の形で隠す処理ありで流れだけを描き、人の画素から 12px 以内で
+   * 人の画素ではない所の流れの画素を数える。clear = false は縁を薄くする処理（?streamClear=）を切った比較用
+   */
+  streamRing(id: string, clear = true) {
+    const e = entries.get(id);
+    const st = e?.view.stream;
+    if (!e || !st) return null;
+    const gl = renderer.getContext();
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    const read = () => {
+      const buf = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      return buf;
+    };
+    const near = st.uniforms.uMaskNear.value;
+    if (!clear) st.uniforms.uMaskNear.value = 0;
+    const a = e.view.withHidden("aura", () =>
+      e.view.withHidden("model", () => {
+        renderer.render(scene, camera);
+        return read();
+      }),
+    );
+    st.uniforms.uMaskNear.value = near;
+    const wasGroup = e.view.group.visible;
+    e.view.group.visible = false;
+    renderer.render(scene, camera);
+    const bg = read();
+    e.view.group.visible = wasGroup;
+    const isPerson = (x: number, y: number) => {
+      if (x < 0 || y < 0 || x >= w || y >= h) return false;
+      const i = (y * w + x) * 4;
+      return Math.abs(bg[i] - 0x5a) + Math.abs(bg[i + 1] - 0x6b) + Math.abs(bg[i + 2] - 0x86) <= 30;
+    };
+    const r = 12;
+    let stream = 0;
+    let ring = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (Math.abs(a[i] - bg[i]) + Math.abs(a[i + 1] - bg[i + 1]) + Math.abs(a[i + 2] - bg[i + 2]) <= 24) continue;
+      stream++;
+      const px = (i / 4) % w;
+      const py = Math.floor(i / 4 / w);
+      if (isPerson(px, py)) continue;
+      if (isPerson(px + r, py) || isPerson(px - r, py) || isPerson(px, py + r) || isPerson(px, py - r)) ring++;
+    }
+    return { stream, ring };
+  },
   /** 段階 3 の C の見え方を画素で調べる（切り口が無いか・背中からの光の流れがつながっているか。人の形で隠す処理は切って） */
   lookProbe(id: string) {
     const e = entries.get(id);

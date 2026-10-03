@@ -24,7 +24,15 @@ export type KeshinLook = {
   streamK: number;
   /** 光の流れの粒の数（?streamN=） */
   streamN: number;
-  /** 足元の柱（今のオーラ）の強さの倍率（?footAuraK=。背中からの流れに置き換えるので控えめ） */
+  /**
+   * 光の流れを、人の形の縁からこの幅（人の形のマスクの横幅に対する割合。?streamClear=。0 で従来どおり）まで薄くする。
+   * 流れは頭の真後ろを上るので、人の形で隠すと頭のまわりに明るい輪（縁取り）として残ったため
+   */
+  streamClear: number;
+  /**
+   * 足元から背中まで立ち上る柱の粒の強さの倍率（?footAuraK=）。既定 0（出さない）: 人の形で隠すと人のまわりのオーラが人型の穴に
+   * なって見えたため、背中からの光の流れと化身の切り口から上の逆三角形の炎に置き換えた。炎の形には影響しない
+   */
   footAuraK: number;
 };
 
@@ -44,7 +52,8 @@ export const DEFAULT_LOOK: KeshinLook = {
   streamR1: 0.32,
   streamK: 0.7,
   streamN: 90,
-  footAuraK: 0.3,
+  streamClear: 0.04,
+  footAuraK: 0,
 };
 
 /** URL から読む。?look=0 で段階 2 までの見え方（腰で切る・頭の高さ・光の流れなし）に戻す（比較用） → null */
@@ -59,6 +68,7 @@ export function lookFromParams(): KeshinLook | null {
     streamR1: numParam("streamR1", DEFAULT_LOOK.streamR1, { min: 0, max: 3 }),
     streamK: numParam("streamK", DEFAULT_LOOK.streamK, { min: 0, max: 5 }),
     streamN: Math.round(numParam("streamN", DEFAULT_LOOK.streamN, { min: 0, max: 2000 })),
+    streamClear: numParam("streamClear", DEFAULT_LOOK.streamClear, { min: 0, max: 0.3 }),
     footAuraK: numParam("footAuraK", DEFAULT_LOOK.footAuraK, { min: 0, max: 1 }),
   };
 }
@@ -73,5 +83,5 @@ function overrideParam(name: string, min: number, max: number): number | null {
 /** 起動時のログ・HUD 用（showBelow / dissolve の spec = 化身ごとの既定） */
 export function describeLook(l: KeshinLook | null): string {
   if (!l) return "look=0";
-  return `look waistAbove=${l.waistAboveHeadM} showBelow=${l.showBelowM ?? "spec"} backClear=${l.backClearM} dissolve=${l.dissolveM ?? "spec"} stream=${l.streamR0}/${l.streamR1}xK${l.streamK} footAura=${l.footAuraK}`;
+  return `look waistAbove=${l.waistAboveHeadM} showBelow=${l.showBelowM ?? "spec"} backClear=${l.backClearM} dissolve=${l.dissolveM ?? "spec"} stream=${l.streamR0}/${l.streamR1}xK${l.streamK}clear${l.streamClear} footAura=${l.footAuraK}`;
 }

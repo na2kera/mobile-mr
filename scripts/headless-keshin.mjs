@@ -918,13 +918,27 @@ try {
   console.log(`mirror look: over=${JSON.stringify(mlOver)} dissolve=${JSON.stringify(probe?.dissolve)} stream=${JSON.stringify(probe?.stream && { hits: probe.stream.hits, total: probe.stream.total })}`);
   check("鏡・見え方: 化身の体が本人の頭・肩に被らない（人の形で隠す処理を切っても、人の画素に重なる化身の画素が 50 未満）", ml?.ok && mlOver && mlOver.inside < 50 && mlOver.changed > 3000, `inside=${mlOver?.inside} changed=${mlOver?.changed}`);
   const bands = probe?.dissolve?.bands ?? [];
-  check("鏡・見え方: 切り口が無い（腰の近くほど化身の画素が疎ら: 溶ける範囲の上 > 範囲の上半分 > 腰の近く、腰の近くは上の半分未満）", bands.length === 3 && bands[0] > bands[1] && bands[1] > bands[2] && bands[2] < bands[0] * 0.5, JSON.stringify(bands.map((b) => b.toFixed(3))));
+  // マエストロ（KESHIN_CHECK_MIRROR_KESHIN=3）は切り口（腰の支点の 0.6m 下）の中央の列に体が無く（前布の下端より下）、溶ける長さ 0.2 では
+  // 3 つの帯がすべて空になる。切り口の高さに体が無ければ平らな切り口は出ないので、そのときは「3 つの帯がすべて空」で通す
+  // （魔神の蓋が出たときは 0.28 / 0 / 0 のように上の帯だけ残るので、上の帯も空であることを要求して見逃さない）
+  const cutEmpty = bands.length === 3 && bands.every((b) => b < 0.02);
+  check("鏡・見え方: 切り口が無い（腰の近くほど化身の画素が疎ら: 溶ける範囲の上 > 範囲の上半分 > 腰の近く、腰の近くは上の半分未満。切り口の高さに体が無ければ可）", bands.length === 3 && ((bands[0] > bands[1] && bands[1] > bands[2] && bands[2] < bands[0] * 0.5) || cutEmpty), JSON.stringify(bands.map((b) => b.toFixed(3))));
   check("鏡・見え方: 背中から化身の腰まで光の流れがつながって描かれている（曲線上の 7 点すべてに流れの画素）", probe?.stream && probe.stream.hits === probe.stream.total, JSON.stringify(probe?.stream?.samples?.map((q) => `${q.t.toFixed(2)}:${q.hit ? 1 : 0}`)));
-  // 炎の形（他人用）: 人のまわりは細い柱のまま、本人の背中から上で広がり始め、足元は ?footAuraK= の薄さ（keshin-view.ts の式）
+  // 光の流れの根元の輪（人の形で隠すと、頭の真後ろを上る流れのうち頭からはみ出た縁だけが頭のまわりの明るい輪として残った）
+  const ringOn = await pML.eval(`window.__keshinMirror.streamRing(${JSON.stringify(pId)}, true)`);
+  const ringOff = await pML.eval(`window.__keshinMirror.streamRing(${JSON.stringify(pId)}, false)`);
+  check(
+    "鏡・見え方: 人の形で隠しても、光の流れが人の形の縁に輪として残らない（縁から 12px 以内の流れの画素が 30 未満。縁を薄くする処理を切ると 200 以上 = 確認の前提）",
+    ringOn && ringOff && ringOn.ring < 30 && ringOff.ring >= 200,
+    JSON.stringify({ on: ringOn, off: ringOff }),
+  );
+  // 炎の形（他人用）: 逆三角形。化身の切り口（腰の支点 − showM）を頂点に上へ広がり、床から切り口まで（人のまわり）は炎も柱の粒も無い
+  // （人の形で隠すと人型の穴に見えたため。keshin-view.ts の式）
   const fs = probe?.flame;
   check(
-    "鏡・見え方: 炎は本人の背中から上で広がり始め（背中より下は細い柱）、足元は薄い（既定 0.3）",
-    fs && Math.abs(fs.joinY - fs.columnH) < 1e-6 && fs.joinY > 0.8 && fs.joinY < fs.waistY && fs.columnR < fs.flameR * 0.6 && Math.abs(fs.columnK - 0.3) < 1e-6,
+    "鏡・見え方: 炎は逆三角形（化身の切り口 = 腰の支点から 0〜1m 下・体の上半分より上で細く始まり、頂部へ広がる）、人のまわりに柱の粒が無い（既定 0）",
+    fs && fs.v === 1 && fs.joinY <= fs.waistY + 1e-6 && fs.joinY >= fs.waistY - 1.0 && fs.eyeH !== null && fs.joinY > fs.eyeH * 0.5 &&
+      fs.columnR < fs.flameR * 0.4 && fs.flameH > fs.waistY + 1 && fs.columnK === 0,
     JSON.stringify(fs),
   );
   mirrorFlameShape = fs ?? null;
@@ -1354,26 +1368,29 @@ try {
           }
         return { width: width / 7, alpha: width ? alpha / width : 0 };
       };
-      const wide = { low: band(full, 0.8), high: band(full, 2.4) };
-      const shape = ${JSON.stringify(mirrorFlameShape ?? { joinY: 1.25, columnH: 1.25, columnK: 0.3, waistY: 1.9 })};
-      aura.uniforms.uJoinY.value = shape.joinY;
-      aura.uniforms.uColumnH.value = shape.columnH;
-      aura.uniforms.uColumnK.value = shape.columnK;
-      aura.uniforms.uSwirlC.value.y = shape.waistY;
+      const wide = { low: band(full, 0.8), high: band(full, 2.9) };
+      // 他人用の逆三角形（鏡で読んだ keshin-view.ts の値）。このシーンの頂部は 3.5m と低い（鏡は 4.3m 前後）ので、広がりが読めるよう
+      // 頂点の高さは 1.0〜1.5m に丸め、頂点の太さは鏡と同じ割合（頂点 / 包む太さ）にする
+      const shape = ${JSON.stringify(mirrorFlameShape ?? { joinY: 1.4, columnR: 0.25, flameR: 1.0, waistY: 1.98 })};
+      const apexY = Math.min(1.5, Math.max(1.0, shape.joinY));
+      aura.uniforms.uFlameV.value = 1;
+      aura.uniforms.uJoinY.value = apexY;
+      aura.uniforms.uColumnR.value = aura.uniforms.uFlameR.value * shape.columnR / shape.flameR;
+      aura.uniforms.uSwirlC.value.y = Math.max(apexY, Math.min(3.0, shape.waistY));
       const other = draw(1.5, 2);
-      const thin = { low: band(other, 0.8), high: band(other, 2.4) };
+      const vee = { apexY, low: band(other, 0.8), below: band(other, apexY - 0.1), apex: band(other, apexY + 0.3), high: band(other, 2.9) };
       aura.points.children[0].visible = false;
       const disabled = count(draw(1.5, 2));
-      return { off, rising, full: count(full), changed, capped, vanished, disabled, wide, thin };
+      return { off, rising, full: count(full), changed, capped, vanished, disabled, wide, vee };
     } finally { aura.dispose(); renderer.dispose(); }
   })()`);
   check("炎: 粒なしでも炎が描け、出現中に広がり、消去完了で画素が消える", flame.off === 0 && flame.rising > 100 && flame.full > flame.rising && flame.vanished === 0, JSON.stringify(flame));
   check("炎: 出現完了後も時刻に合わせて揺らめく", flame.changed > flame.full * 0.1, `changed=${flame.changed} full=${flame.full}`);
   check(
-    "炎: 他人用の形では人の高さ（0.8m）が細く薄く（幅は従来の 85% 未満・化身の高さの 6 割未満。このシーンの太さは既定の 0.8m なので従来との差は実機より小さい、濃さは従来の半分未満）、化身の高さ（2.4m）の幅は変わらない",
-    flame.thin.low.width > 0 && flame.thin.low.width < flame.wide.low.width * 0.85 && flame.thin.low.width < flame.thin.high.width * 0.6 &&
-      flame.thin.low.alpha < flame.wide.low.alpha * 0.5 && Math.abs(flame.thin.high.width - flame.wide.high.width) < flame.wide.high.width * 0.15,
-    JSON.stringify({ wide: flame.wide, thin: flame.thin }),
+    "炎: 他人用の逆三角形では人の高さ（0.8m）と頂点のすぐ下に炎が無く、頂点の上（+0.3m）は細く（頂部の 6 割未満）、頂部（2.9m）は柱の形と同じくらいの太さ（70〜130%）",
+    flame.wide.low.width > 0 && flame.vee.low.width === 0 && flame.vee.below.width === 0 && flame.vee.apex.width > 0 &&
+      flame.vee.apex.width < flame.vee.high.width * 0.6 && flame.vee.high.width > flame.wide.high.width * 0.7 && flame.vee.high.width < flame.wide.high.width * 1.3,
+    JSON.stringify({ wide: flame.wide, vee: flame.vee }),
   );
   check("炎: 主観の肩の高さの制限で上部が消える・炎非表示なら画素が残らない", flame.capped > 0 && flame.capped < flame.full * 0.5 && flame.disabled === 0, `capped=${flame.capped} disabled=${flame.disabled}`);
   const ex2 = pages.flatMap((p) => p.exceptions.map((e) => `${p.name}: ${e}`));

@@ -74,6 +74,8 @@ const tmpWaist = new THREE.Vector3();
 
 /** 主観の炎の半径 [m]（足元の柱 0.45 より少し太いだけ。目から肩の縁まで 0.6m 前後・正面から 29° 下） */
 const SELF_FLAME_R = 0.55;
+/** 他人用の逆三角形の炎の頂点（化身の切り口）の太さ = 化身を包む太さ（uFlameR）のこの割合 */
+const FLAME_APEX_K = 0.25;
 
 export class KeshinView {
   readonly group = new THREE.Group();
@@ -90,10 +92,23 @@ export class KeshinView {
   modelVisible = false;
   /** 直近の体の不透明度（診断用） */
   lastOpacity = 0;
-  /** 直近の炎の形の値（診断・テスト用: 広がり始める高さ・背中の高さ・足元の濃さ・腰の高さ・太さ） */
+  /**
+   * 直近の炎の形の値（診断・テスト用: 逆三角形か・下端（頂点）の高さ・柱の粒の高さと強さ・腰の高さ・頂点の太さ・包む太さ・頂部の高さ・
+   * 持ち主の頭の高さ（床から））
+   */
   get flameShape() {
     const au = this.aura.uniforms;
-    return { joinY: au.uJoinY.value, columnH: au.uColumnH.value, columnK: au.uColumnK.value, waistY: au.uSwirlC.value.y, columnR: au.uColumnR.value, flameR: au.uFlameR.value };
+    return {
+      v: au.uFlameV.value,
+      joinY: au.uJoinY.value,
+      columnH: au.uColumnH.value,
+      columnK: au.uColumnK.value,
+      waistY: au.uSwirlC.value.y,
+      columnR: au.uColumnR.value,
+      flameR: au.uFlameR.value,
+      flameH: au.uFlameH.value,
+      eyeH: this.lastFrame?.eyeH ?? null,
+    };
   }
   /** 直近の発光部分の不透明度 */
   private lastOwn = 0;
@@ -137,6 +152,7 @@ export class KeshinView {
     if (this.stream) {
       this.stream.uniforms.uR0.value = this.look!.streamR0;
       this.stream.uniforms.uR1.value = this.look!.streamR1;
+      this.stream.uniforms.uMaskNear.value = this.look!.streamClear;
       this.group.add(this.stream.group);
       if (this.maskBinding) attachEyeViewport(this.stream.group, this.maskBinding.shared);
     }
@@ -320,17 +336,26 @@ export class KeshinView {
       au.uAuraK.value = visual.auraK * auraFade;
       au.uPillarK.value = visual.pillarK;
       au.uBurstK.value = visual.burstK;
-      // 腰の高さ（床から）。段階 3 の C では頭より waistAboveHeadM 上。柱は床から背中まで（控えめ）
+      // 腰の高さ（床から）。段階 3 の C では頭より waistAboveHeadM 上。柱の粒は床から背中まで（他人用は既定 0 = 出さない）
       const cutH = this.look ? eyeH + this.look.waistAboveHeadM : this.loaded.spec.cutY * scale;
       au.uColumnH.value = this.look ? Math.max(0.3, eyeH - 0.35) : cutH;
       au.uColumnK.value = this.look ? this.look.footAuraK : 1;
-      au.uColumnR.value = 0.45;
-      // 他人用は本人の背中まで細い柱のままにして、そこから化身の腰へ向けて広げる（人のまわりを炎で埋めない）
-      au.uJoinY.value = this.look ? au.uColumnH.value : 0.2;
       // 炎は化身の頭上を越えて吹き上がる（頂部の 3 割ほどは炎の舌にちぎれる）。太さは腕や翼を広げた化身が収まる幅
       au.uFlameH.value = (cutH + (MODEL_HEIGHT_M - this.loaded.spec.cutY) * scale) * 1.3;
       // 主観は体に沿う細い柱のまま（太くすると、正面を向いたとき肩の高さの縁が視界の中心に入る。check:keshin の「各眼の中心 50% はほぼ空」）
       au.uFlameR.value = this.opts.mode === "self" ? SELF_FLAME_R : Math.max(1.0, scale * 2.3);
+      if (this.look) {
+        // 他人用は逆三角形: 化身の切り口（支点 − showM。体が見え始める高さ）を頂点に、上へ直線的に広がる。床から切り口まで
+        // （人のまわり）には炎を置かない（人の形で隠すと人型の穴になって見えたため）。頂点の太さは化身を包む太さの 1/4
+        au.uFlameV.value = 1;
+        au.uJoinY.value = cutH - (this.below?.showM ?? 0);
+        au.uColumnR.value = au.uFlameR.value * FLAME_APEX_K;
+      } else {
+        // 主観（と ?look=0）は床から立ち上る柱: 足元は細く、0.2m から化身の腰へ向けて広げる
+        au.uFlameV.value = 0;
+        au.uJoinY.value = 0.2;
+        au.uColumnR.value = 0.45;
+      }
       au.uSwirlC.value.set(0, cutH, -back);
       au.uSwirlR.value = 0.55 * scale * 1.6;
       au.uViewportH.value = u.viewportH;

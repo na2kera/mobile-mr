@@ -83,8 +83,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 35° / +0.25（S1）は兜の裏と細い腕しか見えなかった
     self: { leanDeg: 50, faceAheadM: 1.0, backM: null },
     // 胴（MTH_UpperBody）は腰の分割位置 2.77 で蓋をして終わり、その下は炎のマントだけ。切り口を下げると胴の底の蓋が溶けずに
-    // 頭のすぐ上へ平らに出た（check:keshin の mirror-look.png）ので、切り口は腰のまま・腰から上 0.6m を溶かす（従来どおり）
-    below: { showM: 0, dissolveM: 0.6 },
+    // 頭のすぐ上へ平らに出た（check:keshin の mirror-look.png）ので、切り口は腰のまま。溶ける長さは 0.6 → 0.2（2026-10-03。
+    // 0.6 では胸から下が透けて薄かった。0.2 で腹まで濃く読め、人の形で隠す処理を切っても平らな蓋は出なかった）
+    below: { showM: 0, dissolveM: 0.2 },
   },
   {
     index: 1,
@@ -100,8 +101,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 確定（S4）: 35° のまま頭を 0.7m 前へ。見上げ 45〜60° で翼・髪・肩が入り、消える頂点 12%（S1 は髪の房の裏が重なり 43% 消えていた）
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 胴（PA_UpperBody）の底は 2.0 前後（cutY 2.35 の 0.35 下）で蓋をして終わる。人の形で隠す処理を切って撮ると、0.6 / 溶け 0.4 は
-    // 1.3m で胴の底の楕円の蓋がはっきり出て、0.4 でも縁が残った。0.3 なら蓋は溶けて籠手（腕当て）が下まで見える
-    below: { showM: 0.3, dissolveM: 0.4 },
+    // 1.3m で胴の底の楕円の蓋がはっきり出て、0.4 でも縁が残った。0.3 なら蓋は切り口より下で籠手（腕当て）が下まで見える。
+    // 溶ける長さは 0.4 → 0.2（2026-10-03。籠手と腹が濃く読める。蓋は出ない）
+    below: { showM: 0.3, dissolveM: 0.2 },
   },
   {
     index: 2,
@@ -118,8 +120,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 頂点の 45% が目の近くで消えていた
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 腰装甲（草摺り）の下端は尖った形で、その下はマント（下端 0.35）と盾・剣。0.6 / 溶け 0.4 で草摺りの先まで見え、
-    // 人の形で隠す処理を切っても平らな切り口は出なかった（1.3m・3.2m）
-    below: { showM: 0.6, dissolveM: 0.4 },
+    // 人の形で隠す処理を切っても平らな切り口は出なかった（1.3m・3.2m）。2026-10-03 に 0.9 / 溶け 0.2 へ: マントの裾が本人の肩の横まで
+    // 下りて盾・剣とともに体の下まで読める（マントの裾は尖った布の形なので平らな切り口にならない）
+    below: { showM: 0.9, dissolveM: 0.2 },
   },
   {
     index: 3,
@@ -142,8 +145,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // S1（35° / +0.25）は頂点の 51% が消え、S5（50° / +1.0）は 60° 以上で画素が 1/2〜1/20 に減った
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 下段の手（指先 ≈ 2.05）と前布（下端 2.25）が cutY 2.5 より下にある。look-sweep.png で 0.6 / 溶け 0.4 なら下段の手 2 本と前布が読めた
-    // （0.8 は 0.6 と同じ: 2.05 より下に頂点が無い）。胴の底の蓋（2.50）は前布が覆うので切り口に見えない
-    below: { showM: 0.6, dissolveM: 0.4 },
+    // （0.8 は 0.6 と同じ: 2.05 より下に頂点が無い）。胴の底の蓋（2.50）は前布が覆うので切り口に見えない。
+    // 溶ける長さは 0.4 → 0.2（2026-10-03。下段の手と前布が濃く読める）
+    below: { showM: 0.6, dissolveM: 0.2 },
     // 指揮棒（README 7 章: 上段の右手のボーン HandUp.R の子の剛体。extras の default_visible は false）を出す
     showNodes: ["Baton"],
   },
