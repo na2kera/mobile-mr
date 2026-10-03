@@ -23,6 +23,13 @@ export type StreamUniforms = {
   uGrow: { value: number };
   /** 明るさ 0..1 */
   uK: { value: number };
+  /**
+   * 人の形の縁から、この幅（人の形のマスクの横幅に対する割合）までの流れを薄くする（帯も粒も。人の形で隠すときだけ）。
+   * 流れは本人の頭・首の真後ろを上るので、人の形で隠すと、頭より太い管がはみ出た縁だけが頭のまわりの明るい輪（縁取り）として残った。
+   * 曲線のパラメータ t や高さで根元を消しても、鏡の正面からは腰の近くまで頭の後ろに重なっていて輪が消えなかったため、画面の上で
+   * 人の形に近い所を消す（横や上から見たときの流れはそのまま残る）
+   */
+  uMaskNear: { value: number };
   uTime: { value: number };
   uColA: { value: THREE.Color };
   uColB: { value: THREE.Color };
@@ -56,6 +63,32 @@ float kNoise(float x) {
   float f = fract(x);
   float u = f * f * (3.0 - 2.0 * f);
   return mix(kHash(i), kHash(i + 1.0), u);
+}
+`;
+
+/**
+ * 人の形の縁に近いほど 1（MASK_HEAD_GLSL の後に置く）。持ち主の頭より奥の点だけ、マスクを半径 uMaskNear（横幅に対する割合）と
+ * その半分の 8 方向で読み、人の画素があれば近い。keshinMasked と同じく、手前の部分には効かない
+ */
+const NEAR_PERSON_GLSL = /* glsl */ `
+uniform float uMaskNear;
+float streamNearPerson(vec3 worldPos) {
+  if (uMaskOn < 0.5 || uMaskNear <= 0.0) return 0.0;
+  if (distance(worldPos, cameraPosition) <= distance(uOwnerHead, cameraPosition) - uMaskDepthMargin) return 0.0;
+  vec2 vp = (gl_FragCoord.xy - uEyeVp.xy) / uEyeVp.zw;
+  vec2 t = (uMaskUv * vec3(vp, 1.0)).xy;
+  vec2 muv = vec2(t.x, 1.0 - t.y);
+  vec2 r = vec2(uMaskNear, uMaskNear * uMaskTexel.y / uMaskTexel.x);
+  float far = 0.0;
+  float half_ = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 0.7853982;
+    vec2 d = vec2(cos(a), sin(a)) * r;
+    far = max(far, texture2D(uMaskTex, muv + d).r);
+    half_ = max(half_, texture2D(uMaskTex, muv + d * 0.5).r);
+  }
+  // 半分の距離に人がいれば消し、縁の距離だけならなかば（境目をぼかす）
+  return max(half_, far * 0.6);
 }
 `;
 
@@ -112,13 +145,14 @@ export class BackStream {
       uR1: { value: 0.3 },
       uGrow: { value: 0 },
       uK: { value: 0 },
+      uMaskNear: { value: 0 },
       uTime: { value: 0 },
       uColA: { value: new THREE.Color(colors[0]) },
       uColB: { value: new THREE.Color(colors[1]) },
       uViewportH: { value: 800 },
     };
     const uniforms = mask ? { ...this.uniforms, ...mask.shared, ...mask.owner } : this.uniforms;
-    const maskHead = mask ? MASK_HEAD_GLSL : "";
+    const maskHead = mask ? MASK_HEAD_GLSL + NEAR_PERSON_GLSL : "float streamNearPerson(vec3 worldPos) { return 0.0; }\n";
     const maskTest = mask ? "if (keshinMasked(vWorld)) discard;" : "";
     const tubeMat = new THREE.ShaderMaterial({
       uniforms,
@@ -172,7 +206,10 @@ export class BackStream {
           // 縁ほど明るい（光の管に見える）
           vec3 v = normalize(cameraPosition - vWorld);
           float rim = 1.0 - abs(dot(v, normalize(vNormalW)));
-          float ends = smoothstep(0.0, 0.1, vT) * (1.0 - smoothstep(0.8, 1.0, vT));
+          // 人の形の縁のまわりは見せない（頭のまわりに輪として残らないように）
+          float clear = 1.0 - streamNearPerson(vWorld);
+          if (clear <= 0.0) discard;
+          float ends = clear * smoothstep(0.0, 0.1, vT) * (1.0 - smoothstep(0.8, 1.0, vT));
           float tip = 1.0 - smoothstep(uGrow - 0.06, uGrow, vT);
           float a = uK * ends * tip * (0.3 + 0.7 * flow) * (0.45 + 0.55 * rim * rim);
           gl_FragColor = vec4(mix(uColA, uColB, vT * 0.8 + 0.2 * streak) * 1.35, min(1.0, a));
@@ -224,7 +261,10 @@ export class BackStream {
           vec2 c = gl_PointCoord - 0.5;
           float d = length(c) * 2.0;
           if (d > 1.0) discard;
-          gl_FragColor = vec4(vColor, pow(1.0 - d, 1.8) * vAlpha);
+          // 帯と同じく、人の形の縁のまわりは見せない
+          float clear = 1.0 - streamNearPerson(vWorld);
+          if (clear <= 0.0) discard;
+          gl_FragColor = vec4(vColor, pow(1.0 - d, 1.8) * vAlpha * clear);
         }
       `,
     });

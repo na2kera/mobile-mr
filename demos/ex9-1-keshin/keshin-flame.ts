@@ -1,4 +1,4 @@
-// 人物から化身の頭上へ吹き上がる炎。円筒の頂点を GPU で揺らして輪郭をうねらせ、表面の模様と炎の舌の切れ目は
+// 化身の背後から頭上へ吹き上がる炎（主観は床から立ち上る柱、他人用は化身の切り口を頂点にした逆三角形。形は uFlameV）。円筒の頂点を GPU で揺らして輪郭をうねらせ、表面の模様と炎の舌の切れ目は
 // フラグメントシェーダーのノイズで作る。ワールドの形状なので左右の眼で視差が付く。画像・ポストエフェクト・毎フレームの頂点更新は不要。
 //
 // 参考動画（2026-10-02）に合わせた見え方:
@@ -39,20 +39,33 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
     side: THREE.BackSide,
     blending: THREE.NormalBlending,
     vertexShader: /* glsl */ `
-      uniform float uTime, uBurstK, uFlameH, uFlameR, uJoinY, uColumnR, uInsideFade;
+      uniform float uTime, uBurstK, uFlameH, uFlameR, uJoinY, uColumnR, uInsideFade, uFlameV;
       uniform vec3 uSwirlC;
       varying float vH, vOutK;
       varying vec2 vDir;
       varying vec3 vWorld, vRadial;
+      // 高さ y（床から）での炎の太さと、中心の奥行き（0 = 本人の足元の真上、1 = 化身の中心）
+      // 柱（uFlameV = 0。主観）: 足元は人物を包む細い柱、uJoinY から上は化身を包む太さへ。その先も上へ行くほど広がる
+      // 逆三角形（uFlameV = 1。他人用）: 化身の切り口 uJoinY で細く（uColumnR）、頂部へ直線的に uFlameR × 1.3 まで広がる。中心は化身の中心のまま
+      vec2 flameShape(float y) {
+        if (uFlameV > 0.5) {
+          float k = clamp((y - uJoinY) / max(uFlameH - uJoinY, 0.01), 0.0, 1.0);
+          return vec2(mix(uColumnR, uFlameR * 1.3, k), 1.0);
+        }
+        float join = smoothstep(uJoinY, max(uJoinY + 0.2, uSwirlC.y), y);
+        return vec2(mix(uColumnR, uFlameR, join) * (1.0 + 0.3 * y / uFlameH), join);
+      }
       void main() {
         float h = position.y;
         // 頂点の変形は角度の周期関数だけを使う（atan の ±π の跳びは sin の中で消える）
         float a = atan(position.z, position.x);
         float t = uTime * (1.0 + 0.6 * uBurstK);
-        float y = h * uFlameH;
-        // 足元は人物を包む細い柱、背中（uJoinY）から上は化身を包む太さへ。その先も上へ行くほど広がる
-        float join = smoothstep(uJoinY, max(uJoinY + 0.2, uSwirlC.y), y);
-        float baseR = mix(uColumnR, uFlameR, join) * (1.0 + 0.3 * h);
+        // 円筒の高さ 0..1 を炎の下端（柱は床、逆三角形は切り口）から頂部へ
+        float y0 = uFlameV > 0.5 ? uJoinY : 0.0;
+        float y = mix(y0, uFlameH, h);
+        vec2 shape = flameShape(y);
+        float join = shape.y;
+        float baseR = shape.x;
         // 輪郭のうねり: 周期の違う大きな膨らみが上へ流れる（上ほど大きく、出現の勢いでさらに大きく）
         float lobe = sin(a * 2.0 + y * 1.7 - t * 1.3) * 0.14
                    + sin(a * 3.0 - y * 2.9 + t * 0.9 + 1.7) * 0.10
@@ -72,16 +85,15 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         // カメラを炎の枠（足元・体の向き。回転と平行移動だけ）に戻し、その高さでの炎の中心と太さで内外を決める
         vec3 camD = cameraPosition - modelMatrix[3].xyz;
         vec3 camL = vec3(dot(modelMatrix[0].xyz, camD), dot(modelMatrix[1].xyz, camD), dot(modelMatrix[2].xyz, camD));
-        float yc = clamp(camL.y, 0.0, uFlameH);
-        float jc = smoothstep(uJoinY, max(uJoinY + 0.2, uSwirlC.y), yc);
-        float rc = mix(uColumnR, uFlameR, jc) * (1.0 + 0.3 * yc / uFlameH);
-        float dc = length(camL.xz - vec2(0.0, uSwirlC.z * jc));
+        vec2 sc = flameShape(clamp(camL.y, y0, uFlameH));
+        float rc = sc.x;
+        float dc = length(camL.xz - vec2(0.0, uSwirlC.z * sc.y));
         vOutK = mix(1.0, smoothstep(rc * 0.9, rc * 1.5, dc), uInsideFade);
         gl_Position = projectionMatrix * viewMatrix * world;
       }
     `,
     fragmentShader: /* glsl */ `
-      uniform float uTime, uAuraK, uPillarK, uBurstK, uFlameH, uFlameK, uColumnH, uColumnK, uColumnMaxH;
+      uniform float uTime, uAuraK, uPillarK, uBurstK, uFlameH, uFlameK, uColumnH, uColumnK, uColumnMaxH, uJoinY, uFlameV;
       uniform vec3 uColA, uColB, uEye;
       uniform vec2 uNear;
       varying float vH, vOutK;
@@ -94,7 +106,7 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         ${mask ? "if (keshinMasked(vWorld)) discard;" : ""}
         // 一周で 0..1（ノイズ側が周期を持つので、±π の境目でも模様がつながる）
         float u = atan(vDir.y, vDir.x) / 6.2831853 + 0.5;
-        float y = vH * uFlameH;
+        float y = mix(uFlameV > 0.5 ? uJoinY : 0.0, uFlameH, vH);
         // 主観は肩より上を描かない。正面を向くと肩より上の壁が両眼いっぱいに入るので、ノイズを計算する前に捨てる
         if (y >= uColumnMaxH) discard;
         float t = uTime * (1.0 + 0.6 * uBurstK);
@@ -121,9 +133,10 @@ export function createFlame(uniforms: WorldAuraUniforms, mask: MaskBinding | nul
         vec3 bright = mix(uColA, uColB, 0.65);
         vec3 color = mix(uColA, uColA * 0.14, core);
         color = mix(color, bright, clamp(max(rim, edge * edge) * 0.9 + streak * 0.35 * (1.0 - rim), 0.0, 1.0));
-        float foot = smoothstep(0.0, 0.05, vH);
-        // 足元から背中まで: 他人用の「足元は控えめ」（uColumnK）を炎にも掛ける（人のまわりは薄く、背中から上で濃くなる）
-        float low = mix(clamp(uColumnK, 0.0, 1.0), 1.0, smoothstep(uColumnH * 0.6, uColumnH, y));
+        // 下端はぼかす（逆三角形は頂点が平らな切り口に見えないよう長めに: 下端から 0.35m）
+        float foot = uFlameV > 0.5 ? smoothstep(uJoinY, uJoinY + 0.35, y) : smoothstep(0.0, 0.05, vH);
+        // 柱の形の足元から背中まで: 柱の粒の強さ（uColumnK）を炎にも掛ける（逆三角形は人のまわりに炎が無いので掛けない）
+        float low = uFlameV > 0.5 ? 1.0 : mix(clamp(uColumnK, 0.0, 1.0), 1.0, smoothstep(uColumnH * 0.6, uColumnH, y));
         // 主観は肩より上へ描かない。近距離フェードも粒子と共有する
         float cap = 1.0 - smoothstep(uColumnMaxH - 0.2, uColumnMaxH, y);
         float nearK = uNear.y > 0.0 ? smoothstep(uNear.x, uNear.y, distance(vWorld, uEye)) : 1.0;

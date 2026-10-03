@@ -74,8 +74,17 @@ export type WorldAuraUniforms = {
   /** 人物から化身の頭上まで伸びる炎の高さと、背中から上の基準の半径 [m]（上へ行くほど 1.3 倍まで広がる） */
   uFlameH: { value: number };
   uFlameR: { value: number };
-  /** 炎が足元の細い柱から化身を包む太さへ広がり始める高さ（床から [m]）。他人用は本人の背中から（人のまわりは細いまま） */
+  /**
+   * 炎が足元の細い柱から化身を包む太さへ広がり始める高さ（床から [m]。主観）。
+   * 逆三角形（uFlameV = 1）では炎の下端 = 頂点の高さ（化身の切り口）
+   */
   uJoinY: { value: number };
+  /**
+   * 炎の形。0 = 床から立ち上る柱（足元は半径 uColumnR、uJoinY から化身の腰へ向けて uFlameR へ広がる。主観）。
+   * 1 = 逆三角形（他人用）: 化身の切り口 uJoinY を頂点（半径 uColumnR）に、上へ直線的に広がって頂部で uFlameR × 1.3。
+   * 中心は高さによらず化身の中心（uSwirlC.xz）。床から切り口まで（人のまわり）には炎が無い
+   */
+  uFlameV: { value: number };
   /** 炎の濃さの倍率（主観は自分の体のまわりを塞がないよう薄くする） */
   uFlameK: { value: number };
   /** 見ている人が炎の内側にいるとき消すか（1 = 消す: 他人用。0 = 消さない: 主観は自分の炎の中にいる） */
@@ -88,7 +97,7 @@ export type WorldAuraUniforms = {
   uSwirlK: { value: number };
   /** 柱の粒を出す高さの上限（床から [m]。主観は肩の高さで止めて、正面を見たとき視界の中心に粒が来ないように） */
   uColumnMaxH: { value: number };
-  /** 柱の強さの倍率（段階 3 の C: 他人用は背中からの光の流れに置き換えるので控えめ） */
+  /** 柱の粒の強さの倍率（段階 3 の C: 他人用は背中からの光の流れに置き換えるので既定 0 = 人のまわりに粒を出さない） */
   uColumnK: { value: number };
   uSize: { value: number };
   uViewportH: { value: number };
@@ -120,6 +129,7 @@ export class WorldAura {
       uFlameH: { value: 3.5 },
       uFlameR: { value: 0.8 },
       uJoinY: { value: 0.2 },
+      uFlameV: { value: 0 },
       uFlameK: { value: 1 },
       uInsideFade: { value: 1 },
       uParticleK: { value: PARTICLE_K_WITH_FLAME },
