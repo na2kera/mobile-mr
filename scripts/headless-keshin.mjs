@@ -924,7 +924,7 @@ try {
   check("鏡・見え方: 支点より下へ見せた体も、人の形で隠すと本人の上に残らない（人の画素に重なる化身の画素が 50 未満）", mlOn && mlOn.inside < 50 && mlOn.changed > 3000, `inside=${mlOn?.inside} changed=${mlOn?.changed}`);
   const bands = probe?.dissolve?.bands ?? [];
   // マエストロ（KESHIN_CHECK_MIRROR_KESHIN=3）は切り口（腰の支点の 0.6m 下）の中央の列に体が無く（前布の下端より下）、溶ける長さ 0.2 では
-  // 3 つの帯がすべて空になる。切り口の高さに体が無ければ平らな切り口は出ないので、そのときは「3 つの帯がすべて空」で通す
+  // 3 つの帯がすべて空になった（0.6 では上の 2 つの帯に前布が入り、疎らの順で通る）。切り口の高さに体が無ければ平らな切り口は出ないので、そのときは「3 つの帯がすべて空」で通す
   // （魔神の蓋が出たときは 0.28 / 0 / 0 のように上の帯だけ残るので、上の帯も空であることを要求して見逃さない）
   const cutEmpty = bands.length === 3 && bands.every((b) => b < 0.02);
   check("鏡・見え方: 切り口が無い（腰の近くほど化身の画素が疎ら: 溶ける範囲の上 > 範囲の上半分 > 腰の近く、腰の近くは上の半分未満。切り口の高さに体が無ければ可）", bands.length === 3 && ((bands[0] > bands[1] && bands[1] > bands[2] && bands[2] < bands[0] * 0.5) || cutEmpty), JSON.stringify(bands.map((b) => b.toFixed(3))));
