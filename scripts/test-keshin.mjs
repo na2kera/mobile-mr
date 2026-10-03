@@ -1107,14 +1107,18 @@ const fwdNear = (f, x, z, eps = 1e-6) => f && near(f[0], x, eps) && near(f[1], z
     );
   }
   {
-    // 他人用の切り口の既定（below）: 4 体ともあり、魔神は切り口を下げない（胴の底の蓋が出るため）・マエストロは下段の手が見える 0.6 以上
+    // 他人用の切り口の既定（below）: 4 体ともあり、魔神は下半身を出して（keepLowerBodyForOther）腰〜腿の付け根まで 0.6・マエストロは下段の手が見える 0.6 以上
     const src = readFileSync(new URL("../demos/ex9-1-keshin/keshin-assets.ts", import.meta.url), "utf8");
     const below = [...src.matchAll(/^\s+below: \{ showM: ([\d.]+), dissolveM: ([\d.]+) \},/gm)].map((m) => [Number(m[1]), Number(m[2])]);
     check(
-      "KESHIN_SPECS の below: 4 体ぶん・範囲内（0〜3）、魔神 0 / マエストロ 0.6 以上",
-      below.length === KESHIN_COUNT && below.every(([a, b]) => a >= 0 && a <= 3 && b >= 0 && b <= 3) && below[0][0] === 0 && below[3][0] >= 0.6,
+      "KESHIN_SPECS の below: 4 体ぶん・範囲内（0〜3）、魔神 0.6 / 0.3 / マエストロ 0.6 以上",
+      below.length === KESHIN_COUNT && below.every(([a, b]) => a >= 0 && a <= 3 && b >= 0 && b <= 3) && below[0][0] === 0.6 && below[0][1] === 0.3 && below[3][0] >= 0.6,
       JSON.stringify(below),
     );
+    // 他人用で下半身を出すのは魔神だけ（胴の底の蓋を下半身で覆う。他の 3 体は従来どおり隠す）
+    const blocks = src.slice(src.indexOf("export const KESHIN_SPECS")).split(/^\s+index: /m).slice(1);
+    const keep = blocks.map((b) => /keepLowerBodyForOther: true/.test(b.split(/^\s+\},?\s*$/m)[0]));
+    check("KESHIN_SPECS の keepLowerBodyForOther: 魔神だけ true", keep.length === KESHIN_COUNT && keep.join() === "true,false,false,false", JSON.stringify(keep));
   }
   check("割り当て: 1 人目 0・2 人目 1・3 人目 2・4 人目 3", assignKeshin([]) === 0 && assignKeshin([0]) === 1 && assignKeshin([0, 1]) === 2 && assignKeshin([0, 1, 2]) === 3);
   check("割り当て: 5 人目は 0（全部 1 回ずつ → 最小）、6 人目は 1", assignKeshin([0, 1, 2, 3]) === 0 && assignKeshin([0, 1, 2, 3, 0]) === 1);

@@ -913,10 +913,15 @@ try {
     return { ok: e && e.drawn && e.world, e };
   }, 30000);
   await sleep(1900);
-  const mlOver = await pML.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, false)`);
   const probe = await pML.eval(`window.__keshinMirror.lookProbe(${JSON.stringify(pId)})`);
-  console.log(`mirror look: over=${JSON.stringify(mlOver)} dissolve=${JSON.stringify(probe?.dissolve)} stream=${JSON.stringify(probe?.stream && { hits: probe.stream.hits, total: probe.stream.total })}`);
-  check("鏡・見え方: 化身の体が本人の頭・肩に被らない（人の形で隠す処理を切っても、人の画素に重なる化身の画素が 50 未満）", ml?.ok && mlOver && mlOver.inside < 50 && mlOver.changed > 3000, `inside=${mlOver?.inside} changed=${mlOver?.changed}`);
+  const pivotRow = probe?.dissolve?.pivotY ?? -1;
+  const mlOver = await pML.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, false, ${pivotRow})`);
+  const mlOn = await pML.eval(`window.__keshinMirror.pixelDiff(${JSON.stringify(pId)}, true)`);
+  console.log(`mirror look: over=${JSON.stringify(mlOver)} on=${JSON.stringify(mlOn)} dissolve=${JSON.stringify(probe?.dissolve)} stream=${JSON.stringify(probe?.stream && { hits: probe.stream.hits, total: probe.stream.total })}`);
+  // 腰の支点（頭 + waistAboveHeadM）より上の化身（上半身）は、人の形で隠す処理を切っても本人の頭・肩に被らない（配置の確認）。
+  // 支点より下へ体を見せる分（below.showM。魔神は下半身ごと 0.6）は本人の頭のまわりに来るので、他の化身と同じく人の形で隠す処理に任せる（次の検査）
+  check("鏡・見え方: 腰の支点より上の化身の体が本人の頭・肩に被らない（人の形で隠す処理を切っても、支点より上で人の画素に重なる化身の画素が 50 未満）", ml?.ok && pivotRow > 0 && mlOver && mlOver.insideAbove < 50 && mlOver.changed > 3000, `insideAbove=${mlOver?.insideAbove} inside=${mlOver?.inside} pivotRow=${pivotRow} changed=${mlOver?.changed}`);
+  check("鏡・見え方: 支点より下へ見せた体も、人の形で隠すと本人の上に残らない（人の画素に重なる化身の画素が 50 未満）", mlOn && mlOn.inside < 50 && mlOn.changed > 3000, `inside=${mlOn?.inside} changed=${mlOn?.changed}`);
   const bands = probe?.dissolve?.bands ?? [];
   // マエストロ（KESHIN_CHECK_MIRROR_KESHIN=3）は切り口（腰の支点の 0.6m 下）の中央の列に体が無く（前布の下端より下）、溶ける長さ 0.2 では
   // 3 つの帯がすべて空になる。切り口の高さに体が無ければ平らな切り口は出ないので、そのときは「3 つの帯がすべて空」で通す
