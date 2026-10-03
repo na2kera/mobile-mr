@@ -48,7 +48,7 @@ export type KeshinSpec = {
   /**
    * 他人用（段階 3 の C）の腰の切り口の既定。URL の ?showBelowM= / ?dissolveM= を指定したときはそちらで全員を上書きする。
    *   showM: 切り口を腰の支点（頭 + waistAboveHeadM）より下げて体を見せる長さ [m]（ワールド。化身の位置は変えない）
-   *   dissolveM: 切り口から上のこの長さ [m] を下へ行くほど透明にする
+   *   dissolveM: 切り口から上のこの長さ [m] を下へ行くほど透明にする（残る画素の割合 = 1 − (1 − t)^dissolvePow。KeshinLook の dissolvePow）
    * 胴の底の作りがモデルごとに違う（cutY で蓋をして終わる胴は、showM ≥ dissolveM だと蓋が溶けずに平らな切り口として出る）ので化身ごと。
    * 値は look-sweep.png（scripts/sweep-keshin-look.mjs）と check:keshin の mirror-look.png を見て決めた
    */
@@ -92,8 +92,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     // 溶けずに頭のすぐ上へ平らに出た（PR #95）。2026-10-03（「上半身がぶつ切り。もうちょい下まで」）に、他人用では下半身（MTH_LowerBody。
     // 腰・脚）を隠さず蓋を覆い、切り口を 0.6 下げて腰〜腿の上部まで出して 0.3 で溶かす（look-sweep.png: 0.4 は腰の途中で本人の肩より上で
     // 切れ、0.8 は腿が本人の肩の横まで下りて人を跨ぐように見えた。0.6 は腰と腿の付け根が本人の肩の高さで溶けて終わる。
-    // 溶け 0.2 は下端のディザの帯が硬く、0.3 の方がなめらか。人の形で隠す処理を切っても平らな蓋は出ない）
-    below: { showM: 0.6, dissolveM: 0.3 },
+    // 溶け 0.2 は下端のディザの帯が硬く、0.3 の方がなめらか。人の形で隠す処理を切っても平らな蓋は出ない）。
+    // 同じ日に溶け方のカーブを 1 − (1 − t)^3 に変えて 0.3 → 0.5（腹の下〜腰が疎らに溶けて腹の上は濃い。0.6 / 0.8 は腹全体にディザの点が出た）
+    below: { showM: 0.6, dissolveM: 0.5 },
     keepLowerBodyForOther: true,
   },
   {
@@ -111,8 +112,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 胴（PA_UpperBody）の底は 2.0 前後（cutY 2.35 の 0.35 下）で蓋をして終わる。人の形で隠す処理を切って撮ると、0.6 / 溶け 0.4 は
     // 1.3m で胴の底の楕円の蓋がはっきり出て、0.4 でも縁が残った。0.3 なら蓋は切り口より下で籠手（腕当て）が下まで見える。
-    // 溶ける長さは 0.4 → 0.2（2026-10-03。籠手と腹が濃く読める。蓋は出ない）
-    below: { showM: 0.3, dissolveM: 0.2 },
+    // 溶ける長さは 0.4 → 0.2（2026-10-03。籠手と腹が濃く読める。蓋は出ない）→ 同じ日に 0.6（iPad の鏡で「上半身がぷつっと切れたよう」。
+    // 溶け方のカーブを 1 − (1 − t)^3 に変え、籠手の下 1/3 と腹の下が疎らに溶けて胸は濃い。0.8 は胸の鎧にまで点が出た。隠す処理を切っても新しい蓋は出ない）
+    below: { showM: 0.3, dissolveM: 0.6 },
   },
   {
     index: 2,
@@ -130,8 +132,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 腰装甲（草摺り）の下端は尖った形で、その下はマント（下端 0.35）と盾・剣。0.6 / 溶け 0.4 で草摺りの先まで見え、
     // 人の形で隠す処理を切っても平らな切り口は出なかった（1.3m・3.2m）。2026-10-03 に 0.9 / 溶け 0.2 へ: マントの裾が本人の肩の横まで
-    // 下りて盾・剣とともに体の下まで読める（マントの裾は尖った布の形なので平らな切り口にならない）
-    below: { showM: 0.9, dissolveM: 0.2 },
+    // 下りて盾・剣とともに体の下まで読める（マントの裾は尖った布の形なので平らな切り口にならない）。溶け 0.2 → 0.6（溶け方のカーブを
+    // 1 − (1 − t)^3 に変えた。マントの裾の先が疎らに溶け、裾から上は濃い）
+    below: { showM: 0.9, dissolveM: 0.6 },
   },
   {
     index: 3,
@@ -155,8 +158,9 @@ export const KESHIN_SPECS: readonly KeshinSpec[] = [
     self: { leanDeg: 35, faceAheadM: 0.7, backM: null },
     // 下段の手（指先 ≈ 2.05）と前布（下端 2.25）が cutY 2.5 より下にある。look-sweep.png で 0.6 / 溶け 0.4 なら下段の手 2 本と前布が読めた
     // （0.8 は 0.6 と同じ: 2.05 より下に頂点が無い）。胴の底の蓋（2.50）は前布が覆うので切り口に見えない。
-    // 溶ける長さは 0.4 → 0.2（2026-10-03。下段の手と前布が濃く読める）
-    below: { showM: 0.6, dissolveM: 0.2 },
+    // 溶ける長さは 0.4 → 0.2（2026-10-03。下段の手と前布が濃く読める）→ 同じ日に 0.6（溶け方のカーブを 1 − (1 − t)^3 に変え、下段の手と前布は
+    // 濃いまま前布の下端が溶ける）
+    below: { showM: 0.6, dissolveM: 0.6 },
     // 指揮棒（README 7 章: 上段の右手のボーン HandUp.R の子の剛体。extras の default_visible は false）を出す
     showNodes: ["Baton"],
   },
@@ -220,15 +224,19 @@ function isUnder(o: THREE.Object3D, names: readonly string[]): boolean {
 
 // ---- 1 体ぶんのインスタンス（自分用・他人用で別々に作る。マテリアルとクリッピング平面は個別）----
 
-/** 段階 3 の C: 腰の切り口を溶かす uniform（他人用。plane = 腰の切断面（ワールド。法線は上）、m = 溶ける長さ [m]、time = 揺らめき） */
+/**
+ * 段階 3 の C: 腰の切り口を溶かす uniform（他人用。plane = 腰の切断面（ワールド。法線は上）、m = 溶ける長さ [m]、time = 揺らめき、
+ * pow = 溶け方のカーブの指数（残る画素の割合 = 1 − (1 − t)^pow。t = 切り口からの高さ / m。大きいほど切り口の近くで速く濃くなる））
+ */
 export type DissolveUniforms = {
   uDissolvePlane: { value: THREE.Vector4 };
   uDissolveM: { value: number };
+  uDissolvePow: { value: number };
   uDissolveTime: { value: number };
 };
 
-export function createDissolveUniforms(m: number): DissolveUniforms {
-  return { uDissolvePlane: { value: new THREE.Vector4(0, 1, 0, 0) }, uDissolveM: { value: m }, uDissolveTime: { value: 0 } };
+export function createDissolveUniforms(m: number, pow: number): DissolveUniforms {
+  return { uDissolvePlane: { value: new THREE.Vector4(0, 1, 0, 0) }, uDissolveM: { value: m }, uDissolvePow: { value: pow }, uDissolveTime: { value: 0 } };
 }
 
 export type KeshinInstance = {
@@ -425,11 +433,14 @@ function addKeshinShader(
     }
     if (dissolve) {
       // 段階 3 の C: 腰の切断面から上 uDissolveM の範囲を、下へ行くほど画素ごとに捨てる（切り口を作らず光に溶ける）。
+      // 残る画素の割合 = 1 − (1 − t)^uDissolvePow（t = 切り口からの高さ / uDissolveM）: 切り口の近くで速く消え、上へ行くほど早く濃くなる
+      // （pow 3 なら 1/3 の高さで 7 割。溶ける範囲の体が透けて薄く見えないまま、長く溶かして平らな切り口に見せない）。
       // 高さの境目は横方向のゆっくりしたノイズで揺らめかせる。深度の前描画も同じ条件で捨てる（同じ画素は同じノイズ）
       Object.assign(shader.uniforms, dissolve);
       heads.push(
         "uniform vec4 uDissolvePlane;",
         "uniform float uDissolveM;",
+        "uniform float uDissolvePow;",
         "uniform float uDissolveTime;",
         "float kdHash(float n) { return fract(sin(n) * 43758.5453123); }",
         "float kdNoise(float x) { float i = floor(x); float f = fract(x); float u = f * f * (3.0 - 2.0 * f); return mix(kdHash(i), kdHash(i + 1.0), u); }",
@@ -438,9 +449,10 @@ function addKeshinShader(
         "{",
         "  float dh = dot(uDissolvePlane.xyz, vKeshinWorld) + uDissolvePlane.w;",
         "  float wob = (kdNoise(vKeshinWorld.x * 3.1 + vKeshinWorld.z * 2.3 + uDissolveTime * 0.8) + kdNoise(vKeshinWorld.y * 5.0 - uDissolveTime * 1.3) - 1.0) * 0.3 * uDissolveM;",
-        "  float dk = uDissolveM > 0.0 ? smoothstep(0.0, uDissolveM, dh + wob) : 1.0;",
+        "  float dt = uDissolveM > 0.0 ? clamp((dh + wob) / uDissolveM, 0.0, 1.0) : 1.0;",
+        "  float dk = 1.0 - pow(1.0 - dt, uDissolvePow);",
         "  float dn = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));",
-        "  if (dk * dk <= dn) discard;",
+        "  if (dk <= dn) discard;",
         "}",
       );
     }

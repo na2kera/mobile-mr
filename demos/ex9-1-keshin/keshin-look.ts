@@ -17,6 +17,11 @@ export type KeshinLook = {
    * null = 化身ごとの既定（KESHIN_SPECS の below.dissolveM）。URL で指定したときだけ全員を上書きする
    */
   dissolveM: number | null;
+  /**
+   * 溶け方のカーブの指数（?dissolvePow=。全員共通）。残る画素の割合 = 1 − (1 − t)^dissolvePow（t = 切り口からの高さ / dissolveM）。
+   * 1 で線形、大きいほど切り口の近くで速く消えて上はすぐ濃くなる
+   */
+  dissolvePow: number;
   /** 背中からの光の流れの太さ: 背中側・腰側の半径 [m]（?streamR0= / ?streamR1=） */
   streamR0: number;
   streamR1: number;
@@ -48,6 +53,7 @@ export const DEFAULT_LOOK: KeshinLook = {
   showBelowM: null,
   backClearM: 0.4,
   dissolveM: null,
+  dissolvePow: 3,
   streamR0: 0.07,
   streamR1: 0.32,
   streamK: 0.7,
@@ -64,6 +70,7 @@ export function lookFromParams(): KeshinLook | null {
     showBelowM: overrideParam("showBelowM", 0, 3),
     backClearM: numParam("backClearM", DEFAULT_LOOK.backClearM, { min: -2, max: 5 }),
     dissolveM: overrideParam("dissolveM", 0, 3),
+    dissolvePow: numParam("dissolvePow", DEFAULT_LOOK.dissolvePow, { min: 0.5, max: 8 }),
     streamR0: numParam("streamR0", DEFAULT_LOOK.streamR0, { min: 0, max: 2 }),
     streamR1: numParam("streamR1", DEFAULT_LOOK.streamR1, { min: 0, max: 3 }),
     streamK: numParam("streamK", DEFAULT_LOOK.streamK, { min: 0, max: 5 }),
@@ -83,5 +90,5 @@ function overrideParam(name: string, min: number, max: number): number | null {
 /** 起動時のログ・HUD 用（showBelow / dissolve の spec = 化身ごとの既定） */
 export function describeLook(l: KeshinLook | null): string {
   if (!l) return "look=0";
-  return `look waistAbove=${l.waistAboveHeadM} showBelow=${l.showBelowM ?? "spec"} backClear=${l.backClearM} dissolve=${l.dissolveM ?? "spec"} stream=${l.streamR0}/${l.streamR1}xK${l.streamK}clear${l.streamClear} footAura=${l.footAuraK}`;
+  return `look waistAbove=${l.waistAboveHeadM} showBelow=${l.showBelowM ?? "spec"} backClear=${l.backClearM} dissolve=${l.dissolveM ?? "spec"}^${l.dissolvePow} stream=${l.streamR0}/${l.streamR1}xK${l.streamK}clear${l.streamClear} footAura=${l.footAuraK}`;
 }

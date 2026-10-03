@@ -129,7 +129,7 @@ export class KeshinView {
     this.opts = { ...opts };
     this.look = opts.mode === "other" ? (opts.look ?? null) : null;
     this.below = this.look ? resolveKeshinBelow(spec.below, this.look) : null;
-    this.dissolve = this.below && this.below.dissolveM > 0 ? createDissolveUniforms(this.below.dissolveM) : null;
+    this.dissolve = this.below && this.below.dissolveM > 0 ? createDissolveUniforms(this.below.dissolveM, this.look!.dissolvePow) : null;
     this.stream = this.look && this.look.streamK > 0 ? new BackStream(spec.auraColors, this.look.streamN, this.maskBinding) : null;
     this.loaded = loaded ?? fallbackKeshin(spec);
     this.instance = this.createInstance(this.loaded);
